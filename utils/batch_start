@@ -1,0 +1,28 @@
+#!/bin/bash
+set -euo pipefail
+export JULIA_DEPOT_PATH="/scratch/09909/n8lujan99/.julia"
+export JULIA_PKG_SERVER=""
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WHICH_GAL_FILE="$REPO_ROOT/which_galaxy"
+SLURM_SCRIPT="$REPO_ROOT/Data/slurm"
+
+if [[ ! -f "$WHICH_GAL_FILE" ]]; then
+    echo "[FATAL] which_galaxy file not found"
+    exit 1
+fi
+
+GALAXY="$(tr -d '[:space:]' < "$WHICH_GAL_FILE")"
+if [[ -z "$GALAXY" ]]; then
+    echo "[FATAL] which_galaxy is empty"
+    exit 1
+fi
+
+if [[ ! -d "$REPO_ROOT/Data/Gal_Profiles/$GALAXY" ]]; then
+    echo "[FATAL] Galaxy '$GALAXY' not found"
+    exit 1
+fi
+
+mkdir -p "$REPO_ROOT/logs"
+echo "[INFO] Submitting job for galaxy: $GALAXY"
+echo "[INFO] Repo root: $REPO_ROOT"
+sbatch --export=ALL,OSPM_REPO_ROOT="$REPO_ROOT",OSPM_GALAXY="$GALAXY" "$SLURM_SCRIPT"

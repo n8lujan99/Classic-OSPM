@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "[DEBUG] Running start from: $(readlink -f "$0")"
+
+# Resolve repo root and galaxy
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WHICH_FILE="$ROOT/which_galaxy"
+if [[ ! -f "$WHICH_FILE" ]]; then
+  echo "[START] ERROR: which_galaxy file not found at $WHICH_FILE"
+  exit 1
+fi
+GALAXY="$(tr -d '[:space:]' < "$WHICH_FILE")"
+if [[ -z "$GALAXY" ]]; then
+  echo "[START] ERROR: which_galaxy is empty"
+  exit 1
+fi
+
+echo "[START] Repo root: $ROOT"
+echo "[START] Galaxy: $GALAXY"
+
+# ------------------------------------------------------------
+# Project switches
+# ------------------------------------------------------------
+export OSPM_USE_JULIA=1
+export PYJULIA_USE_PYTHONCALL=1
+export PYTHONPATH="$ROOT"
+
+# ------------------------------------------------------------
+# Julia discovery
+# ------------------------------------------------------------
+if [[ -n "${JULIA_BINDIR:-}" && -x "$JULIA_BINDIR/julia" ]]; then
+  JULIA_BIN="$JULIA_BINDIR/julia"
+elif command -v julia >/dev/null 2>&1; then
+  JULIA_BIN="$(command -v julia)"
+else
+  echo "[START] ERROR: Julia not found"
+  exit 2
+fi
+
+export OSPM_JULIA_EXE="$JULIA_BIN"
+
+echo "[START] Julia executable: $OSPM_JULIA_EXE"
+echo "[START] Python executable: $(which python)"
+python --version
+
+# ---- ENVIRONMENT DIAGNOSTIC ----
+"$JULIA_BIN" --project="$ROOT" -e 'using PythonCall; println("[START] Julia + PythonCall OK")'
+# ---- Run it ----
+
+python -m OSPM.Controllers.OSPM_RUN

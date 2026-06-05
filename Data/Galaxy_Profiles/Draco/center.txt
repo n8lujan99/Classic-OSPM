@@ -1,0 +1,6 @@
+name = Draco
+ra_deg = 260.0517
+dec_deg = 57.9153
+pa_deg = 88
+distance_kpc = 76
+source = McConnachie 2012
