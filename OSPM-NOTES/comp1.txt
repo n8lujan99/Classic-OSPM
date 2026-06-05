@@ -1,0 +1,640 @@
+# ============================================================
+# OSPM_Karl_Fortran_Compatibility_Drafts.jl
+#
+# Standalone staging file.
+#
+# Purpose:
+# Collect Julia implementations of the missing Karl-Fortran physics pieces
+# before applying them to the live OSPM files.
+#
+# This file is NOT meant to be included by the production path yet.
+# It is a review layer for:
+#   - entropy type 2 and wphase handling
+#   - Karl alphat-style objective
+#   - Karl fracnew LOSVD scoring
+#   - xmu / M-L update helpers
+#   - paired prograde-retrograde weight initialization
+#   - Karl halo density menu from halodens.f
+#   - gden-like bin-integral products
+#   - paired orbit-column deposition helper
+#
+# Assumes production constants/functions exist when copied into OSPM:
+#   G, pc, Msun, f64, _bin_index
+# ============================================================
+
+# ============================================================
+# §1  SMALL FALLBACKS FOR STANDALONE REVIEW
+# ============================================================
+
+if !@isdefined(G)
+    const G = 6.67430e-11
+end
+
+if !@isdefined(pc)
+    const pc = 3.0856775814913673e16
+end
+
+if !@isdefined(Msun)
+    const Msun = 1.98847e30
+end
+
+if !@isdefined(f64)
+    @inline f64(x) = Float64(x)
+end
+
+if !@isdefined(_bin_index)
+    @inline function _bin_index(edges::Vector{Float64}, x::Float64)
+        j = searchsortedlast(edges, x)
+        if j < 1 || j >= length(edges)
+            return 0
+        end
+        return j
+    end
+end
+
+const DEFAULT_ENTROPY_FLOOR = 1e-300
+
+
+# ============================================================
+# §2  KARL ENTROPY + WPHASE
+# ============================================================
+
+@inline function _safe_positive(x::Float64; floor::Float64=DEFAULT_ENTROPY_FLOOR)
+    return (isfinite(x) && x > floor) ? x : floor
+end
+
+function normalize_wphase(wphase, n::Int; floor::Float64=DEFAULT_ENTROPY_FLOOR)
+    if wphase === nothing
+        return ones(Float64, n)
+    end
+
+    wp = Float64.(wphase)
+    length(wp) == n || error("wphase length $(length(wp)) does not match number of orbit weights $n")
+
+    @inbounds for i in eachindex(wp)
+        wp[i] = _safe_positive(wp[i]; floor=floor)
+    end
+
+    return wp
+end
+
+function karl_entropy_type2(
+    w::Vector{Float64},
+    wphase::Vector{Float64};
+    floor::Float64=DEFAULT_ENTROPY_FLOOR,
+)
+    length(w) == length(wphase) || error("w and wphase lengths do not match")
+
+    S = 0.0
+
+    @inbounds for i in eachindex(w)
+        wi = _safe_positive(w[i]; floor=floor)
+        pi = _safe_positive(wphase[i]; floor=floor)
+        S -= wi * log(wi * pi)
+    end
+
+    return S
+end
+
+function karl_entropy_type2_grad!(
+    g::Vector{Float64},
+    w::Vector{Float64},
+    wphase::Vector{Float64};
+    floor::Float64=DEFAULT_ENTROPY_FLOOR,
+)
+    length(g) == length(w) == length(wphase) ||
+        error("gradient, w, and wphase lengths do not match")
+
+    @inbounds for i in eachindex(w)
+        wi = _safe_positive(w[i]; floor=floor)
+        pi = _safe_positive(wphase[i]; floor=floor)
+        g[i] = -1.0 - log(wi * pi)
+    end
+
+    return g
+end
+
+function karl_entropy_type2_hessian_diag!(
+    h::Vector{Float64},
+    w::Vector{Float64};
+    floor::Float64=DEFAULT_ENTROPY_FLOOR,
+)
+    length(h) == length(w) || error("hessian diagonal and w lengths do not match")
+
+    @inbounds for i in eachindex(w)
+        wi = _safe_positive(w[i]; floor=floor)
+        h[i] = -1.0 / wi
+    end
+
+    return h
+end
+
+function karl_entropy_loss_and_grad!(
+    g::Vector{Float64},
+    A::Matrix{Float64},
+    d::Vector{Float64},
+    sigma::Vector{Float64},
+    w::Vector{Float64},
+    wphase::Vector{Float64};
+    alphat::Float64=1.0,
+    entropy_floor::Float64=DEFAULT_ENTROPY_FLOOR,
+)
+    m, n = size(A)
+    length(d) == m || error("d length does not match A rows")
+    length(sigma) == m || error("sigma length does not match A rows")
+    length(w) == n || error("w length does not match A columns")
+    length(wphase) == n || error("wphase length does not match A columns")
+    length(g) == n || error("gradient length does not match A columns")
+
+    sig = max.(Float64.(sigma), 1e-12)
+    pred = A * w
+    resid = (pred .- d) ./ sig
+
+    chi = sum(resid .^ 2)
+    entropy = karl_entropy_type2(w, wphase; floor=entropy_floor)
+
+    fill!(g, 0.0)
+
+    @inbounds for j in 1:n
+        acc = 0.0
+
+        for i in 1:m
+            acc += A[i, j] * (pred[i] - d[i]) / (sig[i] * sig[i])
+        end
+
+        wi = _safe_positive(w[j]; floor=entropy_floor)
+        pi = _safe_positive(wphase[j]; floor=entropy_floor)
+        dS = -1.0 - log(wi * pi)
+
+        # Minimization form of Karl profit:
+        # loss = alphat * chi - entropy
+        g[j] = 2.0 * alphat * acc - dS
+    end
+
+    loss = alphat * chi - entropy
+    profit = entropy - alphat * chi
+
+    return loss, chi, entropy, profit
+end
+
+
+# ============================================================
+# §3  KARL FRACNEW LOSVD SCORING
+# ============================================================
+
+function chi2_block_karl_fracnew(
+    A_losvd::Matrix{Float64},
+    w::Vector{Float64},
+    observed::Vector{Float64},
+    sigma::Vector{Float64},
+    Nspatial::Int,
+    Nvbin::Int;
+    invalid_sigma_sentinel::Float64=-666.0,
+    huge_den::Float64=(1e6)^2,
+)
+    length(observed) == Nspatial * Nvbin ||
+        error("observed length does not match Nspatial*Nvbin")
+    length(sigma) == length(observed) ||
+        error("sigma length does not match observed length")
+
+    model = A_losvd * w
+    chi_total = 0.0
+    chi_by_spatial = zeros(Float64, Nspatial)
+
+    @inbounds for ib in 1:Nspatial
+        rows = ((ib - 1) * Nvbin + 1):(ib * Nvbin)
+
+        sumt = 0.0
+        sumt2 = 0.0
+
+        for row in rows
+            sumt += model[row]
+
+            if sigma[row] != invalid_sigma_sentinel
+                sumt2 += model[row]
+            end
+        end
+
+        fracnew = (isfinite(sumt) && abs(sumt) > 1e-300) ? sumt2 / sumt : 1.0
+
+        for row in rows
+            res = observed[row] * fracnew - model[row]
+
+            den = if sigma[row] == invalid_sigma_sentinel
+                huge_den
+            else
+                (max(abs(sigma[row] * fracnew), 1e-12))^2
+            end
+
+            c = (res * res) / den
+            chi_total += c
+            chi_by_spatial[ib] += c
+        end
+    end
+
+    return chi_total, chi_by_spatial
+end
+
+
+# ============================================================
+# §4  XMU / M-L UPDATE HELPERS
+# ============================================================
+
+function losvd_width_at_fraction(v::Vector{Float64}, f::Vector{Float64}, frac::Float64)
+    length(v) == length(f) || error("velocity and LOSVD arrays must match")
+    length(v) >= 2 || return NaN
+
+    fmax = maximum(f)
+    !(isfinite(fmax) && fmax > 0.0) && return NaN
+
+    level = frac * fmax
+    inds = findall(x -> isfinite(x) && x >= level, f)
+    isempty(inds) && return NaN
+
+    return maximum(v[inds]) - minimum(v[inds])
+end
+
+function karl_update_xmu_from_fwhm(
+    xmu::Float64,
+    model_losvd_by_bin::Vector{Vector{Float64}},
+    data_losvd_by_bin::Vector{Vector{Float64}},
+    velocity_centers_by_bin::Vector{Vector{Float64}};
+    apfacmu::Float64=1.0,
+    fractions::NTuple{2,Float64}=(0.25, 0.50),
+)
+    length(model_losvd_by_bin) == length(data_losvd_by_bin) == length(velocity_centers_by_bin) ||
+        error("LOSVD bin collections must have matching lengths")
+
+    sxmu = 0.0
+    nuse = 0
+
+    for ib in eachindex(model_losvd_by_bin)
+        model = model_losvd_by_bin[ib]
+        data = data_losvd_by_bin[ib]
+        vel = velocity_centers_by_bin[ib]
+
+        for frac in fractions
+            fwm = losvd_width_at_fraction(vel, model, frac)
+            fwd = losvd_width_at_fraction(vel, data, frac)
+
+            if isfinite(fwm) && isfinite(fwd) && fwd > 0.0
+                sxmu += fwm / fwd
+                nuse += 1
+            end
+        end
+    end
+
+    nuse > 0 || return xmu, NaN, NaN
+
+    sxmu /= nuse
+    pml_xmu = xmu + xmu * (sxmu - 1.0)
+    xmu_new = xmu + apfacmu * xmu * (sxmu - 1.0)
+
+    return xmu_new, sxmu, pml_xmu
+end
+
+@inline function karl_ml_from_xmu(xmu::Float64)
+    return xmu > 0.0 ? 1.0 / (xmu * xmu) : Inf
+end
+
+
+# ============================================================
+# §5  KARL INITIAL WEIGHTS FROM WPHASE
+# ============================================================
+
+function karl_initial_weights_from_wphase(
+    wphase::Vector{Float64};
+    paired::Bool=false,
+    rotfrac::Float64=0.75,
+    floor::Float64=DEFAULT_ENTROPY_FLOOR,
+)
+    n = length(wphase)
+    n > 0 || return Float64[]
+
+    w = zeros(Float64, n)
+
+    if paired
+        iseven(n) || error("paired Karl initial weights require an even number of orbit columns")
+
+        Norb = n ÷ 2
+
+        @inbounds for i in 1:Norb
+            ip = 2 * i - 1
+            ir = 2 * i
+
+            wp = _safe_positive(wphase[ip]; floor=floor)
+            wr = _safe_positive(wphase[ir]; floor=floor)
+
+            w[ip] = rotfrac / wp
+            w[ir] = (1.0 - rotfrac) / wr
+        end
+    else
+        @inbounds for i in 1:n
+            wp = _safe_positive(wphase[i]; floor=floor)
+            w[i] = 1.0 / wp
+        end
+    end
+
+    s = sum(w)
+    (!isfinite(s) || s <= 0.0) && error("Karl initial weights have non-positive sum")
+
+    w ./= s
+    return w
+end
+
+
+# ============================================================
+# §6  KARL HALO DENSITY MENU
+# ============================================================
+
+@inline function karl_m_ellipsoidal(r::Float64, theta::Float64, qdm::Float64)
+    q = max(abs(qdm), 1e-6)
+    cth = cos(theta)
+    sth = sin(theta)
+    return r * sqrt(cth * cth + (sth * sth) / (q * q))
+end
+
+@inline function karl_halo_density_dehnen_plummer(
+    r::Float64,
+    theta::Float64;
+    qdm::Float64,
+    xmgamma::Float64,
+    rsgamma_pc::Float64,
+    gamma::Float64,
+)
+    m = max(karl_m_ellipsoidal(r, theta, qdm), 1e-30)
+    a = max(rsgamma_pc, 1e-30)
+
+    if gamma != 0.0
+        return xmgamma / (4.0 * pi) * (3.0 - gamma) * a /
+            (m^gamma * (a + m)^(4.0 - gamma))
+    else
+        return 3.0 * xmgamma / (4.0 * pi * a^3) *
+            (1.0 + (m / a)^2)^(-2.5)
+    end
+end
+
+@inline function karl_halo_density_nfw_concentration(
+    r::Float64,
+    theta::Float64;
+    qdm::Float64,
+    cnfw::Float64,
+    rsnfw_pc::Float64,
+    hparam::Float64=70.0,
+)
+    m = max(karl_m_ellipsoidal(r, theta, qdm), 1e-30)
+    rs = max(rsnfw_pc, 1e-30)
+
+    xhparam = hparam / 100.0
+    rhocrit = 2.7754996776e-7 * xhparam^2
+    c = max(cnfw, 1e-30)
+
+    xd = 200.0 / 3.0 * c^3 / (log(1.0 + c) - c / (1.0 + c))
+    x = m / rs
+
+    return rhocrit * xd / (x * (1.0 + x)^2 + 1e-30)
+end
+
+@inline function karl_halo_density_isothermal_spheroid(
+    r::Float64,
+    theta::Float64;
+    qdm::Float64,
+    v0::Float64,
+    rc_pc::Float64,
+    dis::Float64,
+)
+    q = max(abs(qdm), 1e-6)
+    rc = max(rc_pc, 1e-30)
+
+    # Karl halodens.f convention:
+    # xR = r*cos(theta), xZ = r*sin(theta)
+    xR = r * cos(theta)
+    xZ = r * sin(theta)
+
+    xrho = 0.78722918 / (dis * dis)
+    xrho *= v0 * v0 / (q * q)
+
+    num = (2.0 * q * q + 1.0) * rc * rc +
+        xR * xR +
+        2.0 * (1.0 - 0.5 / (q * q)) * xZ * xZ
+
+    den = (rc * rc + xR * xR + xZ * xZ / (q * q))^2
+
+    return xrho * num / max(den, 1e-30)
+end
+
+function karl_halo_from_params(;
+    ihalo::Int=4,
+    qdm::Float64=1.0,
+    dis::Float64=1.0,
+    v0::Float64=0.0,
+    rc_pc::Float64=1.0,
+    xmgamma::Float64=0.0,
+    rsgamma_pc::Float64=1.0,
+    gamma::Float64=1.0,
+    cnfw::Float64=1.0,
+    rsnfw_pc::Float64=1.0,
+    gdennorm::Float64=1.0,
+)
+    return Dict{Symbol,Any}(
+        :type => :karl_halo,
+        :ihalo => ihalo,
+        :qdm => qdm,
+        :dis => dis,
+        :v0 => v0,
+        :rc_pc => rc_pc,
+        :xmgamma => xmgamma,
+        :rsgamma_pc => rsgamma_pc,
+        :gamma => gamma,
+        :cnfw => cnfw,
+        :rsnfw_pc => rsnfw_pc,
+        :gdennorm => gdennorm,
+    )
+end
+
+function rho_interp_karl_halo(rv, halo)
+    r = abs(f64(rv[1]))
+    theta = length(rv) >= 2 ? f64(rv[2]) : pi / 2
+
+    ihalo = Int(get(halo, :ihalo, 4))
+    qdm = f64(get(halo, :qdm, 1.0))
+
+    if ihalo == 1
+        rho_msun_pc3 = karl_halo_density_dehnen_plummer(
+            r,
+            theta;
+            qdm=qdm,
+            xmgamma=f64(get(halo, :xmgamma, 0.0)),
+            rsgamma_pc=f64(get(halo, :rsgamma_pc, get(halo, :rsgamma, 1.0))),
+            gamma=f64(get(halo, :gamma, 1.0)),
+        )
+
+    elseif ihalo == 2
+        rho_msun_pc3 = karl_halo_density_nfw_concentration(
+            r,
+            theta;
+            qdm=qdm,
+            cnfw=f64(get(halo, :cnfw, 1.0)),
+            rsnfw_pc=f64(get(halo, :rsnfw_pc, get(halo, :rsnfw, 1.0))),
+        )
+
+    elseif ihalo == 3
+        rho_msun_pc3 = karl_halo_density_isothermal_spheroid(
+            r,
+            theta;
+            qdm=qdm,
+            v0=f64(get(halo, :v0, 0.0)),
+            rc_pc=f64(get(halo, :rc_pc, get(halo, :rc, 1.0))),
+            dis=f64(get(halo, :dis, 1.0)),
+        )
+
+    elseif ihalo == 4
+        rho_msun_pc3 = 0.0
+
+    else
+        error("Unknown Karl ihalo value: $ihalo")
+    end
+
+    return rho_msun_pc3 * Msun / pc^3
+end
+
+
+# ============================================================
+# §7  GDEN-LIKE BIN INTEGRALS
+# ============================================================
+
+function integrate_axisymmetric_bin_mass(
+    rho_func,
+    rlo::Float64,
+    rhi::Float64,
+    thlo::Float64,
+    thhi::Float64;
+    nr::Int=32,
+    nth::Int=32,
+)
+    rs = collect(range(rlo, rhi; length=nr + 1))
+    ths = collect(range(thlo, thhi; length=nth + 1))
+
+    total = 0.0
+
+    @inbounds for ir in 1:nr
+        r0 = rs[ir]
+        r1 = rs[ir + 1]
+        rm = 0.5 * (r0 + r1)
+        dr = r1 - r0
+
+        for it in 1:nth
+            t0 = ths[it]
+            t1 = ths[it + 1]
+            tm = 0.5 * (t0 + t1)
+
+            dΩ = 2.0 * pi * abs(cos(t0) - cos(t1))
+            dV = rm * rm * dr * dΩ
+
+            total += rho_func(rm, tm) * dV
+        end
+    end
+
+    return total
+end
+
+function build_gden_like_products(
+    radial_edges::Vector{Float64},
+    theta_edges::Vector{Float64};
+    stellar_lum_density_func,
+    stellar_mass_density_func,
+    halo_mass_density_func,
+)
+    Nr = length(radial_edges) - 1
+    Nt = length(theta_edges) - 1
+    Nr > 0 || error("radial_edges must contain at least two values")
+    Nt > 0 || error("theta_edges must contain at least two values")
+
+    dL = zeros(Float64, Nr, Nt)
+    dM = zeros(Float64, Nr, Nt)
+    dMhalo = zeros(Float64, Nr, Nt)
+    ratML = zeros(Float64, Nr, Nt)
+
+    @inbounds for ir in 1:Nr
+        rlo = radial_edges[ir]
+        rhi = radial_edges[ir + 1]
+
+        for it in 1:Nt
+            thlo = theta_edges[it]
+            thhi = theta_edges[it + 1]
+
+            dL[ir, it] = integrate_axisymmetric_bin_mass(stellar_lum_density_func, rlo, rhi, thlo, thhi)
+            dM[ir, it] = integrate_axisymmetric_bin_mass(stellar_mass_density_func, rlo, rhi, thlo, thhi)
+            dMhalo[ir, it] = integrate_axisymmetric_bin_mass(halo_mass_density_func, rlo, rhi, thlo, thhi)
+
+            ratML[ir, it] = dL[ir, it] > 0.0 ? dM[ir, it] / dL[ir, it] : NaN
+        end
+    end
+
+    return (
+        dL = dL,
+        dM = dM,
+        dMhalo = dMhalo,
+        ratML = ratML,
+        total_light = sum(dL),
+        total_stellar_mass = sum(dM),
+        total_halo_mass = sum(dMhalo),
+    )
+end
+
+
+# ============================================================
+# §8  PAIRED ORBIT-COLUMN DEPOSITION
+# ============================================================
+
+function deposit_orbit_column_pair!(
+    A_losvd::Matrix{Float64},
+    A_light::Matrix{Float64},
+    col_pro::Int,
+    col_retro::Int,
+    s_arr::Vector{Float64},
+    vlos_arr::Vector{Float64},
+    spatial_edges::Vector{Float64},
+    velocity_edges::Vector{Float64},
+    Nspatial::Int,
+    Nvbin::Int,
+)
+    col_losvd_pro = zeros(Float64, Nspatial * Nvbin)
+    col_losvd_ret = zeros(Float64, Nspatial * Nvbin)
+    col_light = zeros(Float64, Nspatial)
+
+    Nhits = length(s_arr)
+    length(vlos_arr) == Nhits || error("s_arr and vlos_arr lengths do not match")
+
+    @inbounds for k in 1:Nhits
+        ib = _bin_index(spatial_edges, s_arr[k])
+        ib == 0 && continue
+
+        col_light[ib] += 1.0
+
+        jb_pro = _bin_index(velocity_edges, vlos_arr[k])
+        if jb_pro > 0
+            row = (ib - 1) * Nvbin + jb_pro
+            col_losvd_pro[row] += 1.0
+        end
+
+        jb_ret = _bin_index(velocity_edges, -vlos_arr[k])
+        if jb_ret > 0
+            row = (ib - 1) * Nvbin + jb_ret
+            col_losvd_ret[row] += 1.0
+        end
+    end
+
+    if Nhits > 0
+        col_light ./= Nhits
+        col_losvd_pro ./= Nhits
+        col_losvd_ret ./= Nhits
+    end
+
+    @inbounds A_losvd[:, col_pro] .= col_losvd_pro
+    @inbounds A_losvd[:, col_retro] .= col_losvd_ret
+    @inbounds A_light[:, col_pro] .= col_light
+    @inbounds A_light[:, col_retro] .= col_light
+
+    return nothing
+end
