@@ -1,0 +1,26 @@
+ERROR: ArgumentError: Package PythonCall [6099a3de-0909-46bc-b1f4-468b9a2dfc0d] is required but does not seem to be installed:
+ - Run `Pkg.instantiate()` to install all recorded dependencies.
+
+Stacktrace:
+  [1] _require(pkg::Base.PkgId, env::String)
+    @ Base ./loading.jl:1996
+  [2] __require_prelocked(uuidkey::Base.PkgId, env::String)
+    @ Base ./loading.jl:1882
+  [3] #invoke_in_world#3
+    @ ./essentials.jl:926 [inlined]
+  [4] invoke_in_world
+    @ ./essentials.jl:923 [inlined]
+  [5] _require_prelocked(uuidkey::Base.PkgId, env::String)
+    @ Base ./loading.jl:1873
+  [6] macro expansion
+    @ ./loading.jl:1860 [inlined]
+  [7] macro expansion
+    @ ./lock.jl:267 [inlined]
+  [8] __require(into::Module, mod::Symbol)
+    @ Base ./loading.jl:1823
+  [9] #invoke_in_world#3
+    @ ./essentials.jl:926 [inlined]
+ [10] invoke_in_world
+    @ ./essentials.jl:923 [inlined]
+ [11] require(into::Module, mod::Symbol)
+    @ Base ./loading.jl:1816

@@ -1,0 +1,79 @@
+#!/bin/bash
+#SBATCH -J OSPM_Run
+#SBATCH -o logs/OSPM_%j.out
+#SBATCH -e logs/OSPM_%j.err
+#SBATCH -p anantuabhg
+#SBATCH -A anantuabhg
+#SBATCH -N 1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=80
+#SBATCH -t 24:00:00
+set -euo pipefail
+GALAXY="${OSPM_GALAXY:-unknown}"
+echo "===== SLURM ENVIRONMENT ====="
+echo "Galaxy: $GALAXY"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $(hostname)"
+echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
+echo "Start time: $(date)"
+echo "============================="
+cd "$OSPM_REPO_ROOT"
+mkdir -p logs/$GALAXY
+exec > >(tee logs/$GALAXY/${GALAXY}_${SLURM_JOB_ID}.out)
+exec 2> >(tee logs/$GALAXY/${GALAXY}_${SLURM_JOB_ID}.err >&2)
+
+module purge
+module load julia/1.10.9
+# ------------------------------------------------------------
+# Python / conda environment
+# ------------------------------------------------------------
+CONDA_ROOT="$HOME/miniconda3"
+CONDA_ENV_NAME="ospm"
+CONDA_ENV_PATH="$CONDA_ROOT/envs/$CONDA_ENV_NAME"
+
+if [[ -f "$CONDA_ROOT/etc/profile.d/conda.sh" ]]; then
+    echo "[SLURM] Loading conda from: $CONDA_ROOT"
+    source "$CONDA_ROOT/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV_NAME"
+elif [[ -x "$CONDA_ENV_PATH/bin/python" ]]; then
+    echo "[SLURM] conda.sh not found, using env PATH directly:"
+    echo "        $CONDA_ENV_PATH"
+    export PATH="$CONDA_ENV_PATH/bin:$PATH"
+else
+    echo "[SLURM] ERROR: Could not find conda env:"
+    echo "        $CONDA_ENV_PATH"
+    exit 1
+fi
+
+echo "[SLURM] Python: $(which python)"
+python --version
+
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/scratch/09909/n8lujan99/.julia}"
+export JULIA_PKG_SERVER=""
+export JULIA_PYTHONCALL_EXE="$(which python)"
+
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export JULIA_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export PYTHONUNBUFFERED=1
+export PYTHON_JULIACALL_HANDLE_SIGNALS=yes
+export PYJULIA_USE_PYTHONCALL=1
+export OSPM_USE_JULIA=1
+export JULIA_PROJECT="$OSPM_REPO_ROOT"
+export PYTHON_JULIACALL_EXE=/apps/julia/1.10.9/bin/julia
+echo "Python: $(which python)"
+python --version
+echo "Julia: $(which julia)"
+julia --project="$OSPM_REPO_ROOT" -e 'using Pkg; println("Julia threads: ", Threads.nthreads()); println("Julia project: ", Base.active_project())'
+echo "PYTHON_JULIACALL_EXE=$PYTHON_JULIACALL_EXE"
+echo "JULIA_PROJECT=$JULIA_PROJECT"
+echo "Launching OSPM..."
+echo "Galaxy file contents: $(cat which_galaxy)"
+python - <<EOF
+import os
+print("cwd:", os.getcwd())
+print("venv python:", os.popen("which python").read().strip())
+EOF
+bash utils/start
+echo "End time: $(date)"

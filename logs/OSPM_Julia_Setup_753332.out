@@ -1,0 +1,9 @@
+[SETUP] Repo: /work/mez653/Classic-OSPM
+[SETUP] Python: /home/mez653/miniconda3/envs/ospm/bin/python
+Python 3.11.14
+[SETUP] Julia: /apps/julia/1.10.9/bin/julia
+julia version 1.10.9
+[SETUP] JULIA_DEPOT_PATH=/scratch/09909/n8lujan99/.julia
+[SETUP] JULIA_PROJECT=/work/mez653/Classic-OSPM
+[SETUP] JULIA_PYTHONCALL_EXE=/home/mez653/miniconda3/envs/ospm/bin/python
+[OK] PythonCall installed and importable
