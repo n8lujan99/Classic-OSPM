@@ -20,88 +20,44 @@
     return r * sqrt(cth * cth + (sth * sth) / (q * q))
 end
 
-@inline function karl_halo_density_dehnen_plummer(
-    r::Float64,
-    theta::Float64;
-    qdm::Float64,
-    xmgamma::Float64,
-    rsgamma_pc::Float64,
-    gamma::Float64,
-)
+@inline function karl_halo_density_dehnen_plummer(r::Float64, theta::Float64; qdm::Float64, xmgamma::Float64, rsgamma_pc::Float64, gamma::Float64)
     m = max(karl_m_ellipsoidal(r, theta, qdm), 1e-30)
     a = max(rsgamma_pc, 1e-30)
-
     if gamma != 0.0
-        return xmgamma / (4.0 * pi) * (3.0 - gamma) * a /
-            (m^gamma * (a + m)^(4.0 - gamma))
+        return xmgamma / (4.0 * pi) * (3.0 - gamma) * a / (m^gamma * (a + m)^(4.0 - gamma))
     else
-        return 3.0 * xmgamma / (4.0 * pi * a^3) *
-            (1.0 + (m / a)^2)^(-2.5)
+        return 3.0 * xmgamma / (4.0 * pi * a^3) * (1.0 + (m / a)^2)^(-2.5)
     end
 end
 
-@inline function karl_halo_density_nfw_concentration(
-    r::Float64,
-    theta::Float64;
-    qdm::Float64,
-    cnfw::Float64,
-    rsnfw_pc::Float64,
-    hparam::Float64=70.0,
-)
+@inline function karl_halo_density_nfw_concentration(r::Float64, theta::Float64; qdm::Float64, cnfw::Float64, rsnfw_pc::Float64, hparam::Float64=70.0)
     m = max(karl_m_ellipsoidal(r, theta, qdm), 1e-30)
     rs = max(rsnfw_pc, 1e-30)
-
     xhparam = hparam / 100.0
     rhocrit = 2.7754996776e-7 * xhparam^2
     c = max(cnfw, 1e-30)
-
     xd = 200.0 / 3.0 * c^3 / (log(1.0 + c) - c / (1.0 + c))
     x = m / rs
 
     return rhocrit * xd / (x * (1.0 + x)^2 + 1e-30)
 end
 
-@inline function karl_halo_density_isothermal_spheroid(
-    r::Float64,
-    theta::Float64;
-    qdm::Float64,
-    v0::Float64,
-    rc_pc::Float64,
-    dis::Float64,
-)
+@inline function karl_halo_density_isothermal_spheroid(r::Float64, theta::Float64; qdm::Float64, v0::Float64, rc_pc::Float64, dis::Float64)
     q = max(abs(qdm), 1e-6)
     rc = max(rc_pc, 1e-30)
-
     # Karl halodens.f convention:
     # xR = r*cos(theta), xZ = r*sin(theta)
     xR = r * cos(theta)
     xZ = r * sin(theta)
-
     xrho = 0.78722918 / (dis * dis)
     xrho *= v0 * v0 / (q * q)
-
-    num = (2.0 * q * q + 1.0) * rc * rc +
-        xR * xR +
-        2.0 * (1.0 - 0.5 / (q * q)) * xZ * xZ
-
+    num = (2.0 * q * q + 1.0) * rc * rc + xR * xR + 2.0 * (1.0 - 0.5 / (q * q)) * xZ * xZ
     den = (rc * rc + xR * xR + xZ * xZ / (q * q))^2
 
     return xrho * num / max(den, 1e-30)
 end
 
-function karl_halo_from_params(;
-    ihalo::Int=4,
-    qdm::Float64=1.0,
-    dis::Float64=1.0,
-    v0::Float64=0.0,
-    rc_pc::Float64=1.0,
-    xmgamma::Float64=0.0,
-    rsgamma_pc::Float64=1.0,
-    gamma::Float64=1.0,
-    cnfw::Float64=1.0,
-    rsnfw_pc::Float64=1.0,
-    gdennorm::Float64=1.0,
-)
+function karl_halo_from_params(; ihalo::Int=4, qdm::Float64=1.0, dis::Float64=1.0, v0::Float64=0.0, rc_pc::Float64=1.0, xmgamma::Float64=0.0, rsgamma_pc::Float64=1.0, gamma::Float64=1.0, cnfw::Float64=1.0, rsnfw_pc::Float64=1.0, gdennorm::Float64=1.0)
     return Dict{Symbol,Any}(
         :type => :karl_halo,
         :ihalo => ihalo,
@@ -121,27 +77,7 @@ end
 
 @inline function karl_halo_sig(halo)
     h = normalize_halo(halo)
-
-    return hash((
-        get(h, :type, nothing),
-        get(h, :ihalo, nothing),
-        get(h, :qdm, nothing),
-        get(h, :dis, nothing),
-        get(h, :v0, nothing),
-        get(h, :rc_pc, get(h, :rc, nothing)),
-        get(h, :xmgamma, nothing),
-        get(h, :rsgamma_pc, get(h, :rsgamma, nothing)),
-        get(h, :gamma, nothing),
-        get(h, :cnfw, nothing),
-        get(h, :rsnfw_pc, get(h, :rsnfw, nothing)),
-        get(h, :gdennorm, nothing),
-        get(h, :halo_force_nR, nothing),
-        get(h, :halo_force_nZ, nothing),
-        get(h, :halo_force_nphi, nothing),
-        get(h, :halo_force_nm, nothing),
-        get(h, :halo_force_ntheta, nothing),
-        get(h, :halo_force_softening_pc, nothing),
-    ))
+    return hash((get(h, :type, nothing), get(h, :ihalo, nothing), get(h, :qdm, nothing), get(h, :dis, nothing), get(h, :v0, nothing), get(h, :rc_pc, get(h, :rc, nothing)), get(h, :xmgamma, nothing), get(h, :rsgamma_pc, get(h, :rsgamma, nothing)), get(h, :gamma, nothing), get(h, :cnfw, nothing), get(h, :rsnfw_pc, get(h, :rsnfw, nothing)), get(h, :gdennorm, nothing), get(h, :halo_force_nR, nothing), get(h, :halo_force_nZ, nothing), get(h, :halo_force_nphi, nothing), get(h, :halo_force_nm, nothing), get(h, :halo_force_ntheta, nothing), get(h, :halo_force_softening_pc, nothing)))
 end
 
 @inline function _theta_from_cylindrical_Rz(R::Float64, z::Float64)
@@ -158,57 +94,28 @@ end
     return rho_interp_karl_halo((r, theta), halo)
 end
 
-
 function rho_interp_karl_halo(rv, halo)
     r = abs(f64(rv[1]))
     theta = length(rv) >= 2 ? f64(rv[2]) : pi / 2
-
     ihalo = Int(get(halo, :ihalo, 4))
     qdm = f64(get(halo, :qdm, get(halo, :halo_q_axis_ratio, 1.0)))
-
     if ihalo == 1
-        rho_msun_pc3 = karl_halo_density_dehnen_plummer(
-            r,
-            theta;
-            qdm=qdm,
-            xmgamma=f64(get(halo, :xmgamma, 0.0)),
-            rsgamma_pc=f64(get(halo, :rsgamma_pc, get(halo, :rsgamma, 1.0))),
-            gamma=f64(get(halo, :gamma, 1.0)),
-        )
-
+        rho_msun_pc3 = karl_halo_density_dehnen_plummer(r, theta; qdm=qdm, xmgamma=f64(get(halo, :xmgamma, 0.0)), rsgamma_pc=f64(get(halo, :rsgamma_pc, get(halo, :rsgamma, 1.0))), gamma=f64(get(halo, :gamma, 1.0)))
     elseif ihalo == 2
-        rho_msun_pc3 = karl_halo_density_nfw_concentration(
-            r,
-            theta;
-            qdm=qdm,
-            cnfw=f64(get(halo, :cnfw, 1.0)),
-            rsnfw_pc=f64(get(halo, :rsnfw_pc, get(halo, :rsnfw, 1.0))),
-        )
-
+        rho_msun_pc3 = karl_halo_density_nfw_concentration(r, theta; qdm=qdm, cnfw=f64(get(halo, :cnfw, 1.0)), rsnfw_pc=f64(get(halo, :rsnfw_pc, get(halo, :rsnfw, 1.0))))
     elseif ihalo == 3
-        rho_msun_pc3 = karl_halo_density_isothermal_spheroid(
-            r,
-            theta;
-            qdm=qdm,
-            v0=f64(get(halo, :v0, 0.0)),
-            rc_pc=f64(get(halo, :rc_pc, get(halo, :rc, 1.0))),
-            dis=f64(get(halo, :dis, 1.0)),
-        )
-
+        rho_msun_pc3 = karl_halo_density_isothermal_spheroid(r, theta; qdm=qdm, v0=f64(get(halo, :v0, 0.0)), rc_pc=f64(get(halo, :rc_pc, get(halo, :rc, 1.0))), dis=f64(get(halo, :dis, 1.0)))
     elseif ihalo == 4
         rho_msun_pc3 = 0.0
-
     else
         error("Unknown Karl ihalo value: $ihalo")
     end
-
     return rho_msun_pc3 * Msun / pc^3
 end
 
 function rho_interp(rv, halo)
     halo[:type] === :karl_halo &&
         return rho_interp_karl_halo(rv, halo)
-
     r    = abs(rv[1])
     rhos = halo[:rho_s]
     rs   = halo[:r_s]
@@ -294,33 +201,10 @@ end
     geom  = Symbol(lowercase(String(get(sm, :geometry, :spherical_shell_grid))))
 
     if stype === :plummer
-        return hash((
-            stype,
-            geom,
-            get(sm, :Ltot, nothing),
-            get(sm, :a_pc, nothing),
-        ))
+        return hash((stype, geom, get(sm, :Ltot, nothing), get(sm, :a_pc, nothing)))
 
     elseif stype === :karl_light_grid
-        return hash((
-            stype,
-            geom,
-            get(sm, :grid_csv, nothing),
-            get(sm, :Ltot, nothing),
-            get(sm, :radius_col, nothing),
-            get(sm, :theta_col, nothing),
-            get(sm, :nu_col, nothing),
-            get(sm, :lenc_frac_col, nothing),
-            get(sm, :R_cyl_col, nothing),
-            get(sm, :z_col, nothing),
-            get(sm, :volume_col, nothing),
-            get(sm, :luminosity_col, nothing),
-            get(sm, :q_axis_ratio, nothing),
-            get(sm, :force_softening_pc, nothing),
-            get(sm, :force_nR, nothing),
-            get(sm, :force_nZ, nothing),
-            get(sm, :force_nphi, nothing),
-        ))
+        return hash((stype, geom, get(sm, :grid_csv, nothing), get(sm, :Ltot, nothing), get(sm, :radius_col, nothing), get(sm, :theta_col, nothing), get(sm, :nu_col, nothing), get(sm, :lenc_frac_col, nothing), get(sm, :R_cyl_col, nothing), get(sm, :z_col, nothing), get(sm, :volume_col, nothing), get(sm, :luminosity_col, nothing), get(sm, :q_axis_ratio, nothing), get(sm, :force_softening_pc, nothing), get(sm, :force_nR, nothing), get(sm, :force_nZ, nothing), get(sm, :force_nphi, nothing)))
     end
 
     return hash((stype, geom, get(sm, :Ltot, nothing)))
@@ -404,8 +288,7 @@ function build_axisymmetric_light_grid_model(stellar_model)
 
     sm = normalize_stellar_model(stellar_model)
     geom = stellar_model_geometry(sm)
-    geom === :axisymmetric_density_grid ||
-        error("build_axisymmetric_light_grid_model requires geometry='axisymmetric_density_grid'")
+    geom === :axisymmetric_density_grid || error("build_axisymmetric_light_grid_model requires geometry='axisymmetric_density_grid'")
     path = String(sm[:grid_csv])
     _, colfloat = _read_karl_light_grid(path)
 
@@ -433,8 +316,7 @@ function build_axisymmetric_light_grid_model(stellar_model)
         L_cell = nu .* vol
     end
 
-    length(R_pc) == length(z_pc) == length(L_cell) ||
-        error("axisymmetric grid R, z, and luminosity lengths do not match")
+    length(R_pc) == length(z_pc) == length(L_cell) || error("axisymmetric grid R, z, and luminosity lengths do not match")
 
     good = isfinite.(R_pc) .& isfinite.(z_pc) .& isfinite.(L_cell) .& (L_cell .>= 0.0)
 
@@ -447,15 +329,14 @@ function build_axisymmetric_light_grid_model(stellar_model)
     Ltot = f64(sm[:Ltot])
     Lsum = sum(L_cell)
 
-    (!isfinite(Lsum) || Lsum <= 0.0) &&
-        error("axisymmetric grid luminosity sum is non-positive")
+    (!isfinite(Lsum) || Lsum <= 0.0) && error("axisymmetric grid luminosity sum is non-positive")
 
     L_cell .*= Ltot / Lsum
 
     q = haskey(sm, :q_axis_ratio) ? f64(sm[:q_axis_ratio]) : 1.0
     soft_pc = haskey(sm, :force_softening_pc) ? f64(sm[:force_softening_pc]) : 0.5
 
-    return ( R_m = Float64.(R_pc) .* pc, z_m = Float64.(z_pc) .* pc, L_cell = Float64.(L_cell), q = q, soft_m = soft_pc * pc, Ltot = Ltot)
+    return (R_m=Float64.(R_pc) .* pc, z_m=Float64.(z_pc) .* pc, L_cell=Float64.(L_cell), q=q, soft_m=soft_pc * pc, Ltot=Ltot)
 end
 
 function _axisym_force_from_mass_cells(Rf::Float64, zf::Float64, R_cells::Vector{Float64}, z_cells::Vector{Float64}, M_cells::Vector{Float64}, soft_m::Float64; nphi::Int=32)
@@ -563,14 +444,7 @@ function build_axisymmetric_halo_mass_grid(halo; n_m::Int=128, ntheta::Int=64, r
 
     length(M_cells) > 0 || error("axisymmetric halo mass grid contains no valid mass cells")
 
-    return (
-        R_m = R_cells,
-        z_m = z_cells,
-        M_cell = M_cells,
-        q = q,
-        soft_m = softening_pc * pc,
-        rmax_m = mmax,
-    )
+    return (R_m=R_cells, z_m=z_cells, M_cell=M_cells, q=q, soft_m=softening_pc * pc, rmax_m=mmax)
 end
 
 function build_axisymmetric_halo_force_table(halo; nR::Int=96, nZ::Int=96, nphi::Int=32, n_m::Int=128, ntheta::Int=64, softening_pc::Float64=0.5, rmax_factor::Float64=DEFAULT_RMAX_FACTOR)
@@ -883,16 +757,7 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
         nm_h = haskey(halo, :halo_force_nm) ? Int(f64(halo[:halo_force_nm])) : 128
         nth_h = haskey(halo, :halo_force_ntheta) ? Int(f64(halo[:halo_force_ntheta])) : 64
         soft_h = haskey(halo, :halo_force_softening_pc) ? f64(halo[:halo_force_softening_pc]) : 0.5
-        halo_axis_table = build_axisymmetric_halo_force_table(
-            halo;
-            nR=nR_h,
-            nZ=nZ_h,
-            nphi=nphi_h,
-            n_m=nm_h,
-            ntheta=nth_h,
-            softening_pc=soft_h,
-            rmax_factor=DEFAULT_RMAX_FACTOR,
-        )
+        halo_axis_table = build_axisymmetric_halo_force_table(halo; nR=nR_h, nZ=nZ_h, nphi=nphi_h, n_m=nm_h, ntheta=nth_h, softening_pc=soft_h, rmax_factor=DEFAULT_RMAX_FACTOR)
     end
 
     rlgmin = log10(f64(R[1]))
@@ -1017,16 +882,7 @@ function get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing,
     sig = stellar_model_sig(stellar_model)
     qh = max(abs(f64(halo_q_axis_ratio)), 1e-6)
 
-    halo_for_sig = halo_from_theta(
-        rho_s,
-        r_s,
-        MBH,
-        ML;
-        halo_type=ht,
-        stellar_model=nothing,
-        halo_q_axis_ratio=qh,
-        karl_halo_params=karl_halo_params,
-    )
+    halo_for_sig = halo_from_theta(rho_s, r_s, MBH, ML; halo_type=ht, stellar_model=nothing, halo_q_axis_ratio=qh, karl_halo_params=karl_halo_params)
     ksig = ht === :karl_halo ? karl_halo_sig(halo_for_sig) : UInt(0)
 
     combined_sig = hash((sig, ksig))

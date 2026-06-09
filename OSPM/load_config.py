@@ -19,7 +19,7 @@ def _get_galaxy_name():
 
 def get_profile_root():
     gal = _get_galaxy_name()
-    return OSPM_ROOT / "Data" / "Gal_Profiles" / gal
+    return OSPM_ROOT / "Data" / "Galaxy_Profiles" / gal
 
 # --------------------------------------------------
 # Config loader
@@ -28,12 +28,12 @@ def get_profile_root():
 def load_config():
     galaxy = _get_galaxy_name()
 
+    module_name = f"Data.Galaxy_Profiles.{galaxy}.{galaxy}_OSPM_Config"
+
     try:
-        mod = import_module(
-            f"Data.Gal_Profiles.{galaxy}.{galaxy}_OSPM_Config"
-        )
+        mod = import_module(module_name)
     except Exception as e:
-        raise RuntimeError(f"Failed to load config for {galaxy}") from e
+        raise RuntimeError(f"Failed to load config for {galaxy} using {module_name}") from e
 
     cfg = {**AI_DEFAULTS, **mod.CONFIG}
 

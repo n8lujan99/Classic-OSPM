@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
 def _read_config():
     from Data.Galaxy_Profiles.Draco.Draco_OSPM_Config import CONFIG
     return CONFIG

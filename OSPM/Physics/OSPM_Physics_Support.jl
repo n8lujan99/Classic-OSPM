@@ -143,13 +143,21 @@ function build_min_count_radial_edges(R_star_m::Vector{Float64}, valid_idx::Vect
 end
 
 function resolve_karl_spatial_edges(kinematic_bin_edges)
-    kinematic_bin_edges === nothing && error("kinematic_bin_edges is required; no adaptive radial-bin fallback is allowed")
+    kinematic_bin_edges === nothing &&
+        error("kinematic_bin_edges is required; no adaptive radial-bin fallback is allowed")
 
     edges = Float64.(kinematic_bin_edges)
 
     length(edges) >= 2 || error("kinematic_bin_edges must contain at least two edges")
     any(.!isfinite.(edges)) && error("kinematic_bin_edges contains non-finite values")
-    any(diff(edges) .<= 0.0) && error("kinematic_bin_edges must be strictly increasing")
+
+    # Projected radius cannot be negative, and the first aperture should include
+    # the galaxy center. Some kinematic-bin products start at the innermost
+    # observed star radius instead of 0 pc, which drops central stars from the
+    # LOSVD target builder.
+    edges[1] = 0.0
+
+    any(diff(edges) .<= 0.0) && error("kinematic_bin_edges must be strictly increasing after forcing first edge to 0 pc")
 
     return edges
 end
@@ -178,8 +186,22 @@ end
     return j
 end
 
+# Fast dependency-free normal CDF approximation.
+# We avoid SpecialFunctions.erf here so the hot Julia path does not need an
+# extra package just to smear observed LOSVD targets by measurement error.
 @inline function _normal_cdf_unit(x::Float64)
-    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+    if !isfinite(x)
+        return x > 0.0 ? 1.0 : 0.0
+    end
+
+    # Abramowitz-Stegun / Hart-style logistic-polynomial approximation.
+    # Accuracy is more than enough for bin-probability deposition.
+    t = 1.0 / (1.0 + 0.2316419 * abs(x))
+    poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+    pdf = 0.3989422804014327 * exp(-0.5 * x * x)
+    cdf_pos = 1.0 - pdf * poly
+
+    return x >= 0.0 ? cdf_pos : 1.0 - cdf_pos
 end
 
 @inline function _gaussian_bin_probability(vlo::Float64, vhi::Float64, v0::Float64, sig::Float64)
@@ -256,39 +278,39 @@ function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{F
     return target
 end
 
-function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64},
-    spatial_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, sigma_floor::Float64=1e-3)
+function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, spatial_edges::Vector{Float64},
+                                velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, sigma_floor::Float64=1e-8)
+    spatial_edges = resolve_karl_spatial_edges(spatial_edges)
+    velocity_edges = Float64.(velocity_edges)
     vlos_idx = Int[]
-
+    
     @inbounds for i in eachindex(valid_vlos)
-        valid_vlos[i] && isfinite(R_star_m[i]) && isfinite(v_star_mps[i]) &&
-            isfinite(verr_star_mps[i]) && verr_star_mps[i] > 0.0 && push!(vlos_idx, i)
+        valid_vlos[i] &&
+            isfinite(R_star_m[i]) &&
+            isfinite(v_star_mps[i]) &&
+            isfinite(verr_star_mps[i]) &&
+            verr_star_mps[i] > 0.0 &&
+            push!(vlos_idx, i)
     end
-
     Nspatial = length(spatial_edges) - 1
     Nvbin = length(velocity_edges) - 1
     Nlosvd = Nspatial * Nvbin
     counts_losvd = zeros(Float64, Nlosvd)
     counts_by_spatial = zeros(Float64, Nspatial)
-
     @inbounds for idx in vlos_idx
         ib = _bin_index(spatial_edges, R_star_m[idx])
         ib == 0 && continue
-
         counts_by_spatial[ib] += 1.0
-
         v0 = f64(v_star_mps[idx])
         sig = f64(verr_star_mps[idx])
         psum = 0.0
-
         for jb in 1:Nvbin
-            psum += _gaussian_bin_probability(velocity_edges[jb], velocity_edges[jb + 1], v0, sig)
+            psum += _gaussian_bin_probability( velocity_edges[jb], velocity_edges[jb + 1], v0, sig)
         end
-
         if psum > 0.0
             for jb in 1:Nvbin
                 row = (ib - 1) * Nvbin + jb
-                p = _gaussian_bin_probability(velocity_edges[jb], velocity_edges[jb + 1], v0, sig) / psum
+                p = _gaussian_bin_probability( velocity_edges[jb], velocity_edges[jb + 1], v0, sig ) / psum
                 counts_losvd[row] += p
             end
         else
@@ -299,41 +321,95 @@ function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractV
             end
         end
     end
-
-    light_target = light_target_from_surface_brightness(surface_brightness_profile, spatial_edges)
+    light_target = light_target_from_surface_brightness( surface_brightness_profile, spatial_edges)
     losvd_target = zeros(Float64, Nlosvd)
-
     @inbounds for ib in 1:Nspatial
         nbin = counts_by_spatial[ib]
-        if nbin <= 0.0
-            continue
-        end
-
+        nbin <= 0.0 && continue
         for jb in 1:Nvbin
             row = (ib - 1) * Nvbin + jb
             losvd_target[row] = light_target[ib] * counts_losvd[row] / nbin
         end
     end
 
+    # ================================================================================================================================================================================
+    # CURRENT POI FOR KARL-STYLE OSPM
+    #
+    # The LOSVD target in each row is built as:
+    #
+    #     y_ij = L_i * p_ij
+    #
+    # where:
+    #
+    #     i    = spatial aperture / projected radial bin
+    #     j    = velocity bin
+    #     L_i  = projected-light fraction from the surface-brightness profile
+    #     p_ij = observed LOSVD probability in that aperture after velocity-error smearing
+    #
+    # counts_losvd[row] is the effective observed count k_ij after each star is
+    # smeared through the velocity bins by its measured velocity error.
+    #
+    # counts_by_spatial[ib] is the number of observed velocity stars in aperture i.
+    #
+    # The LOSVD sigma below is currently the main scale-setting piece for the
+    # kinematic chi-square.  If chi is too small or too large, start here.
+    #
+    # Current diagnostic model:
+    #
+    #     Use a finite-count Dirichlet / Jeffreys-style uncertainty for p_ij,
+    #     then propagate it through y_ij = L_i * p_ij.
+    #
+    # This keeps empty velocity bins from becoming hard zero-probability walls.
+    # With only about 20 stars per aperture, an empty observed velocity bin means
+    # no star landed there.  It does not mean the true LOSVD probability is known
+    # to be exactly zero.
+    #
+    # The light target is still set by the surface-brightness profile integrated
+    # over the same spatial bins.  The light_sigma block below is kept separate
+    # from the LOSVD sigma while debugging, so the light term does not hide the
+    # kinematic behavior.
+    # ================================================================================================================================================================================
+
     losvd_sigma = similar(losvd_target)
+
+    # Finite-count LOSVD uncertainty.
+    #
+    # The observable is:
+    #     y_ij = L_i * p_ij
+    #
+    # counts_losvd[row] is the effective count k_ij after velocity-error
+    # Gaussian deposition. With only N_i stars in an aperture, an empty
+    # velocity bin is not known perfectly. A Jeffreys/Dirichlet pseudo-count
+    # keeps zero-count bins from becoming hard walls.
+    alpha_dirichlet = 0.5
 
     @inbounds for ib in 1:Nspatial
         nbin = max(counts_by_spatial[ib], 1.0)
-        base = max(light_target[ib] / sqrt(nbin), sigma_floor)
+        Li = max(light_target[ib], 0.0)
+        a0 = nbin + Nvbin * alpha_dirichlet
 
         for jb in 1:Nvbin
             row = (ib - 1) * Nvbin + jb
-            losvd_sigma[row] = max(base, sqrt(max(losvd_target[row], sigma_floor)) / sqrt(nbin))
+            kij = max(counts_losvd[row], 0.0)
+            aj = kij + alpha_dirichlet
+            var_pij = aj * (a0 - aj) / (a0 * a0 * (a0 + 1.0))
+
+            losvd_sigma[row] = max(
+                Li * sqrt(max(var_pij, 0.0)),
+                sigma_floor,
+            )
         end
     end
 
+    # ================================================================================================================================================================================
+    # Light uncertainty block.
+    # Keep separate from LOSVD sigma while debugging.  Do not let this hide LOSVD behavior.
+    # ================================================================================================================================================================================
     light_sigma = similar(light_target)
     ntot = max(sum(counts_by_spatial), 1.0)
-
     @inbounds for ib in 1:Nspatial
         light_sigma[ib] = max(sqrt(max(light_target[ib], sigma_floor)) / sqrt(ntot), sigma_floor)
     end
-
     return losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial
 end
 

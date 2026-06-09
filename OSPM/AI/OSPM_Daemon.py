@@ -466,6 +466,7 @@ def run_daemon(config, physics_engine):
         alphat = float(opt("KARL_ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
         maxiter = int(opt("KARL_MAXITER", "maxiter", default=config.get("MAXITER", 60)))
         weight_mode = str(opt("WEIGHT_MODE", "weight_mode", default="entropy")).strip().lower()
+        weight_solver_mode = str(opt("WEIGHT_SOLVER", "weight_solver_mode", default="orbit_only")).strip().lower()
         losvd_score_mode = str(opt("LOSVD_SCORE_MODE", "losvd_score_mode", default="karl_fracnew")).strip().lower()
         entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=config.get("ENTROPY_FLOOR", 1e-12)))
         halo_q_axis_ratio = float(opt("HALO_Q_AXIS_RATIO", "halo_q_axis_ratio", default=config.get("HALO_Q_AXIS_RATIO", 1.0)))
@@ -513,7 +514,8 @@ def run_daemon(config, physics_engine):
         print(
             f"[Daemon] Karl batch mode ON — Norbit={Norbit}, Nbase_orbit={Norbit // 2}, Nstar_vlos={nstar_vlos}, "
             f"min_stars_per_bin={min_stars_per_bin}, Nvbin={nvbin}, Ntheta_launch={ntheta_launch}, "
-            f"weight_mode={weight_mode}, losvd_score_mode={losvd_score_mode}, halo_q={halo_q_axis_ratio}, "
+            f"weight_mode={weight_mode}, weight_solver_mode={weight_solver_mode}, "
+            f"losvd_score_mode={losvd_score_mode}, halo_q={halo_q_axis_ratio}, "
             f"karl_halo_params_active={karl_halo_params is not None}",
             flush=True,
         )
@@ -628,6 +630,7 @@ def run_daemon(config, physics_engine):
                             alpha=alpha,
                             alphat=alphat,
                             weight_mode=weight_mode,
+                            weight_solver_mode=weight_solver_mode,
                             entropy_floor=entropy_floor,
                             losvd_score_mode=losvd_score_mode,
                             maxiter=maxiter,
@@ -666,6 +669,7 @@ def run_daemon(config, physics_engine):
                                 max_weight_fraction=float(max_weight_fraction_vec[j]),
                                 halo_type=str(halo_type_variant),
                                 weight_mode=weight_mode,
+                                weight_solver_mode=weight_solver_mode,
                                 losvd_score_mode=losvd_score_mode,
                                 alphat=alphat,
                                 halo_q_axis_ratio=halo_q_axis_ratio,

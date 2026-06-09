@@ -124,14 +124,11 @@ end
 @inline function _project_axisym_sample(ri::Float64, vr::Float64, vtheta::Float64, vphi::Float64, theta::Float64, phi::Float64, sini::Float64, cosi::Float64)
     st, ct = _sincos_safe(theta)
     cp, sp = cos(phi), sin(phi)
-
     x = ri * st * cp
     y = ri * st * sp
     z = ri * ct
-
     vx = vr * st * cp + vtheta * ct * cp - vphi * sp
     vz = vr * ct - vtheta * st
-
     xsky = y
     ysky = cosi * x - sini * z
     Rproj = sqrt(xsky * xsky + ysky * ysky)
@@ -244,6 +241,9 @@ function _orbit_worker!(st::OrbitWorkState, rng)
     end
 end
 
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
 # Main A-matrix builder: maps orbital weights → Karl observables.
 function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64,
         rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing,
@@ -261,6 +261,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     Nstar == 0 && return zeros(Float64, 0, Norbit)
 
     stellar_model_jl = normalize_stellar_model(stellar_model)
+    surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
     ctx = get_halo_context(
         rho_s,
         r_s,
@@ -306,7 +307,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
 
     if diag
         losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial = observed_targets_karl( R_star_m, has_vlos, v_star_mps,
-            verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile)
+            verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl)
 
         return (
             A,
@@ -336,7 +337,7 @@ end
 function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64},
     verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing,
     Nocc::Int=0, lambda_occ::Float64=1.0, alpha::Float64=DEFAULT_KARL_ALPHA, alphat::Float64=DEFAULT_KARL_ALPHAT,
-    weight_mode=:entropy, wphase=nothing, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, losvd_score_mode=:karl_fracnew,
+    weight_mode=:entropy, weight_solver_mode=:orbit_only, wphase=nothing, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, losvd_score_mode=:karl_fracnew,
     maxiter::Int=DEFAULT_KARL_MAXITER, max_refine::Int=0, timeout_s::Float64=120.0,
     R_inner_pc::Float64=30.0, use_radial_vlos_weights::Bool=false, use_weighted_score::Bool=false, R_weight_pc::Float64=-1.0,
     radial_weight_gamma::Float64=2.0, radial_weight_floor::Float64=0.3, velocity_edges=nothing, kinematic_bin_edges=nothing,
@@ -346,10 +347,16 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     nrow, nbatch = size(thetas)
     surface_brightness_profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     stellar_model_jl = normalize_stellar_model(stellar_model)
+    surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
+
     losvd_score_sym = Symbol(lowercase(String(losvd_score_mode)))
     weight_mode_sym = Symbol(lowercase(String(weight_mode)))
+    weight_solver_sym = Symbol(lowercase(String(weight_solver_mode)))
     if !(losvd_score_sym === :standard || losvd_score_sym === :karl_fracnew)
         error("Unknown losvd_score_mode=$(losvd_score_sym). Use :standard or :karl_fracnew")
+    end
+    if !(weight_solver_sym === :orbit_only || weight_solver_sym === :expanded_cm)
+        error("Unknown weight_solver_mode=$(weight_solver_sym). Use :orbit_only or :expanded_cm")
     end
 
     status = fill(4, nbatch)
@@ -373,12 +380,50 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
 
     function _store_weight_diagnostics!(i::Int, w_best::Vector{Float64})
         wsum = sum(w_best)
+        wmin = isempty(w_best) ? NaN : minimum(w_best)
+        wmax = isempty(w_best) ? NaN : maximum(w_best)
+        nneg = count(x -> x < 0.0, w_best)
+        nbad = count(x -> !isfinite(x), w_best)
+
         if isfinite(wsum) && wsum > 0.0
             pwt = w_best ./ wsum
+            pmin = isempty(pwt) ? NaN : minimum(pwt)
+            pmax = isempty(pwt) ? NaN : maximum(pwt)
+
             N_nonzero_weights[i] = count(pwt .> 1e-12)
             effective_N_orbits[i] = 1.0 / sum(pwt .^ 2)
             max_weight_fraction[i] = maximum(pwt)
+
+            if nneg > 0 || nbad > 0 || pmax > 1.0 || pmin < 0.0
+                println(
+                    "[WEIGHT DEBUG] ",
+                    "i=", i,
+                    " solver=", weight_solver_sym,
+                    " wsum=", wsum,
+                    " wmin=", wmin,
+                    " wmax=", wmax,
+                    " nneg=", nneg,
+                    " nbad=", nbad,
+                    " pmin=", pmin,
+                    " pmax=", pmax,
+                    " N_nonzero=", N_nonzero_weights[i],
+                    " Neff=", effective_N_orbits[i],
+                )
+            end
+        else
+            println(
+                "[WEIGHT DEBUG] ",
+                "i=", i,
+                " solver=", weight_solver_sym,
+                " BAD SUM",
+                " wsum=", wsum,
+                " wmin=", wmin,
+                " wmax=", wmax,
+                " nneg=", nneg,
+                " nbad=", nbad,
+            )
         end
+
         return nothing
     end
 
@@ -403,16 +448,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         continue
                     end
 
-                    ctx = get_halo_context(
-                        rho_s,
-                        r_s,
-                        MBH,
-                        ML,
-                        halo_type;
-                        stellar_model=stellar_model_jl,
-                        halo_q_axis_ratio=halo_q_axis_ratio,
-                        karl_halo_params=karl_halo_params,
-                    )
+                    ctx = get_halo_context( rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params )
                     force_geometry = haskey(ctx.halo, :stellar_model) ? stellar_model_geometry(ctx.halo[:stellar_model]) : :spherical_shell_grid
                     ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx;
                         nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC,
@@ -437,24 +473,31 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
 
                     losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial = observed_targets_karl(
                         R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws.spatial_edges, ws.velocity_edges;
-                        surface_brightness_profile=surface_brightness_profile)
+                        surface_brightness_profile=surface_brightness_profile_jl)
 
-                    w, ok, wdiag = solve_weights_karl_expanded_cm(
-                        A_light,
-                        A_losvd,
-                        light_target,
-                        light_sigma,
-                        losvd_target,
-                        losvd_sigma;
-                        alphat=alphat,
-                        lambda_light=lambda_occ,
-                        wphase=wphase,
-                        maxiter=maxiter,
-                        seed=UInt(i),
-                        entropy_floor=entropy_floor,
-                        apfac=DEFAULT_KARL_APFAC,
-                        return_diag=true,
-                    )
+                    if weight_solver_sym === :expanded_cm
+                        w, ok, wdiag = solve_weights_karl_expanded_cm( A_light, A_losvd, light_target, light_sigma, losvd_target, losvd_sigma;
+                            alphat=alphat, lambda_light=lambda_occ, wphase=wphase, maxiter=maxiter, seed=UInt(i), entropy_floor=entropy_floor, apfac=DEFAULT_KARL_APFAC, return_diag=true )
+                    else
+                        A = vcat(A_losvd, A_light)
+                        d = vcat(losvd_target, light_target)
+                        light_sigma_eff = light_sigma ./ sqrt(max(lambda_occ, 1e-12))
+                        sigma = vcat(losvd_sigma, light_sigma_eff)
+
+                        w, ok, wdiag = solve_weights_karl_jl(
+                            A,
+                            d,
+                            sigma;
+                            alpha=alpha,
+                            alphat=alphat,
+                            weight_mode=weight_mode_sym,
+                            wphase=wphase,
+                            maxiter=maxiter,
+                            seed=UInt(i),
+                            entropy_floor=entropy_floor,
+                            return_diag=true,
+                        )
+                    end
                     if !ok
                         status[i] = 2
                         Threads.atomic_xchg!(ws.phase, 3)
@@ -464,14 +507,14 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     cl = losvd_score_sym === :karl_fracnew ?
                         chi2_block_karl_fracnew(A_losvd, w, losvd_target, losvd_sigma, ws.Nspatial, ws.Nvbin) :
                         chi2_block(A_losvd, w, losvd_target, losvd_sigma)
+
                     cb = chi2_block(A_light, w, light_target, light_sigma)
-                    dof_losvd = max(length(losvd_target) - 4.0, 1.0)
-                    dof_light = max(length(light_target) - 1.0, 1.0)
 
-                    chi2_losvd[i] = cl / dof_losvd
-                    chi2_light[i] = cb / dof_light
+                    # Karl-style convention:
+                    # Store raw χ² sums, not reduced χ².
+                    chi2_losvd[i] = cl
+                    chi2_light[i] = cb
                     chi2_total[i] = chi2_losvd[i] + lambda_occ * chi2_light[i]
-
                     R_inner_m = R_inner_pc * pc
                     ninner = 0
                     nouter = 0
@@ -490,8 +533,23 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     end
                     N_inner[i] = ninner
                     N_outer[i] = nouter
-                    !isempty(inner_rows) && (chi2_inner[i] = chi2_block(A_losvd[inner_rows, :], w, losvd_target[inner_rows], losvd_sigma[inner_rows]) / max(length(inner_rows), 1))
-                    !isempty(outer_rows) && (chi2_outer[i] = chi2_block(A_losvd[outer_rows, :], w, losvd_target[outer_rows], losvd_sigma[outer_rows]) / max(length(outer_rows), 1))
+                    !isempty(inner_rows) && (
+                        chi2_inner[i] = chi2_block(
+                            A_losvd[inner_rows, :],
+                            w,
+                            losvd_target[inner_rows],
+                            losvd_sigma[inner_rows],
+                        )
+                    )
+
+                    !isempty(outer_rows) && (
+                        chi2_outer[i] = chi2_block(
+                            A_losvd[outer_rows, :],
+                            w,
+                            losvd_target[outer_rows],
+                            losvd_sigma[outer_rows],
+                        )
+                    )
 
                     _store_weight_diagnostics!(i, w)
                     status[i] = 0
@@ -524,13 +582,14 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     end
 
     # Return shape is kept close to the previous hot path so the Python side can
-    # be updated gradually.  Here chi2 is χ²_LOSVD and the old chi2_occ slot is χ²_light.
+    # be updated gradually.  Here chi2 is Karl-style raw χ²_LOSVD and the old chi2_occ slot is raw χ²_light.
     return (status, chi2_losvd, refine_used, chi2_inner, chi2_outer, chi2_light,
             N_inner, N_outer, N_nonzero_weights, effective_N_orbits, max_weight_fraction)
 end
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 end # module
-
 
 # WHAT THIS VERSION DOES
 # Orbit-superposition physics engine for Karl-style spherical or axisymmetric force modelling.
@@ -545,11 +604,13 @@ end # module
 # hot path made one velocity row per observed star.  This version makes one
 # velocity-distribution row per radial aperture and velocity bin.
 #
-# The main reported χ² is χ²_LOSVD.  The light/surface-brightness rows constrain
-# orbit weights and are reported separately as χ²_light.  The weight solve uses
-# Karl's expanded Cm form: projected-light rows plus LOSVD rows, with LOSVD slack
-# variables inside the SPEAR solve.  The returned weights are the orbit weights
-# only; slack variables are internal solver state.
+# The main reported χ² is raw χ²_LOSVD from the hard orbit-weight LOSVD
+# residual A_losvd*w - target.  Light rows remain an extra diagnostic and can
+# optionally help constrain weights through lambda_light.
+#
+# Solver modes:
+#   orbit_only  = production/debug steering mode; no LOSVD slack can hide residuals
+#   expanded_cm = Karl-style experimental mode with LOSVD slack variables
 #
 # REQUIRED PIPELINE RULE
 # A real observed surface_brightness_profile is required.  There is no star-count
