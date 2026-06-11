@@ -1,19 +1,20 @@
 # OSPM_Config_Center — Segue1
-# Only place that should have Galaxy-specific configuration variables
-# so all other modules remain galaxy-agnostic
+# Karl-style Segue 1 config.
+# Observational inputs:
+#   1. Niederste-Ostholt et al. 2009 Fig. 7 digitized number-count tracer profile
+#   2. Simon stellar LOS velocity sample
+#
+# The 3D light grid is derived from the number-count surface-density profile.
+# It is not an additional observational data set.
 
 from pathlib import Path
-import pathlib
 import os
 import multiprocessing as mp
 from Data.Data_Prep.Data_Paths import build_data_paths
 
 Galaxy = "Segue1"
+LOCAL_DEBUG = False
 
-# Run mode toggle
-LOCAL_DEBUG = False   # True = local responsive run, False = full run / HPC-style
-
-# Profile root (this directory contains default/, data.csv, etc.)
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
@@ -25,9 +26,9 @@ def detect_workers():
         return int(slurm)
     return mp.cpu_count()
 
+
 WORKERS = detect_workers()
 
-# Mode-dependent knobs
 NORBIT = 1000 if LOCAL_DEBUG else 2500
 BATCH_SIZE = 40 if LOCAL_DEBUG else 90
 MIN_BATCH_SIZE = 40 if LOCAL_DEBUG else 90
@@ -36,6 +37,13 @@ CHUNK_SIZE = 30 if LOCAL_DEBUG else 90
 LOG_INTERVAL = 1 if LOCAL_DEBUG else 10
 PROF_EVERY = 2 if LOCAL_DEBUG else 20
 EVAL_TIMEOUT_S = 20.0 if LOCAL_DEBUG else 600.0
+MAX_RUNS = 1 if LOCAL_DEBUG else 100000
+
+if NORBIT % 2 != 0:
+    raise ValueError(
+        f"Karl paired-orbit path requires even NORBIT; got {NORBIT}"
+    )
+
 
 CONFIG = {
     # =========================================================
@@ -46,56 +54,95 @@ CONFIG = {
     # =========================================================
     # Identity
     # =========================================================
-    "MODE":      "stellar",
+    "MODE":      "karl",
     "GALAXY":    Galaxy,
     "HALO_TYPE": "nfw",
 
     # =========================================================
-    # Galaxy geometry (declared, never fitted)
+    # Galaxy geometry
     # =========================================================
     "RA0_DEG":         151.7667,
     "DEC0_DEG":        16.0819,
     "DISTANCE_PC":     23000.0,
-    "PA_DEG":          None,
+    "PA_DEG":          90.0,
     "AXIS_RATIO_Q":    1.0,
-    "R_HALF_LIGHT_PC": 29.0,
+    "R_HALF_LIGHT_PC": 29.4,
     "R_MAX_STARS_PC":  120.0,
     "INCLINATION_DEG": 90.0,
 
-    # Fixed stellar light model (Segue 1)
+    # Systemic velocity from Segue1_Simon_stars_v2.csv preparation.
+    "V_SYS_KMS":       208.419339,
+
+    # =========================================================
+    # Stellar tracer/light model
+    # =========================================================
     "STELLAR_MODEL": {
-        "type": "plummer",
+        "type": "karl_light_grid",
+        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_axisymmetric_light_grid.csv"),
         "Ltot": 340.0,
-        "a_pc": 22.4,
+        "geometry": "axisymmetric_density_grid",
+        "q_axis_ratio": 1.0,
+        "R_cyl_col": "R_cyl_pc",
+        "z_col": "z_pc",
+        "nu_col": "nu_Lsun_pc3",
+        "volume_col": "cell_volume_pc3",
+        "luminosity_col": "cell_luminosity_Lsun",
+        "force_softening_pc": 0.2,
+        "force_nR": 96,
+        "force_nZ": 96,
+        "force_nphi": 32,
+        "source": "Niederste-Ostholt2009_Fig7_digitized",
     },
 
     # =========================================================
-    # Data harvesting & quality
+    # Data harvesting and quality
     # =========================================================
     "RADIUS_DEG":  0.6,
     "RUWE_MAX":    1.4,
     "PAR_SNR_MIN": 5.0,
 
-    # Column authority (Segue 1 conventions)
-    "STAR_R_COL":    "r_pc",
-    "STAR_V_COL":    "vlos",
-    "STAR_VERR_COL": "vlos_err",
-    "RA_COL":        "ra",
-    "DEC_COL":       "dec",
-    "VLOS_COL":      "vlos",
+    # =========================================================
+    # Column authority
+    # =========================================================
+    "STAR_R_COL":      "R_pc",
+    "STAR_V_COL":      "vlos_kms",
+    "STAR_VERR_COL":   "verr_kms",
+    "RA_COL":          "ra_deg",
+    "DEC_COL":         "dec_deg",
+    "VLOS_COL":        "vlos_kms",
+
+    # =========================================================
+    # Draco-style observed products
+    # =========================================================
+    "SURFACE_BRIGHTNESS_CSV": str(
+        PROFILE_ROOT / "segue1_NO09_surface_brightness_on_simon_bins_16.csv"
+    ),
+    "KINEMATIC_BINS_CSV": str(
+        PROFILE_ROOT / "segue1_simon_kinematic_bins_16.csv"
+    ),
 
     # =========================================================
     # OSPM numerical setup
     # =========================================================
     "NORBIT": NORBIT,
-    "BINNING": {
-        "MIN_BINS":         4,
-        "N_TARGET_CIRC":    5,
-        "MIN_PER_BIN_CIRC": 3,
-    },
+
     "OBSERVABLES": {
-        "NBINS_OCC":  6,
-        "LAMBDA_OCC": 0.3,
+        "NVBIN": 21,
+        "MIN_STARS_PER_BIN": 16,
+        "LAMBDA_LIGHT": 0.3,
+        "NTHETA_LAUNCH": 9,
+
+        # Karl-style weight/scoring path.
+        "WEIGHT_MODE": "entropy",
+        "WEIGHT_SOLVER": "expanded_cm",
+        "LOSVD_SCORE_MODE": "standard",
+        "KARL_ALPHAT": 1.0,
+        "KARL_MAXITER": 60,
+        "ENTROPY_FLOOR": 1e-12,
+
+        # Halo flattening used by the halo force path.
+        # Stellar flattening stays in STELLAR_MODEL["q_axis_ratio"].
+        "HALO_Q_AXIS_RATIO": 1.0,
     },
 
     # =========================================================
@@ -104,19 +151,21 @@ CONFIG = {
     "PARAMETER_NAMES": ["rho_s", "r_s", "MBH", "ML"],
     "INITIAL_THETA":   [0.1, 300.0, 5e5, 2.0],
     "THETA_BOUNDS": [
-        (0.0, 5.0), # rho_s must be lower than 6 to avoid over massive halos that could look like smbhs
-        (100, 5000.0), # r_s in pc 100 pc = 0.1 kpc the min used in lujan 2025
-        (0.0, 2e6), # MBH solar masses 0 to 2 million
-        (0.2, 1.6), # ML solar mass / solar luminosity 0.2 to 2 used in lujan 2025
+        (0.0, 5.0),
+        (100.0, 5000.0),
+        (0.0, 2e6),
+        (0.2, 1.6),
     ],
 
+    # =========================================================
     # Penalties
+    # =========================================================
     "PEN_SPHERE_STRENGTH": 2500,
     "PEN_SPHERE_POWER":    2.0,
     "PEN_SLOPE_STRENGTH":  5000,
 
     # =========================================================
-    # Physical domain (solver only)
+    # Physical domain
     # =========================================================
     "MIN_DISTANCE":             5e-4,
     "MAX_DISTANCE":             2e3,
@@ -127,19 +176,61 @@ CONFIG = {
     # =========================================================
     # Deck semantics
     # =========================================================
-    "REQUIRE_COLUMNS": ["rho_s", "r_s", "MBH", "ML", "chi2", "reward", "status", "proposal_id"],
-    "ALLOWED_STATUSES": ["todo", "seed", "pass", "orbit_fail", "numeric_fail", "unknown_fail", "forbidden"],
+    "REQUIRE_COLUMNS": [
+        "rho_s", "r_s", "MBH", "ML",
+        "chi2", "reward", "status", "proposal_id",
+        "refine_passes",
+        "chi2_losvd", "chi2_light", "chi2_total",
+        "chi2_inner", "chi2_outer",
+        "N_inner", "N_outer",
+        "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction",
+        "halo_type",
+        "weight_mode", "weight_solver_mode", "losvd_score_mode",
+        "alphat", "halo_q_axis_ratio", "karl_halo_params_active",
+    ],
+
+    "ALLOWED_STATUSES": [
+        "todo", "seed", "pass",
+        "orbit_fail", "numeric_fail", "unknown_fail",
+        "timeout", "forbidden",
+
+        "pass_full", "pass_bh_only", "pass_halo_only",
+        "pass_bh_up", "pass_bh_down",
+        "pass_halo_up", "pass_halo_down",
+        "pass_ml_up", "pass_ml_down",
+
+        "orbit_fail_full", "orbit_fail_bh_only", "orbit_fail_halo_only",
+        "orbit_fail_bh_up", "orbit_fail_bh_down",
+        "orbit_fail_halo_up", "orbit_fail_halo_down",
+        "orbit_fail_ml_up", "orbit_fail_ml_down",
+
+        "numeric_fail_full", "numeric_fail_bh_only", "numeric_fail_halo_only",
+        "numeric_fail_bh_up", "numeric_fail_bh_down",
+        "numeric_fail_halo_up", "numeric_fail_halo_down",
+        "numeric_fail_ml_up", "numeric_fail_ml_down",
+
+        "timeout_full", "timeout_bh_only", "timeout_halo_only",
+        "timeout_bh_up", "timeout_bh_down",
+        "timeout_halo_up", "timeout_halo_down",
+        "timeout_ml_up", "timeout_ml_down",
+
+        "unknown_fail_full", "unknown_fail_bh_only", "unknown_fail_halo_only",
+        "unknown_fail_bh_up", "unknown_fail_bh_down",
+        "unknown_fail_halo_up", "unknown_fail_halo_down",
+        "unknown_fail_ml_up", "unknown_fail_ml_down",
+    ],
+
     "FILL_DEFAULT_STATUS": "todo",
 
     # =========================================================
-    # Sampling & control
+    # Sampling and control
     # =========================================================
-    "BATCH_SIZE":     BATCH_SIZE,
-    "MIN_BATCH_SIZE": MIN_BATCH_SIZE,
-    "MAX_BATCH_SIZE": MAX_BATCH_SIZE,
-    "CHUNK_SIZE":     CHUNK_SIZE,
-    "_PRINT_EVERY":   10,
-    "_print_counter": 1,
+    "BATCH_SIZE":          BATCH_SIZE,
+    "MIN_BATCH_SIZE":      MIN_BATCH_SIZE,
+    "MAX_BATCH_SIZE":      MAX_BATCH_SIZE,
+    "CHUNK_SIZE":          CHUNK_SIZE,
+    "_PRINT_EVERY":        10,
+    "_print_counter":      1,
 
     # =========================================================
     # AI / learning
@@ -162,7 +253,7 @@ CONFIG = {
     # =========================================================
     # Termination
     # =========================================================
-    "MAX_RUNS":            100000,
+    "MAX_RUNS":            MAX_RUNS,
     "STOP_NO_IMPROVEMENT": 1000,
     "IMPROVEMENT_EPSILON": 1e-6,
     "LOG_INTERVAL":        LOG_INTERVAL,
@@ -170,11 +261,28 @@ CONFIG = {
     "EVAL_TIMEOUT_S":      EVAL_TIMEOUT_S,
 
     # =========================================================
-    # Paths (authoritative)
+    # Physical constants
+    # =========================================================
+    "G":    6.67430e-11,
+    "Msun": 1.98847e30,
+
+    # =========================================================
+    # Paths
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_oldbounds.csv"),
+    "DATA_CSV": str(PROFILE_ROOT / "Segue1_Simon_stars_v2.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_segue1.csv"),
 }
 
+
 print("[CONFIG] CSV_PATH =", CONFIG["CSV_PATH"])
-print(f"[CONFIG] LOCAL_DEBUG={LOCAL_DEBUG} | NORBIT={CONFIG['NORBIT']} | BATCH={CONFIG['BATCH_SIZE']} | CHUNK={CONFIG['CHUNK_SIZE']}")
+print("[CONFIG] LOCAL_DEBUG =", LOCAL_DEBUG)
+print("[CONFIG] NORBIT =", CONFIG["NORBIT"])
+print("[CONFIG] MAX_RUNS =", CONFIG["MAX_RUNS"])
+print("[CONFIG] BATCH_SIZE =", CONFIG["BATCH_SIZE"])
+print("[CONFIG] CHUNK_SIZE =", CONFIG["CHUNK_SIZE"])
+print("[CONFIG] STELLAR_GEOMETRY =", CONFIG["STELLAR_MODEL"]["geometry"])
+print("[CONFIG] NTHETA_LAUNCH =", CONFIG["OBSERVABLES"]["NTHETA_LAUNCH"])
+print("[CONFIG] WEIGHT_MODE =", CONFIG["OBSERVABLES"]["WEIGHT_MODE"])
+print("[CONFIG] WEIGHT_SOLVER =", CONFIG["OBSERVABLES"]["WEIGHT_SOLVER"])
+print("[CONFIG] LOSVD_SCORE_MODE =", CONFIG["OBSERVABLES"]["LOSVD_SCORE_MODE"])
