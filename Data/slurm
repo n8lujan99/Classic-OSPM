@@ -6,7 +6,7 @@
 #SBATCH -A anantuabhg
 #SBATCH -N 1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=80
+#SBATCH --cpus-per-task=20
 #SBATCH -t 24:00:00
 set -euo pipefail
 GALAXY="${OSPM_GALAXY:-unknown}"
