@@ -63,6 +63,30 @@ def min_dist(theta, arr):
     if len(arr) == 0: return np.inf
     return np.linalg.norm(np.asarray(arr) - np.asarray(theta), axis=1).min()
 
+def _jl_matrix_f64(x, Main, juliacall, name="matrix"):
+    """
+    Convert a Python/NumPy 2D array to Julia Matrix{Float64} without asking
+    PythonCall to directly reinterpret the NumPy array.
+
+    We flatten in Fortran order because Julia is column-major, convert the
+    plain Python list to Vector{Float64}, then reshape on the Julia side.
+    """
+    arr = np.asarray(x, dtype=np.float64)
+
+    if arr.ndim != 2:
+        raise ValueError(f"{name} must be 2D, got shape={arr.shape}")
+
+    if not np.all(np.isfinite(arr)):
+        bad = np.argwhere(~np.isfinite(arr))
+        raise ValueError(f"{name} contains non-finite values; first bad index={bad[0].tolist()}")
+
+    nrow, ncol = arr.shape
+    flat = [float(v) for v in arr.ravel(order="F")]
+
+    vec = juliacall.convert(Main.Vector[Main.Float64], flat)
+    return Main.reshape(vec, nrow, ncol)
+
+
 def _clean_stellar_model(model):
     if model is None:
         return None
@@ -615,7 +639,7 @@ def run_daemon(config, physics_engine):
                             effective_N_orbits_vec,
                             max_weight_fraction_vec,
                         ) = jl_batch(
-                            juliacall.convert(Main.Matrix[Main.Float64], theta_mat),
+                            _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat"),
                             juliacall.convert(Main.Vector[Main.Float64], R_star_m),
                             juliacall.convert(Main.Vector[Main.Bool], valid_vlos),
                             juliacall.convert(Main.Vector[Main.Float64], v_star_mps),
@@ -685,7 +709,11 @@ def run_daemon(config, physics_engine):
                     except Exception as e:
                         t_acc["eval"] += time.perf_counter() - chunk_t0
                         t_cnt["eval"] += len(chunk_thetas)
-                        print(f"[Daemon] chunk failed halo_type={halo_type_chunk} (size={len(chunk_thetas)}): {e}", flush=True)
+                        print(f"[Daemon] chunk failed halo_type={halo_type_chunk} (size={len(chunk_thetas)}), exc_type={type(e).__name__}", flush=True)
+                        print("[Daemon] Python traceback for failed chunk:", flush=True)
+                        for line in traceback.format_tb(e.__traceback__):
+                            print(line, end="", flush=True)
+                        print(f"[Daemon] exception class only: {type(e).__module__}.{type(e).__name__}", flush=True)
                         for theta, pid, label, halo_type_variant in chunk_props:
                             if _record(theta, pid, label, "numeric_fail", np.inf, 0, diag={"halo_type": str(halo_type_variant)}):
                                 stop = True

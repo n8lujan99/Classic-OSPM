@@ -60,7 +60,34 @@ def _jl_init():
         raise FileNotFoundError(f"Julia backend file not found: {jl_path}")
 
     if not hasattr(_Main, "OSPMPhysicsSpherical"):
-        _Main.include(jl_path)
+        # Safer HPC bridge include:
+        # pass the path as a plain Julia string inside seval instead of
+        # routing the Python string through _Main.include(jl_path).
+        import json
+        jl_path_literal = json.dumps(str(jl_path))
+
+        _Main.seval(f"""
+        try
+            jl_path = {jl_path_literal}
+            println("[JLINIT] Including Julia physics file: ", jl_path)
+            Base.include(Main, jl_path)
+            println("[JLINIT] Julia physics include OK")
+        catch err
+            println("[JLINIT ERROR TYPE]")
+            println(typeof(err))
+
+            println("[JLINIT ERROR]")
+            showerror(stdout, err)
+            println()
+
+            println("[JLINIT STACKTRACE]")
+            for frame in stacktrace(catch_backtrace())
+                println(frame)
+            end
+
+            rethrow(err)
+        end
+        """)
 
     if not hasattr(_Main, "OSPMPhysicsSpherical"):
         raise RuntimeError("OSPMPhysicsSpherical failed to load into Main")

@@ -35,6 +35,7 @@ if [[ -f "$CONDA_ROOT/etc/profile.d/conda.sh" ]]; then
     echo "[SLURM] Loading conda from: $CONDA_ROOT"
     source "$CONDA_ROOT/etc/profile.d/conda.sh"
     conda activate "$CONDA_ENV_NAME"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 elif [[ -x "$CONDA_ENV_PATH/bin/python" ]]; then
     echo "[SLURM] conda.sh not found, using env PATH directly:"
     echo "        $CONDA_ENV_PATH"
@@ -48,10 +49,6 @@ fi
 echo "[SLURM] Python: $(which python)"
 python --version
 
-export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/scratch/09909/n8lujan99/.julia}"
-export JULIA_PKG_SERVER=""
-export JULIA_PYTHONCALL_EXE="$(which python)"
-
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -60,13 +57,29 @@ export PYTHONUNBUFFERED=1
 export PYTHON_JULIACALL_HANDLE_SIGNALS=yes
 export PYJULIA_USE_PYTHONCALL=1
 export OSPM_USE_JULIA=1
+
+# Julia project/depot used by OSPM-V2
 export JULIA_PROJECT="$OSPM_REPO_ROOT"
+export JULIA_DEPOT_PATH="/scratch/09909/n8lujan99/.julia"
+export JULIA_PKG_SERVER=""
+export JULIA_CONDAPKG_BACKEND="Null"
+
+# PythonCall.jl uses this Python from Julia
+export JULIA_PYTHONCALL_EXE="$(which python)"
+
+# Python juliacall uses this Julia from Python, if needed
 export PYTHON_JULIACALL_EXE=/apps/julia/1.10.9/bin/julia
+export PYTHON_JULIACALL_PROJECT="$OSPM_REPO_ROOT"
+export PYTHON_JULIACALL_COMPILED_MODULES=no
 echo "Python: $(which python)"
 python --version
 echo "Julia: $(which julia)"
 julia --project="$OSPM_REPO_ROOT" -e 'using Pkg; println("Julia threads: ", Threads.nthreads()); println("Julia project: ", Base.active_project())'
 echo "PYTHON_JULIACALL_EXE=$PYTHON_JULIACALL_EXE"
+echo "PYTHON_JULIACALL_PROJECT=$PYTHON_JULIACALL_PROJECT"
+echo "JULIA_DEPOT_PATH=$JULIA_DEPOT_PATH"
+echo "JULIA_PYTHONCALL_EXE=$JULIA_PYTHONCALL_EXE"
+echo "JULIA_CONDAPKG_BACKEND=$JULIA_CONDAPKG_BACKEND"
 echo "JULIA_PROJECT=$JULIA_PROJECT"
 echo "Launching OSPM..."
 echo "Galaxy file contents: $(cat which_galaxy)"
@@ -75,5 +88,10 @@ import os
 print("cwd:", os.getcwd())
 print("venv python:", os.popen("which python").read().strip())
 EOF
-bash utils/start
+export PYTHONPATH="$OSPM_REPO_ROOT:${PYTHONPATH:-}"
+export OSPM_JULIA_EXE=/apps/julia/1.10.9/bin/julia
+
+echo "Launching OSPM directly from Data/slurm..."
+python -m OSPM.Controllers.OSPM_RUN
+
 echo "End time: $(date)"
