@@ -49,7 +49,7 @@
 # run_daemon(config,engine)  config,engine → None                — outer loop: propose→eval→record→train
 # ──────────────────────────────────────────────────────────────────────────────
 
-import os, time, sys
+import os, time, sys, traceback
 import numpy as np, pandas as pd
 import torch, torch.nn as nn
 from collections import deque
@@ -63,26 +63,17 @@ def min_dist(theta, arr):
     if len(arr) == 0: return np.inf
     return np.linalg.norm(np.asarray(arr) - np.asarray(theta), axis=1).min()
 
-def _jl_matrix_f64(x, Main, juliacall, name="matrix"):
-    """
-    Convert a Python/NumPy 2D array to Julia Matrix{Float64} without asking
-    PythonCall to directly reinterpret the NumPy array.
-
-    We flatten in Fortran order because Julia is column-major, convert the
-    plain Python list to Vector{Float64}, then reshape on the Julia side.
-    """
-    arr = np.asarray(x, dtype=np.float64)
-
+def _jl_matrix_f64(mat, Main, juliacall, name="mat"):
+    import numpy as np
+    arr = np.asarray(mat, dtype=np.float64)
+    print(f"[JL MATRIX DEBUG] {name}: shape={arr.shape}, dtype={arr.dtype}", flush=True)
     if arr.ndim != 2:
-        raise ValueError(f"{name} must be 2D, got shape={arr.shape}")
-
-    if not np.all(np.isfinite(arr)):
-        bad = np.argwhere(~np.isfinite(arr))
-        raise ValueError(f"{name} contains non-finite values; first bad index={bad[0].tolist()}")
-
+        raise ValueError(f"{name} must be 2D, got shape {arr.shape}")
+    if not np.isfinite(arr).all():
+        bad = arr[~np.isfinite(arr)]
+        raise ValueError(f"{name} has non-finite values: {bad[:10]}")
     nrow, ncol = arr.shape
-    flat = [float(v) for v in arr.ravel(order="F")]
-
+    flat = arr.ravel(order="F").tolist()
     vec = juliacall.convert(Main.Vector[Main.Float64], flat)
     return Main.reshape(vec, nrow, ncol)
 
