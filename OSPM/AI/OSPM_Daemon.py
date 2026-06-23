@@ -73,8 +73,14 @@ def _jl_matrix_f64(mat, Main, juliacall, name="mat"):
         bad = arr[~np.isfinite(arr)]
         raise ValueError(f"{name} has non-finite values: {bad[:10]}")
     nrow, ncol = arr.shape
-    flat = arr.ravel(order="F").tolist()
-    vec = juliacall.convert(Main.Vector[Main.Float64], flat)
+    
+    vec = Main.Vector[Main.Float64](undef, nrow * ncol)
+
+    k = 1
+    for x in arr.ravel(order="F"):
+        Main.setindex_b(vec, float(x), k)
+        k += 1
+
     return Main.reshape(vec, nrow, ncol)
 
 
@@ -453,6 +459,7 @@ def run_daemon(config, physics_engine):
 
     if use_batch:
         from juliacall import Main; import juliacall
+        Main.seval("setindex_b(A, x, i) = (A[i] = x; A)")
 
         stellar_model = _clean_stellar_model(getattr(obs, "stellar_model", None))
         surface_brightness_profile = _get_surface_brightness_profile(config, physics_engine, obs)
