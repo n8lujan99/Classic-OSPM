@@ -65,24 +65,49 @@ def min_dist(theta, arr):
 
 def _jl_matrix_f64(mat, Main, juliacall, name="mat"):
     import numpy as np
+
     arr = np.asarray(mat, dtype=np.float64)
+
     print(f"[JL MATRIX DEBUG] {name}: shape={arr.shape}, dtype={arr.dtype}", flush=True)
+
     if arr.ndim != 2:
         raise ValueError(f"{name} must be 2D, got shape {arr.shape}")
+
     if not np.isfinite(arr).all():
         bad = arr[~np.isfinite(arr)]
         raise ValueError(f"{name} has non-finite values: {bad[:10]}")
+
     nrow, ncol = arr.shape
-    
-    vec = Main.Vector[Main.Float64](undef, nrow * ncol)
 
-    k = 1
-    for x in arr.ravel(order="F"):
-        Main.setindex_b(vec, float(x), k)
-        k += 1
+    Main._tmp_matrix_flat = arr.ravel(order="F").tolist()
+    Main._tmp_matrix_nrow = int(nrow)
+    Main._tmp_matrix_ncol = int(ncol)
 
-    return Main.reshape(vec, nrow, ncol)
+    return Main.seval(
+        "reshape(Float64[y for y in _tmp_matrix_flat], _tmp_matrix_nrow, _tmp_matrix_ncol)"
+    )
 
+
+def _jl_vector_f64(vec, Main, name="vec"):
+    import numpy as np
+
+    arr = np.asarray(vec, dtype=np.float64).ravel()
+
+    if not np.isfinite(arr).all():
+        bad = arr[~np.isfinite(arr)]
+        raise ValueError(f"{name} has non-finite values: {bad[:10]}")
+
+    Main._tmp_vector_f64 = arr.tolist()
+    return Main.seval("Float64[y for y in _tmp_vector_f64]")
+
+
+def _jl_vector_bool(vec, Main, name="vec"):
+    import numpy as np
+
+    arr = np.asarray(vec, dtype=bool).ravel()
+
+    Main._tmp_vector_bool = arr.tolist()
+    return Main.seval("Bool[y for y in _tmp_vector_bool]")
 
 def _clean_stellar_model(model):
     if model is None:
@@ -200,15 +225,13 @@ def _get_surface_brightness_profile(config, physics_engine, obs):
         getattr(physics_engine, "__surface_brightness_profile__", None),
         getattr(obs, "surface_brightness_profile", None),
         config.get("SURFACE_BRIGHTNESS_PROFILE"),
-        config.get("surface_brightness_profile"),
-    ]
+        config.get("surface_brightness_profile"),]
 
     obs_cfg = config.get("OBSERVABLES", {})
     if isinstance(obs_cfg, dict):
         candidates.extend([
             obs_cfg.get("SURFACE_BRIGHTNESS_PROFILE"),
-            obs_cfg.get("surface_brightness_profile"),
-        ])
+            obs_cfg.get("surface_brightness_profile"),])
 
     for profile in candidates:
         if profile is not None:
@@ -216,8 +239,7 @@ def _get_surface_brightness_profile(config, physics_engine, obs):
 
     raise RuntimeError(
         "surface_brightness_profile is required for Karl-style OSPM; "
-        "no star-count fallback is allowed"
-    )
+        "no star-count fallback is allowed")
 
 def _observable_config(config):
     obs_cfg = config.get("OBSERVABLES", {})
@@ -638,10 +660,10 @@ def run_daemon(config, physics_engine):
                             max_weight_fraction_vec,
                         ) = jl_batch(
                             _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat"),
-                            juliacall.convert(Main.Vector[Main.Float64], R_star_m),
-                            juliacall.convert(Main.Vector[Main.Bool], valid_vlos),
-                            juliacall.convert(Main.Vector[Main.Float64], v_star_mps),
-                            juliacall.convert(Main.Vector[Main.Float64], verr_star_mps),
+                            _jl_vector_f64(R_star_m, Main, name="R_star_m"),
+                            _jl_vector_bool(valid_vlos, Main, name="valid_vlos"),
+                            _jl_vector_f64(v_star_mps, Main, name="v_star_mps"),
+                            _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps"),
                             sini,
                             Norbit,
                             halo_type_chunk,
@@ -665,8 +687,7 @@ def run_daemon(config, physics_engine):
                             halo_q_axis_ratio=halo_q_axis_ratio,
                             karl_halo_params=karl_halo_params,
                             velocity_edges=velocity_edges,
-                            kinematic_bin_edges=juliacall.convert(Main.Vector[Main.Float64], kinematic_bin_edges),
-                        )
+                            kinematic_bin_edges=_jl_vector_f64(kinematic_bin_edges, Main, name="kinematic_bin_edges")),
 
                         t_acc["eval"] += time.perf_counter() - chunk_t0
                         t_cnt["eval"] += len(chunk_thetas)
