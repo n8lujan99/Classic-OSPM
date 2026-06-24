@@ -5,3 +5,6 @@ __pycache__/
 
 # Conda local package/cache folders
 .CondaPkg/
+
+# Local plotting / analysis scratch files
+OSPM/Plotting/
