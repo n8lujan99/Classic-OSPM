@@ -228,12 +228,14 @@ end
 @inline function normalize_surface_brightness_profile(profile)
     profile === nothing && return nothing
     out = Dict{Symbol,Any}()
-
     for (k, v) in profile
         ks = k isa Symbol ? k : Symbol(String(k))
-        out[ks] = v
+        if ks in (:R_pc, :R_inner_pc, :R_outer_pc, :light_frac, :Sigma, :Sigma_err)
+            out[ks] = Float64[x for x in v]
+        else
+            out[ks] = v
+        end
     end
-
     return out
 end
 

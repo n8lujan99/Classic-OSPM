@@ -1,111 +1,72 @@
 #!/usr/bin/env python3
 import argparse
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
 
 def as_bool(x):
     if isinstance(x, bool):
         return x
     return str(x).strip().lower() in {"1", "true", "yes", "y", "t"}
 
-
 def first_finite(series, default=np.nan):
     arr = pd.to_numeric(series, errors="coerce").to_numpy(float)
     arr = arr[np.isfinite(arr)]
     return float(arr[0]) if arr.size else default
 
-
 def interp_loglog(x_old, y_old, x_new):
     x_old = np.asarray(x_old, float)
     y_old = np.asarray(y_old, float)
     x_new = np.asarray(x_new, float)
-
     good = np.isfinite(x_old) & np.isfinite(y_old) & (x_old > 0) & (y_old > 0)
-
     if np.count_nonzero(good) < 2:
         raise ValueError("Need at least two positive finite points for log-log interpolation.")
-
     lx = np.log(x_old[good])
     ly = np.log(y_old[good])
-
     order = np.argsort(lx)
     lx = lx[order]
     ly = ly[order]
-
     lx_new = np.log(np.maximum(x_new, np.exp(lx[0])))
     ly_new = np.interp(lx_new, lx, ly, left=ly[0], right=ly[-1])
-
     return np.exp(ly_new)
-
 
 def interp_linear(x_old, y_old, x_new):
     x_old = np.asarray(x_old, float)
     y_old = np.asarray(y_old, float)
     x_new = np.asarray(x_new, float)
-
     good = np.isfinite(x_old) & np.isfinite(y_old)
-
     if np.count_nonzero(good) < 2:
         raise ValueError("Need at least two finite points for linear interpolation.")
-
     order = np.argsort(x_old[good])
-
-    return np.interp(
-        x_new,
-        x_old[good][order],
-        y_old[good][order],
-        left=y_old[good][order][0],
-        right=y_old[good][order][-1],
-    )
-
+    return np.interp( x_new, x_old[good][order], y_old[good][order], left=y_old[good][order][0], right=y_old[good][order][-1] )
 
 def make_min_count_bins(r_pc, min_per_bin=20, drop_partial=False):
     r = np.sort(np.asarray(r_pc, float))
     r = r[np.isfinite(r)]
-
     if len(r) == 0:
         raise ValueError("No finite radii for kinematic bins.")
-
     edges = [r[0]]
     rows = []
     i = 0
     bin_id = 0
-
     while i < len(r):
         j = min(i + min_per_bin, len(r))
         nbin = j - i
-
         if drop_partial and nbin < min_per_bin:
             break
-
         if nbin <= 0:
             break
-
         if j < len(r):
             edge_out = 0.5 * (r[j - 1] + r[j])
         else:
             edge_out = r[j - 1]
-
         if edge_out <= edges[-1]:
             edge_out = edges[-1] + max(abs(edges[-1]), 1.0) * 1e-9
-
         edges.append(edge_out)
-
-        rows.append({
-            "bin_id": bin_id,
-            "R_inner_pc": edges[-2],
-            "R_outer_pc": edges[-1],
-            "R_mid_pc": 0.5 * (edges[-2] + edges[-1]),
-            "N_vlos": nbin,
-        })
-
+        rows.append({"bin_id": bin_id, "R_inner_pc": edges[-2], "R_outer_pc": edges[-1], "R_mid_pc": 0.5 * (edges[-2] + edges[-1]), "N_vlos": nbin })
         i = j
         bin_id += 1
-
     return np.asarray(edges, float), pd.DataFrame(rows)
 
 
@@ -119,15 +80,12 @@ def warn_if_extrapolating(R_old, R_new, label="R_pc"):
     R_new = np.asarray(R_new, float)
     old_good = R_old[np.isfinite(R_old)]
     new_good = R_new[np.isfinite(R_new)]
-
     if old_good.size == 0 or new_good.size == 0:
         return
-
     lo = np.nanmin(old_good)
     hi = np.nanmax(old_good)
     below = int(np.count_nonzero(new_good < lo))
     above = int(np.count_nonzero(new_good > hi))
-
     if below or above:
         print(
             f"WARNING: {below + above} target {label} values fall outside the source surface-brightness range "
@@ -140,28 +98,21 @@ def validate_surface_brightness_bins(out, bins):
     missing = required - set(out.columns)
     if missing:
         raise KeyError(f"rebinned surface-brightness output missing columns: {sorted(missing)}")
-
     if len(out) != len(bins):
         raise ValueError(f"rebinned light rows do not match target bins: {len(out)} vs {len(bins)}")
-
     if not np.all(np.isfinite(out["R_inner_pc"])) or not np.all(np.isfinite(out["R_outer_pc"])):
         raise ValueError("rebinned surface-brightness bin edges contain non-finite values")
-
     if not np.all(out["R_outer_pc"].to_numpy(float) > out["R_inner_pc"].to_numpy(float)):
         raise ValueError("rebinned surface-brightness bins require R_outer_pc > R_inner_pc")
-
     light = out["light_frac"].to_numpy(float)
     if not np.all(np.isfinite(light)) or np.any(light < 0.0):
         raise ValueError("light_frac must be finite and non-negative")
-
     lsum = float(np.sum(light))
     if not np.isclose(lsum, 1.0, rtol=1e-10, atol=1e-12):
         raise ValueError(f"light_frac must sum to 1; got {lsum:.16g}")
-
     area = out["area_pc2"].to_numpy(float)
     if not np.all(np.isfinite(area)) or np.any(area <= 0.0):
         raise ValueError("area_pc2 must be finite and positive")
-
     return True
 
 
@@ -170,26 +121,21 @@ def validate_light_grid(out, ltot):
     missing = required - set(out.columns)
     if missing:
         raise KeyError(f"spherical light grid missing columns: {sorted(missing)}")
-
     r = out["r_pc"].to_numpy(float)
     lum = out["cell_luminosity_Lsun"].to_numpy(float)
     lenc = out["Lenc_frac"].to_numpy(float)
-
     if not np.all(np.isfinite(r)) or np.any(r <= 0.0):
         raise ValueError("spherical light grid radii must be positive and finite")
     if not np.all(np.isfinite(lum)) or np.any(lum < 0.0):
         raise ValueError("spherical light grid cell luminosities must be finite and non-negative")
-
     Lsum = float(np.sum(lum))
     if not np.isclose(Lsum, float(ltot), rtol=1e-8, atol=max(1e-8, 1e-10 * abs(float(ltot)))):
         raise ValueError(f"spherical light grid luminosity sum {Lsum:.16g} does not match Ltot {float(ltot):.16g}")
-
     unique_lenc = pd.Series(lenc[np.isfinite(lenc)]).drop_duplicates().to_numpy(float)
     if unique_lenc.size == 0 or np.any(np.diff(unique_lenc) < -1e-12):
         raise ValueError("Lenc_frac must be monotonic non-decreasing")
     if not np.isclose(np.nanmax(lenc), 1.0, rtol=1e-8, atol=1e-10):
-        raise ValueError(f"Lenc_frac should end at 1; got {np.nanmax(lenc):.16g}")
-
+        raise ValueError(f"Lenc_frac should end at 1; got {np.nanmax(lenc):.16g}")I 
     return True
 
 
