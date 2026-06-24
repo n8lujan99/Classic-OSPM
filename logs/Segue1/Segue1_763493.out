@@ -1,0 +1,34 @@
+[SLURM] Loading conda from: /home/mez653/miniconda3
+[SLURM] Python: /home/mez653/miniconda3/envs/ospm/bin/python
+Python 3.11.14
+Python: /home/mez653/miniconda3/envs/ospm/bin/python
+Python 3.11.14
+Julia: /apps/julia/1.10.9/bin/julia
+Julia threads: 20
+Julia project: /work/mez653/Classic-OSPM/Project.toml
+PYTHON_JULIACALL_EXE=/apps/julia/1.10.9/bin/julia
+PYTHON_JULIACALL_PROJECT=/work/mez653/Classic-OSPM
+JULIA_DEPOT_PATH=/scratch/09909/n8lujan99/.julia
+JULIA_PYTHONCALL_EXE=/home/mez653/miniconda3/envs/ospm/bin/python
+JULIA_CONDAPKG_BACKEND=Null
+JULIA_PROJECT=/work/mez653/Classic-OSPM
+Launching OSPM...
+Galaxy file contents: Segue1
+cwd: /work/mez653/Classic-OSPM
+venv python: /home/mez653/miniconda3/envs/ospm/bin/python
+Launching OSPM directly from Data/slurm...
+[PY] OSPM_Physics Karl bridge imported from: /work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics.py
+[CONFIG] CSV_PATH = /work/mez653/Classic-OSPM/Data/Galaxy_Profiles/Segue1/default/daemon_deck_karl_segue1.csv
+[CONFIG] LOCAL_DEBUG = False
+[CONFIG] NORBIT = 2500
+[CONFIG] MAX_RUNS = 100000
+[CONFIG] BATCH_SIZE = 90
+[CONFIG] CHUNK_SIZE = 90
+[CONFIG] STELLAR_GEOMETRY = axisymmetric_density_grid
+[CONFIG] NTHETA_LAUNCH = 9
+[CONFIG] WEIGHT_MODE = entropy
+[CONFIG] WEIGHT_SOLVER = expanded_cm
+[CONFIG] LOSVD_SCORE_MODE = standard
+[JLINIT] Including Julia physics file: /work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl
+[JLINIT] Julia physics include OK
+Julia threads seen by module: 20

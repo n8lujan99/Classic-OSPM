@@ -1,0 +1,113 @@
+[SLURM] Loading conda from: /home/mez653/miniconda3
+[SLURM] Python: /home/mez653/miniconda3/envs/ospm/bin/python
+Python 3.11.14
+Python: /home/mez653/miniconda3/envs/ospm/bin/python
+Python 3.11.14
+Julia: /apps/julia/1.10.9/bin/julia
+Julia threads: 20
+Julia project: /work/mez653/Classic-OSPM/Project.toml
+PYTHON_JULIACALL_EXE=/apps/julia/1.10.9/bin/julia
+PYTHON_JULIACALL_PROJECT=/work/mez653/Classic-OSPM
+JULIA_DEPOT_PATH=/scratch/09909/n8lujan99/.julia
+JULIA_PYTHONCALL_EXE=/home/mez653/miniconda3/envs/ospm/bin/python
+JULIA_CONDAPKG_BACKEND=Null
+JULIA_PROJECT=/work/mez653/Classic-OSPM
+Launching OSPM...
+Galaxy file contents: Draco
+cwd: /work/mez653/Classic-OSPM
+venv python: /home/mez653/miniconda3/envs/ospm/bin/python
+Launching OSPM directly from Data/slurm...
+[PY] OSPM_Physics Karl bridge imported from: /work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics.py
+[CONFIG] CSV_PATH = /work/mez653/Classic-OSPM/Data/Galaxy_Profiles/Draco/default/daemon_deck_karl_draco.csv
+[CONFIG] LOCAL_DEBUG = False
+[CONFIG] NORBIT = 10000
+[CONFIG] MAX_RUNS = 10000
+[CONFIG] BATCH_SIZE = 90
+[CONFIG] CHUNK_SIZE = 90
+[CONFIG] STELLAR_GEOMETRY = axisymmetric_density_grid
+[CONFIG] NTHETA_LAUNCH = 9
+[CONFIG] WEIGHT_MODE = entropy
+[CONFIG] WEIGHT_SOLVER = expanded_cm
+[CONFIG] LOSVD_SCORE_MODE = standard
+[JLINIT] Including Julia physics file: /work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl
+[JLINIT] Julia physics include OK
+Julia threads seen by module: 20
+torch imported? False
+obs type: <class 'OSPM.Observables.OSPM_Observables_Stellar.OSPMObservablesStellar'>
+has R_star_m: True
+has v_star_mps: True
+has verr_star_mps: True
+has surface_brightness_profile: True
+has kinematic_bin_edges_pc: True
+torch imported after build? False
+DECK LOAD DEBUG
+path: /work/mez653/Classic-OSPM/Data/Galaxy_Profiles/Draco/default/daemon_deck_karl_draco.csv
+params: ['rho_s', 'r_s', 'MBH', 'ML']
+columns: ['rho_s', 'r_s', 'MBH', 'ML', 'chi2', 'reward', 'status', 'proposal_id', 'refine_passes', 'chi2_losvd', 'chi2_light', 'chi2_total', 'chi2_inner', 'chi2_outer', 'N_inner', 'N_outer', 'N_nonzero_weights', 'effective_N_orbits', 'max_weight_fraction', 'halo_type', 'weight_mode', 'weight_solver_mode', 'losvd_score_mode', 'alphat', 'halo_q_axis_ratio', 'karl_halo_params_active']
+head:
+      rho_s          r_s             MBH        ML  chi2     reward                  status  proposal_id  refine_passes  chi2_losvd  chi2_light  chi2_total  chi2_inner  chi2_outer  N_inner  N_outer  N_nonzero_weights  effective_N_orbits  max_weight_fraction halo_type  weight_mode  weight_solver_mode  losvd_score_mode  alphat  halo_q_axis_ratio  karl_halo_params_active
+0  1.000000  1800.000000   900000.000000  1.000000   NaN        NaN                    todo          NaN            NaN         NaN         NaN         NaN         NaN         NaN      NaN      NaN                NaN                 NaN                  NaN       NaN          NaN                 NaN               NaN     NaN                NaN                      NaN
+1  3.196998  5387.952349   509553.035526  1.484415   inf -1000000.0       numeric_fail_full          1.0            0.0         NaN         NaN         NaN         NaN         NaN      NaN      NaN                NaN                 NaN                  NaN       nfw          NaN                 NaN               NaN     NaN                NaN                      NaN
+2  3.196998  5387.952349        0.000000  1.484415   inf -1000000.0  numeric_fail_halo_only          1.0            0.0         NaN         NaN         NaN         NaN         NaN      NaN      NaN                NaN                 NaN                  NaN       nfw          NaN                 NaN               NaN     NaN                NaN                      NaN
+3  3.196998  5387.952349  1000000.000000  1.484415   inf -1000000.0      numeric_fail_bh_up          1.0            0.0         NaN         NaN         NaN         NaN         NaN      NaN      NaN                NaN                 NaN                  NaN       nfw          NaN                 NaN               NaN     NaN                NaN                      NaN
+4  3.196998  5387.952349   254776.517763  1.484415   inf -1000000.0    numeric_fail_bh_down          1.0            0.0         NaN         NaN         NaN         NaN         NaN      NaN      NaN                NaN                 NaN                  NaN       nfw          NaN                 NaN               NaN     NaN                NaN                      NaN
+CONFIG PARAMETER_NAMES: ['rho_s', 'r_s', 'MBH', 'ML']
+CONFIG THETA_BOUNDS: [(1e-08, 6.0), (100.0, 10000.0), (0.0, 1000000.0), (0.2, 2.0)]
+runner.bounds: [(1e-08, 6.0), (100.0, 10000.0), (0.0, 1000000.0), (0.2, 2.0)]
+[Daemon] Karl batch mode ON — Norbit=10000, Nbase_orbit=5000, Nstar_vlos=563, min_stars_per_bin=20, Nvbin=21, Ntheta_launch=9, weight_mode=entropy, weight_solver_mode=expanded_cm, losvd_score_mode=standard, halo_q=1.0, karl_halo_params_active=False
+[Daemon] loop iter runs=0
+base_props[:3] = [([2.5959162253368184, 5418.639093371649, 7582.875702093927, 0.9475349749914028], 1), ([4.428957616034554, 1615.1627118666624, 798010.1199504668, 0.2997929937537278], 2), ([0.2595537067412486, 7750.597247656092, 228641.19067633405, 0.26421255781842246], 3)]
+[Daemon] proposing 810 variants, starting eval...
+[JL KWARG DEBUG]
+stellar_model type: <class 'dict'>
+stellar_model value: {'type': 'karl_light_grid', 'grid_csv': '/work/mez653/Classic-OSPM/Data/Galaxy_Profiles/Draco/draco_oden_kirchen2001_axisymmetric_light_grid.csv', 'Ltot': 270000.0, 'geometry': 'axisymmetric_density_grid', 'q_axis_ratio': 0.69, 'R_cyl_col': 'R_cyl_pc', 'z_col': 'z_pc', 'nu_col': 'nu_Lsun_pc3', 'volume_col': 'cell_volume_pc3', 'luminosity_col': 'cell_luminosity_Lsun', 'force_softening_pc': 0.5, 'force_nR': 96, 'force_nZ': 96, 'force_nphi': 32, 'source': 'Odenkirchen2001'}
+surface_brightness_profile type: <class 'dict'>
+surface_brightness_profile value: {'R_pc': array([ 18.60007929,  40.96411788,  53.42147803,  66.76538702,
+        79.0045778 ,  91.23026774, 101.42746925, 111.84255092,
+       121.40723142, 133.22024712, 148.14663812, 162.51477316,
+       175.06016072, 185.40721063, 196.5904881 , 210.65671312,
+       225.88170875, 243.06779232, 264.9120166 , 287.22797334,
+       309.54163964, 339.79656036, 375.26157972, 416.85971756,
+       463.576899  , 510.51591335, 573.2394986 , 695.05830893,
+       783.35675126]), 'R_inner_pc': array([  1.04973019,  36.15042839,  45.77780737,  61.06514869,
+        72.46562535,  85.54353026,  96.91700522, 105.93793328,
+       117.74716856, 125.06729428, 141.37319997, 154.92007627,
+       170.10947006, 180.01085139, 190.80356987, 202.37740632,
+       218.93601992, 232.82739758, 253.30818707, 276.51584613,
+       297.94010054, 321.14317873, 358.44994199, 392.07321745,
+       441.64621766, 485.50758035, 535.52424635, 610.95475085,
+       779.16186701]), 'R_outer_pc': array([ 36.15042839,  45.77780737,  61.06514869,  72.46562535,
+        85.54353026,  96.91700522, 105.93793328, 117.74716856,
+       125.06729428, 141.37319997, 154.92007627, 170.10947006,
+       180.01085139, 190.80356987, 202.37740632, 218.93601992,
+       232.82739758, 253.30818707, 276.51584613, 297.94010054,
+       321.14317873, 358.44994199, 392.07321745, 441.64621766,
+       485.50758035, 535.52424635, 610.95475085, 779.16186701,
+       787.55163551]), 'light_frac': array([0.02663419, 0.01214214, 0.02472982, 0.02297184, 0.0310368 ,
+       0.02909692, 0.02400813, 0.02937939, 0.01720894, 0.04385207,
+       0.04044122, 0.04264752, 0.02694872, 0.02885091, 0.03037642,
+       0.04252443, 0.03489859, 0.05027727, 0.04693809, 0.03579582,
+       0.03754295, 0.05439811, 0.0345474 , 0.04195159, 0.03182408,
+       0.03317986, 0.04441578, 0.07763207, 0.00374894]), 'Sigma': array([6.67345403, 5.03645692, 4.95353029, 4.937     , 4.91392146,
+       4.58729406, 4.29233173, 3.63877791, 3.16761658, 3.30230052,
+       3.29636213, 2.82619566, 2.54329508, 2.35854249, 2.18392886,
+       1.99425617, 1.81937895, 1.65211098, 1.24891848, 0.9515717 ,
+       0.85507723, 0.70197068, 0.44790196, 0.33208936, 0.2560316 ,
+       0.2125652 , 0.16803349, 0.10862187, 0.09331258]), 'Sigma_err': array([1.65534846, 0.81389951, 0.69418984, 0.61699091, 0.5596541 ,
+       0.50656938, 0.46139131, 0.4090279 , 0.36094001, 0.35139515,
+       0.33399193, 0.29498342, 0.25321074, 0.21612018, 0.17603204,
+       0.15493605, 0.14316567, 0.12987917, 0.11063729, 0.09084779,
+       0.08320114, 0.07220049, 0.05454822, 0.03848104, 0.02592993,
+       0.02091275, 0.01549098, 0.01184418, 0.0098398 ])}
+karl_halo_params type: <class 'NoneType'>
+karl_halo_params value: None
+velocity_edges type: <class 'NoneType'>
+velocity_edges value: None
+[JL MATRIX DEBUG] theta_mat: shape=(4, 90), dtype=float64
+
+===== JULIA EXCEPTION =====
+type: <class 'juliacall.JuliaError'>
+repr: JuliaError(<jl MethodError(PythonCall.Utils._unwrap_unionall, (Vector{Any},), 0x0000000000007ba3)>, <jl Union{Ptr{Nothing}, Base.InterpreterIP}[Ptr{Nothing} @0x00007f45c72c2006, Ptr{Nothing} @0x00007f45c72c8895, Ptr{Nothing} @0x00007f45c72ca685, Ptr{Nothing} @0x00007f45380d823c, Ptr{Nothing} @0x00007f45c72ca06d, Ptr{Nothing} @0x00007f45b179bba7, Ptr{Nothing} @0x00007f45c72ca06d, Ptr{Nothing} @0x00007f45c733069a, Ptr{Nothing} @0x00007f45c7332c50, Ptr{Nothing} @0x00007f45c72e8fe7, Ptr{Nothing} @0x00007f45c72e9061, Ptr{Nothing} @0x00007f45380d82bd, Ptr{Nothing} @0x00007f45380d835a, Ptr{Nothing} @0x00007f45380d8387, Ptr{Nothing} @0x00007f45c72ca06d, Ptr{Nothing} @0x00007f45380d7bc2, Ptr{Nothing} @0x00007f45380d7cf1, Ptr{Nothing} @0x00007f45380d7f53, Ptr{Nothing} @0x00007f45c72ca06d, Ptr{Nothing} @0x00007f45b0e0eb71, Ptr{Nothing} @0x00007f45b0e0f40e, Ptr{Nothing} @0x00007f45b0e164f2, Ptr{Nothing} @0x000000000052867f, Ptr{Nothing} @0x000000000050400b, Ptr{Nothing} @0x0000000000511615, Ptr{Nothing} @0x0000000000538d02, Ptr{Nothing} @0x0000000000508947, Ptr{Nothing} @0x000000000054083f, Ptr{Nothing} @0x0000000000611ca6, Ptr{Nothing} @0x0000000000542d3c, Ptr{Nothing} @0x00000000005157ba, Ptr{Nothing} @0x00000000005cc389, Ptr{Nothing} @0x00000000005cba5e, Ptr{Nothing} @0x00000000005e5062, Ptr{Nothing} @0x000000000051e706, Ptr{Nothing} @0x000000000051e5f0, Ptr{Nothing} @0x0000000000511615, Ptr{Nothing} @0x0000000000538d02, Ptr{Nothing} @0x00000000005f761e, Ptr{Nothing} @0x00000000005f6f69, Ptr{Nothing} @0x00000000005bbf48, Ptr{Nothing} @0x00007f45d8706864, Ptr{Nothing} @0x00000000005bbd96]>)
+str(): failed
+julia exception: <jl MethodError(PythonCall.Utils._unwrap_unionall, (Vector{Any},), 0x0000000000007ba3)>
+[Daemon] Python traceback for failed chunk:

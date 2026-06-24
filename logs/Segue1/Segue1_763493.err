@@ -1,0 +1,20 @@
+┌ Info: OSPMPhysicsSpherical Karl-style loaded from
+└   #= /work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl:6 =# @__FILE__ = "/work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl"
+[ Info: OSPMPhysicsSpherical supports spherical frc(r,theta)->(fr,0) and axisymmetric frc(r,theta)->(fr,ftheta)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_RUN.py", line 65, in <module>
+    main()
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_RUN.py", line 51, in main
+    physics_engine = build_physics_engine(runtime)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_RUN.py", line 15, in build_physics_engine
+    obs = build_observables(config)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_MASTER.py", line 18, in build_observables
+    return OSPMObservablesStellar.from_star_table(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/mez653/Classic-OSPM/OSPM/Observables/OSPM_Observables_Stellar.py", line 227, in from_star_table
+    raise KeyError(f"Missing required columns in star table: {missing}")
+KeyError: "Missing required columns in star table: ['r_pc', 'vlos', 'vlos_err']"

@@ -1,0 +1,29 @@
+┌ Info: OSPMPhysicsSpherical Karl-style loaded from
+└   #= /work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl:6 =# @__FILE__ = "/work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl"
+[ Info: OSPMPhysicsSpherical supports spherical frc(r,theta)->(fr,0) and axisymmetric frc(r,theta)->(fr,ftheta)
+Traceback (most recent call last):
+  File "/work/mez653/Classic-OSPM/OSPM/AI/OSPM_Daemon.py", line 661, in run_daemon
+    ) = jl_batch(
+        ^^^^^^^^^
+  File "/scratch/09909/n8lujan99/.julia/packages/PythonCall/JksWe/src/JlWrap/any.jl", line 263, in __call__
+    return self._jl_callmethod($(pyjl_methodnum(pyjlany_call)), args, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+juliacall.JuliaError: <exception str() failed>
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_RUN.py", line 65, in <module>
+    main()
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_RUN.py", line 60, in main
+    result = api.run()
+             ^^^^^^^^^
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_API.py", line 29, in run
+    return run_daemon(self.config, self.physics_engine)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/work/mez653/Classic-OSPM/OSPM/AI/OSPM_Daemon.py", line 661, in run_daemon
+    ) = jl_batch(
+        ^^^^^^^^^
+  File "/scratch/09909/n8lujan99/.julia/packages/PythonCall/JksWe/src/JlWrap/any.jl", line 263, in __call__
+    return self._jl_callmethod($(pyjl_methodnum(pyjlany_call)), args, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+juliacall.JuliaError: <exception str() failed>

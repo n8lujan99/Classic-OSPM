@@ -1,0 +1,3 @@
+┌ Info: OSPMPhysicsSpherical Karl-style loaded from
+└   #= /work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl:6 =# @__FILE__ = "/work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics_Spherical.jl"
+[ Info: OSPMPhysicsSpherical supports spherical frc(r,theta)->(fr,0) and axisymmetric frc(r,theta)->(fr,ftheta)

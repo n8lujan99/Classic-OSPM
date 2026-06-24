@@ -1,0 +1,41 @@
+ERROR: ArgumentError: Package PythonCall [6099a3de-0909-46bc-b1f4-468b9a2dfc0d] is required but does not seem to be installed:
+ - Run `Pkg.instantiate()` to install all recorded dependencies.
+
+Stacktrace:
+  [1] _require(pkg::Base.PkgId, env::String)
+    @ Base ./loading.jl:1996
+  [2] __require_prelocked(uuidkey::Base.PkgId, env::String)
+    @ Base ./loading.jl:1882
+  [3] #invoke_in_world#3
+    @ ./essentials.jl:926 [inlined]
+  [4] invoke_in_world
+    @ ./essentials.jl:923 [inlined]
+  [5] _require_prelocked(uuidkey::Base.PkgId, env::String)
+    @ Base ./loading.jl:1873
+  [6] macro expansion
+    @ ./loading.jl:1860 [inlined]
+  [7] macro expansion
+    @ ./lock.jl:267 [inlined]
+  [8] __require(into::Module, mod::Symbol)
+    @ Base ./loading.jl:1823
+  [9] #invoke_in_world#3
+    @ ./essentials.jl:926 [inlined]
+ [10] invoke_in_world
+    @ ./essentials.jl:923 [inlined]
+ [11] require(into::Module, mod::Symbol)
+    @ Base ./loading.jl:1816
+ [12] top-level scope
+    @ none:6Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_RUN.py", line 65, in <module>
+    main()
+  File "/work/mez653/Classic-OSPM/OSPM/Controllers/OSPM_RUN.py", line 45, in main
+    P._jl_init()
+  File "/work/mez653/Classic-OSPM/OSPM/Physics/OSPM_Physics.py", line 54, in _jl_init
+    from juliacall import Main as _Main
+  File "/home/mez653/miniconda3/envs/ospm/lib/python3.11/site-packages/juliacall/__init__.py", line 330, in <module>
+    init()
+  File "/home/mez653/miniconda3/envs/ospm/lib/python3.11/site-packages/juliacall/__init__.py", line 282, in init
+    raise Exception('PythonCall.jl did not start properly')
+Exception: PythonCall.jl did not start properly
