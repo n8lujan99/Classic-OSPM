@@ -8,6 +8,36 @@ CYAN='\033[0;36m'
 WHITE='\033[1;37m'
 NC='\033[0m'
 
+kv() {
+    local line="$1"
+    local key="$2"
+    printf '%s\n' "$line" | grep -o "${key}=[^ ]*" | head -1 | cut -d= -f2-
+}
+
+ratio_label() {
+    local ratio="$1"
+    python - "$ratio" <<'PY'
+import sys, math
+
+s = sys.argv[1] if len(sys.argv) > 1 else ""
+
+try:
+    x = float(s)
+except Exception:
+    print("UNKNOWN")
+    raise SystemExit
+
+if not math.isfinite(x):
+    print("UNKNOWN")
+elif 0.80 <= x <= 1.25:
+    print("OK")
+elif 0.50 <= x <= 2.00:
+    print("WATCH")
+else:
+    print("BAD")
+PY
+}
+
 while true
 do
     clear
@@ -68,6 +98,59 @@ do
         echo
         echo -e "${CYAN}Recent PROF Lines${NC}"
         grep "\[PROF\]" "$latest_out" | tail -5
+
+        echo
+        echo -e "${CYAN}Expanded CM Diagnostics${NC}"
+        latest_cm=$(grep "\[EXPANDED CM DIAG\]" "$latest_out" | tail -1)
+
+        if [ -n "$latest_cm" ]; then
+            cm_i=$(kv "$latest_cm" "i")
+            cm_entropy=$(kv "$latest_cm" "entropy")
+            cm_losvd=$(kv "$latest_cm" "chi_losvd_solver")
+            cm_slack=$(kv "$latest_cm" "chi_slack_over_alphat")
+            cm_ratio=$(kv "$latest_cm" "slack_to_losvd")
+            cm_light=$(kv "$latest_cm" "chi_light_solver")
+            cm_neff=$(kv "$latest_cm" "Neff")
+            cm_maxw=$(kv "$latest_cm" "max_weight_fraction")
+            cm_rcond=$(kv "$latest_cm" "rcond_est")
+            cm_dw=$(kv "$latest_cm" "max_abs_dw")
+            cm_slackmax=$(kv "$latest_cm" "slack_max_abs")
+            cm_status=$(ratio_label "$cm_ratio")
+
+            if [ "$cm_status" = "OK" ]; then
+                cm_color="$GREEN"
+            elif [ "$cm_status" = "WATCH" ]; then
+                cm_color="$YELLOW"
+            else
+                cm_color="$RED"
+            fi
+
+            echo -e "Latest model i=${GREEN}${cm_i:-?}${NC}"
+            echo -e "Entropy=${GREEN}${cm_entropy:-?}${NC}"
+            echo -e "LOSVD solver chi=${GREEN}${cm_losvd:-?}${NC}  Slack chi/alphat=${GREEN}${cm_slack:-?}${NC}"
+            echo -e "Slack/LOSVD ratio=${cm_color}${cm_ratio:-?} [$cm_status]${NC}"
+            echo -e "Light chi=${GREEN}${cm_light:-?}${NC}"
+            echo -e "Neff=${YELLOW}${cm_neff:-?}${NC}  Max weight=${YELLOW}${cm_maxw:-?}${NC}"
+            echo -e "rcond=${YELLOW}${cm_rcond:-?}${NC}  max_abs_dw=${YELLOW}${cm_dw:-?}${NC}  slack_max_abs=${YELLOW}${cm_slackmax:-?}${NC}"
+
+            echo
+            echo -e "${CYAN}Recent Expanded CM Lines${NC}"
+            grep "\[EXPANDED CM DIAG\]" "$latest_out" | tail -5 | while read -r line
+            do
+                li=$(kv "$line" "i")
+                lr=$(kv "$line" "slack_to_losvd")
+                ln=$(kv "$line" "Neff")
+                lm=$(kv "$line" "max_weight_fraction")
+                lc=$(kv "$line" "chi_losvd_solver")
+                ls=$(kv "$line" "chi_slack_over_alphat")
+                lrc=$(kv "$line" "rcond_est")
+                ldw=$(kv "$line" "max_abs_dw")
+
+                echo -e "i=${GREEN}${li:-?}${NC}  ratio=${YELLOW}${lr:-?}${NC}  Neff=${YELLOW}${ln:-?}${NC}  maxw=${YELLOW}${lm:-?}${NC}  losvd=${GREEN}${lc:-?}${NC}  slack/a=${GREEN}${ls:-?}${NC}  rcond=${YELLOW}${lrc:-?}${NC}  dw=${YELLOW}${ldw:-?}${NC}"
+            done
+        else
+            echo -e "${YELLOW}No [EXPANDED CM DIAG] lines found yet${NC}"
+        fi
     else
         echo -e "${YELLOW}No .out files found${NC}"
     fi
@@ -85,9 +168,13 @@ do
 
         if [ "$rows" -gt 0 ]; then
             best=$(python - "$deck" <<'PY'
-import sys, pandas as pd, numpy as np
+import sys
+import pandas as pd
+import numpy as np
+
 f = sys.argv[1]
 df = pd.read_csv(f)
+
 if "chi2" not in df.columns:
     print("NA")
 else:
@@ -97,11 +184,74 @@ else:
 PY
 )
 
+            weight_summary=$(python - "$deck" <<'PY'
+import sys
+import pandas as pd
+import numpy as np
+
+f = sys.argv[1]
+df = pd.read_csv(f)
+
+if "chi2" not in df.columns:
+    print("Weight diag: NA")
+    raise SystemExit
+
+chi = pd.to_numeric(df["chi2"], errors="coerce")
+good = df[np.isfinite(chi)].copy()
+
+if len(good) == 0:
+    print("Weight diag: NA")
+    raise SystemExit
+
+good["_chi"] = pd.to_numeric(good["chi2"], errors="coerce")
+best = good.loc[good["_chi"].idxmin()]
+
+cols = set(good.columns)
+
+pieces = []
+
+if "effective_N_orbits" in cols:
+    pieces.append(f"Best Neff={pd.to_numeric(pd.Series([best['effective_N_orbits']]), errors='coerce').iloc[0]:.6g}")
+
+if "max_weight_fraction" in cols:
+    pieces.append(f"Best maxw={pd.to_numeric(pd.Series([best['max_weight_fraction']]), errors='coerce').iloc[0]:.6g}")
+
+if "N_nonzero_weights" in cols:
+    pieces.append(f"Best Nnz={pd.to_numeric(pd.Series([best['N_nonzero_weights']]), errors='coerce').iloc[0]:.6g}")
+
+if not pieces:
+    print("Weight diag: columns not present")
+    raise SystemExit
+
+cut = np.nanpercentile(good["_chi"], 5)
+top = good[good["_chi"] <= cut].copy()
+
+extra = []
+
+if len(top) > 0 and "effective_N_orbits" in cols:
+    v = pd.to_numeric(top["effective_N_orbits"], errors="coerce")
+    v = v[np.isfinite(v)]
+    if len(v) > 0:
+        extra.append(f"Top5% med Neff={np.nanmedian(v):.6g}")
+
+if len(top) > 0 and "max_weight_fraction" in cols:
+    v = pd.to_numeric(top["max_weight_fraction"], errors="coerce")
+    v = v[np.isfinite(v)]
+    if len(v) > 0:
+        extra.append(f"Top5% med maxw={np.nanmedian(v):.6g}")
+
+print("Weight diag: " + "  ".join(pieces))
+if extra:
+    print("Top 5%:      " + "  ".join(extra))
+PY
+)
+
             last_status=$(tail -n 1 "$deck" | awk -F',' '{print $7}')
             last_chi=$(tail -n 1 "$deck" | awk -F',' '{print $5}')
 
             echo -e "Rows: ${GREEN}$rows${NC}  Best chi: ${GREEN}$best${NC}"
             echo -e "Last: status=${YELLOW}$last_status${NC} chi=${YELLOW}$last_chi${NC}"
+            echo "$weight_summary"
         else
             echo -e "${YELLOW}Empty deck${NC}"
         fi
