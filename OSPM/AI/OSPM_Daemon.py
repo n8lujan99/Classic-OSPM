@@ -728,15 +728,26 @@ def run_daemon(config, physics_engine):
                     except Exception as e:
                         t_acc["eval"] += time.perf_counter() - chunk_t0
                         t_cnt["eval"] += len(chunk_thetas)
-                        print(f"[Daemon] chunk failed halo_type={halo_type_chunk} (size={len(chunk_thetas)}), exc_type={type(e).__name__}", flush=True)
+
+                        print("\n===== JULIA EXCEPTION =====", flush=True)
+                        print("type:", type(e), flush=True)
+                        print("repr:", repr(e), flush=True)
+
+                        try:
+                            print("str:", str(e), flush=True)
+                        except Exception:
+                            print("str(): failed", flush=True)
+
+                        if hasattr(e, "exception"):
+                            try:
+                                print("julia exception:", repr(e.exception), flush=True)
+                            except Exception:
+                                print("could not print e.exception", flush=True)
+
                         print("[Daemon] Python traceback for failed chunk:", flush=True)
-                        for line in traceback.format_tb(e.__traceback__):
-                            print(line, end="", flush=True)
-                        print(f"[Daemon] exception class only: {type(e).__module__}.{type(e).__name__}", flush=True)
-                        for theta, pid, label, halo_type_variant in chunk_props:
-                            if _record(theta, pid, label, "numeric_fail", np.inf, 0, diag={"halo_type": str(halo_type_variant)}):
-                                stop = True
-                                break
+                        traceback.print_exc()
+
+                        raise
 
                     if stop:
                         break
