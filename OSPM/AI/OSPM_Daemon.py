@@ -622,7 +622,7 @@ def run_daemon(config, physics_engine):
                             _jl_vector_f64(v_star_mps, Main, name="v_star_mps"),
                             _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps"),
                             sini, Norbit, halo_type_chunk,
-                            stellar_model=stellar_model,
+                            stellar_model=None,
                             surface_brightness_profile=surface_brightness_profile_jl,
                             Nocc=nocc_compat,
                             lambda_occ=lambda_light,
