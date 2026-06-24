@@ -1,0 +1,113 @@
+#!/bin/bash
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+
+while true
+do
+    clear
+
+    echo -e "${WHITE}========================================${NC}"
+    echo -e "${WHITE}          OSPM STATUS MONITOR${NC}"
+    echo -e "${WHITE}========================================${NC}"
+
+    echo
+    echo -e "${CYAN}Queue Status${NC}"
+    JOBS=$(squeue -u "$USER" --noheader | wc -l)
+
+    if [ "$JOBS" -gt 0 ]; then
+        echo -e "${GREEN}RUNNING: $JOBS jobs${NC}"
+        squeue -u "$USER"
+    else
+        echo -e "${YELLOW}NO ACTIVE JOBS${NC}"
+    fi
+
+    echo
+    echo -e "${CYAN}Latest Error Log${NC}"
+    latest_err=$(ls -t logs/*.err logs/*/*.err 2>/dev/null | head -1)
+
+    if [ -n "$latest_err" ]; then
+        if grep -qi "traceback\|error:\|exception\|failed" "$latest_err"; then
+            echo -e "${RED}ERROR DETECTED${NC} : $latest_err"
+        else
+            echo -e "${GREEN}NO ERRORS${NC} : $latest_err"
+        fi
+        tail -n 8 "$latest_err"
+    else
+        echo -e "${YELLOW}No .err files found${NC}"
+    fi
+
+    echo
+    echo -e "${CYAN}Latest Runtime Log${NC}"
+    latest_out=$(ls -t logs/*.out logs/*/*.out 2>/dev/null | head -1)
+
+    if [ -n "$latest_out" ]; then
+        echo -e "${BLUE}$latest_out${NC}"
+
+        start_time=$(grep -m1 "Start time:" "$latest_out" | sed 's/Start time: //')
+        galaxy=$(grep -m1 "Galaxy:" "$latest_out" | awk '{print $2}')
+        norbit=$(grep -m1 "\[CONFIG\] NORBIT" "$latest_out" | awk '{print $4}')
+        batch=$(grep -m1 "\[CONFIG\] BATCH_SIZE" "$latest_out" | awk '{print $4}')
+        chunk=$(grep -m1 "\[CONFIG\] CHUNK_SIZE" "$latest_out" | awk '{print $4}')
+        threads=$(grep -m1 "Julia threads" "$latest_out" | awk '{print $3}')
+        mode_line=$(grep -m1 "Karl batch mode ON" "$latest_out")
+
+        echo -e "Galaxy: ${GREEN}${galaxy:-unknown}${NC}"
+        echo -e "Start:  ${YELLOW}${start_time:-unknown}${NC}"
+        echo -e "Config: Norbit=${GREEN}${norbit:-?}${NC}  Batch=${GREEN}${batch:-?}${NC}  Chunk=${GREEN}${chunk:-?}${NC}  Threads=${GREEN}${threads:-?}${NC}"
+
+        if [ -n "$mode_line" ]; then
+            echo "$mode_line" | sed 's/\[Daemon\] //'
+        fi
+
+        echo
+        echo -e "${CYAN}Recent PROF Lines${NC}"
+        grep "\[PROF\]" "$latest_out" | tail -5
+    else
+        echo -e "${YELLOW}No .out files found${NC}"
+    fi
+
+    echo
+    echo -e "${CYAN}Deck Status${NC}"
+
+    find Data/Galaxy_Profiles -path "*/default/*.csv" 2>/dev/null | sort | while read deck
+    do
+        rows=$(($(wc -l < "$deck") - 1))
+        name=$(basename "$deck")
+
+        echo
+        echo -e "${BLUE}$name${NC}"
+
+        if [ "$rows" -gt 0 ]; then
+            best=$(python - "$deck" <<'PY'
+import sys, pandas as pd, numpy as np
+f = sys.argv[1]
+df = pd.read_csv(f)
+if "chi2" not in df.columns:
+    print("NA")
+else:
+    x = pd.to_numeric(df["chi2"], errors="coerce")
+    x = x[np.isfinite(x)]
+    print("NA" if len(x) == 0 else f"{x.min():.6g}")
+PY
+)
+
+            last_status=$(tail -n 1 "$deck" | awk -F',' '{print $7}')
+            last_chi=$(tail -n 1 "$deck" | awk -F',' '{print $5}')
+
+            echo -e "Rows: ${GREEN}$rows${NC}  Best chi: ${GREEN}$best${NC}"
+            echo -e "Last: status=${YELLOW}$last_status${NC} chi=${YELLOW}$last_chi${NC}"
+        else
+            echo -e "${YELLOW}Empty deck${NC}"
+        fi
+    done
+
+    echo
+    echo -e "${CYAN}Time:${NC} $(date)"
+    sleep 5
+done
