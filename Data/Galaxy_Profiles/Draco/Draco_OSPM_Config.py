@@ -22,14 +22,14 @@ def detect_workers():
 WORKERS = detect_workers()
 
 NORBIT = 1000 if LOCAL_DEBUG else 10000
-BATCH_SIZE = 1 if LOCAL_DEBUG else 90
-MIN_BATCH_SIZE = 1 if LOCAL_DEBUG else 90
-MAX_BATCH_SIZE = 1 if LOCAL_DEBUG else 270
-CHUNK_SIZE = 1 if LOCAL_DEBUG else 90
+BATCH_SIZE = 1 if LOCAL_DEBUG else 120
+MIN_BATCH_SIZE = 1 if LOCAL_DEBUG else 120
+MAX_BATCH_SIZE = 1 if LOCAL_DEBUG else 360
+CHUNK_SIZE = 1 if LOCAL_DEBUG else 60
 LOG_INTERVAL = 1 if LOCAL_DEBUG else 10
 PROF_EVERY = 1 if LOCAL_DEBUG else 20
 EVAL_TIMEOUT_S = 200.0 if LOCAL_DEBUG else 600.0
-MAX_RUNS = 1 if LOCAL_DEBUG else 10000
+MAX_RUNS = 1 if LOCAL_DEBUG else 100000
 
 if NORBIT % 2 != 0:
     raise ValueError( f"Karl paired-orbit Spherical path requires even NORBIT because NORBIT is the final A-matrix column count; got {NORBIT}" )
