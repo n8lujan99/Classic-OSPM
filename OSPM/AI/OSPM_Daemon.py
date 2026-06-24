@@ -65,47 +65,35 @@ def min_dist(theta, arr):
 
 def _jl_matrix_f64(mat, Main, juliacall=None, name="mat"):
     arr = np.asarray(mat, dtype=np.float64)
-
     print(f"[JL MATRIX DEBUG] {name}: shape={arr.shape}, dtype={arr.dtype}", flush=True)
-
     if arr.ndim != 2:
         raise ValueError(f"{name} must be 2D, got shape {arr.shape}")
     if not np.isfinite(arr).all():
         bad = arr[~np.isfinite(arr)]
         raise ValueError(f"{name} has non-finite values: {bad[:10]}")
-
     nrow, ncol = arr.shape
     Main._tmp_matrix_flat = arr.ravel(order="F").tolist()
     Main._tmp_matrix_nrow = int(nrow)
     Main._tmp_matrix_ncol = int(ncol)
-
-    return Main.seval(
-        "reshape(Float64[y for y in _tmp_matrix_flat], _tmp_matrix_nrow, _tmp_matrix_ncol)"
-    )
-
+    return Main.seval( "reshape(Float64[y for y in _tmp_matrix_flat], _tmp_matrix_nrow, _tmp_matrix_ncol)")
 
 def _jl_vector_f64(vec, Main, name="vec"):
     arr = np.asarray(vec, dtype=np.float64).ravel()
-
     if not np.isfinite(arr).all():
         bad = arr[~np.isfinite(arr)]
         raise ValueError(f"{name} has non-finite values: {bad[:10]}")
-
     Main._tmp_vector_f64 = arr.tolist()
     return Main.seval("Float64[y for y in _tmp_vector_f64]")
-
 
 def _jl_vector_bool(vec, Main, name="vec"):
     arr = np.asarray(vec, dtype=bool).ravel()
     Main._tmp_vector_bool = arr.tolist()
     return Main.seval("Bool[y for y in _tmp_vector_bool]")
 
-
 def _jl_surface_brightness_profile(profile, Main):
     if profile is None:
         Main._sb_profile_jl = Main.seval("nothing")
         return Main._sb_profile_jl
-
     Main._sb_R_pc = np.asarray(profile["R_pc"], dtype=np.float64).ravel().tolist()
     Main._sb_R_inner_pc = np.asarray(profile["R_inner_pc"], dtype=np.float64).ravel().tolist()
     Main._sb_R_outer_pc = np.asarray(profile["R_outer_pc"], dtype=np.float64).ravel().tolist()
@@ -124,8 +112,6 @@ Dict{Symbol,Any}(
 )
 """)
     return Main._sb_profile_jl
-
-
 
 
 def _clean_stellar_model(model):
