@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -e
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ -d "$ROOT/.venv" ]; then
+    source "$ROOT/.venv/bin/activate"
+fi
+
+export PYTHONPATH="$ROOT"
+
+cd "$ROOT"
+
+python -m OSPM.Plotting.plot_analysis "$@"

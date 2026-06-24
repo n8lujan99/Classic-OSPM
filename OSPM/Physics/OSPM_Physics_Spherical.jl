@@ -427,6 +427,58 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         return nothing
     end
 
+    function _wdiag_value(wdiag, field::Symbol)
+        wdiag === nothing && return NaN
+        field in propertynames(wdiag) || return NaN
+        return getproperty(wdiag, field)
+    end
+
+    function _print_expanded_cm_diagnostics!(i::Int, tid::Int, wdiag, cl::Float64, cb::Float64, chi_total_i::Float64)
+        weight_solver_sym === :expanded_cm || return nothing
+        wdiag === nothing && return nothing
+
+        ent = _wdiag_value(wdiag, :entropy)
+        chi_losvd_solver = _wdiag_value(wdiag, :chi_losvd)
+        chi_light_solver = _wdiag_value(wdiag, :chi_light)
+        chi_slack = _wdiag_value(wdiag, :chi_slack)
+        slack_l2 = _wdiag_value(wdiag, :slack_l2)
+        slack_max_abs = _wdiag_value(wdiag, :slack_max_abs)
+        rcond_est = _wdiag_value(wdiag, :rcond_est)
+        max_abs_dw = _wdiag_value(wdiag, :max_abs_dw)
+        profit = _wdiag_value(wdiag, :profit)
+        N_slack = _wdiag_value(wdiag, :N_slack)
+
+        chi_slack_over_alphat = (isfinite(chi_slack) && alphat > 0.0) ? chi_slack / alphat : NaN
+        slack_to_losvd = (isfinite(chi_slack_over_alphat) && isfinite(chi_losvd_solver) && chi_losvd_solver > 0.0) ?
+            chi_slack_over_alphat / chi_losvd_solver : NaN
+
+        println(
+            "[EXPANDED CM DIAG] ",
+            "i=", i,
+            " tid=", tid,
+            " entropy=", ent,
+            " chi_losvd_score=", cl,
+            " chi_losvd_solver=", chi_losvd_solver,
+            " chi_light_score=", cb,
+            " chi_light_solver=", chi_light_solver,
+            " chi_total=", chi_total_i,
+            " chi_slack=", chi_slack,
+            " chi_slack_over_alphat=", chi_slack_over_alphat,
+            " slack_to_losvd=", slack_to_losvd,
+            " slack_l2=", slack_l2,
+            " slack_max_abs=", slack_max_abs,
+            " rcond_est=", rcond_est,
+            " max_abs_dw=", max_abs_dw,
+            " profit=", profit,
+            " N_slack=", N_slack,
+            " N_nonzero=", N_nonzero_weights[i],
+            " Neff=", effective_N_orbits[i],
+            " max_weight_fraction=", max_weight_fraction[i],
+        )
+
+        return nothing
+    end
+
     function _batch_worker!(tid::Int)
         rng_own = MersenneTwister(0x5eed1234 + UInt(tid))
         rng_help = helper_rngs[tid]
@@ -552,6 +604,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     )
 
                     _store_weight_diagnostics!(i, w)
+                    _print_expanded_cm_diagnostics!(i, tid, wdiag, cl, cb, chi2_total[i])
                     status[i] = 0
                     Threads.atomic_xchg!(ws.phase, 3)
                 catch e
