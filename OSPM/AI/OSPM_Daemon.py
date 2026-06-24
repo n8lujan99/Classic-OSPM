@@ -90,6 +90,28 @@ def _jl_vector_bool(vec, Main, name="vec"):
     Main._tmp_vector_bool = arr.tolist()
     return Main.seval("Bool[y for y in _tmp_vector_bool]")
 
+def _jl_surface_brightness_profile(profile, Main):
+    if profile is None:
+        return Main.seval("nothing")
+
+    Main._sb_R_pc = np.asarray(profile["R_pc"], dtype=np.float64).ravel().tolist()
+    Main._sb_R_inner_pc = np.asarray(profile["R_inner_pc"], dtype=np.float64).ravel().tolist()
+    Main._sb_R_outer_pc = np.asarray(profile["R_outer_pc"], dtype=np.float64).ravel().tolist()
+    Main._sb_light_frac = np.asarray(profile["light_frac"], dtype=np.float64).ravel().tolist()
+    Main._sb_Sigma = np.asarray(profile["Sigma"], dtype=np.float64).ravel().tolist()
+    Main._sb_Sigma_err = np.asarray(profile["Sigma_err"], dtype=np.float64).ravel().tolist()
+
+    return Main.seval("""
+Dict{Symbol,Any}(
+    :R_pc => Float64[x for x in _sb_R_pc],
+    :R_inner_pc => Float64[x for x in _sb_R_inner_pc],
+    :R_outer_pc => Float64[x for x in _sb_R_outer_pc],
+    :light_frac => Float64[x for x in _sb_light_frac],
+    :Sigma => Float64[x for x in _sb_Sigma],
+    :Sigma_err => Float64[x for x in _sb_Sigma_err],
+)
+""")
+
 def _clean_stellar_model(model):
     if model is None:
         return None
@@ -437,6 +459,7 @@ def run_daemon(config, physics_engine):
         Main.seval("setindex_b(A, x, i) = (A[i] = x; A)")
         stellar_model = _clean_stellar_model(getattr(obs, "stellar_model", None))
         surface_brightness_profile = _get_surface_brightness_profile(config, physics_engine, obs)
+        surface_brightness_profile_jl = _jl_surface_brightness_profile(surface_brightness_profile, Main)
         obs_cfg = _observable_config(config)
         engine_cfg = getattr(physics_engine, "__karl_config__", {}) or {}
         if not isinstance(engine_cfg, dict):
@@ -600,7 +623,7 @@ def run_daemon(config, physics_engine):
                             _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps"),
                             sini, Norbit, halo_type_chunk,
                             stellar_model=stellar_model,
-                            surface_brightness_profile=surface_brightness_profile,
+                            surface_brightness_profile=surface_brightness_profile_jl,
                             Nocc=nocc_compat,
                             lambda_occ=lambda_light,
                             alpha=alpha,

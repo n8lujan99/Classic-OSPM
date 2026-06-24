@@ -134,41 +134,32 @@ function build_min_count_radial_edges(R_star_m::Vector{Float64}, valid_idx::Vect
 
     edges[end] < R_use[end] && push!(edges, R_use[end])
     edges = sort(unique(edges))
-
     if length(edges) < 2
         edges = [R_use[1], R_use[end] + max(abs(R_use[end]), 1.0)]
     end
-
     return edges
 end
 
 function resolve_karl_spatial_edges(kinematic_bin_edges)
     kinematic_bin_edges === nothing &&
         error("kinematic_bin_edges is required; no adaptive radial-bin fallback is allowed")
-
     edges = Float64.(kinematic_bin_edges)
-
     length(edges) >= 2 || error("kinematic_bin_edges must contain at least two edges")
     any(.!isfinite.(edges)) && error("kinematic_bin_edges contains non-finite values")
-
     # Projected radius cannot be negative, and the first aperture should include
     # the galaxy center. Some kinematic-bin products start at the innermost
     # observed star radius instead of 0 pc, which drops central stars from the
     # LOSVD target builder.
     edges[1] = 0.0
-
     any(diff(edges) .<= 0.0) && error("kinematic_bin_edges must be strictly increasing after forcing first edge to 0 pc")
-
     return edges
 end
 
 function build_velocity_edges_auto(v_mps::Vector{Float64}, verr_mps::Vector{Float64}; Nvbin::Int=DEFAULT_NVBIN)
     vv = v_mps[isfinite.(v_mps)]
-
     if isempty(vv)
         return collect(range(-1.0, 1.0; length=Nvbin + 1))
     end
-
     sig = verr_mps[isfinite.(verr_mps) .& (verr_mps .> 0.0)]
     pad = isempty(sig) ? max(std(vv), 1.0) : 3.0 * median(sig)
     vmin = minimum(vv) - pad
@@ -193,14 +184,12 @@ end
     if !isfinite(x)
         return x > 0.0 ? 1.0 : 0.0
     end
-
     # Abramowitz-Stegun / Hart-style logistic-polynomial approximation.
     # Accuracy is more than enough for bin-probability deposition.
     t = 1.0 / (1.0 + 0.2316419 * abs(x))
     poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
     pdf = 0.3989422804014327 * exp(-0.5 * x * x)
     cdf_pos = 1.0 - pdf * poly
-
     return x >= 0.0 ? cdf_pos : 1.0 - cdf_pos
 end
 
@@ -208,7 +197,6 @@ end
     if !(isfinite(v0) && isfinite(sig) && sig > 0.0 && isfinite(vlo) && isfinite(vhi) && vhi > vlo)
         return 0.0
     end
-
     return max(0.0, _normal_cdf_unit((vhi - v0) / sig) - _normal_cdf_unit((vlo - v0) / sig))
 end
 
@@ -216,12 +204,10 @@ function _normalize_nonnegative!(x::Vector{Float64})
     @inbounds for i in eachindex(x)
         (!isfinite(x[i]) || x[i] < 0.0) && (x[i] = 0.0)
     end
-
     s = sum(x)
     if isfinite(s) && s > 0.0
         x ./= s
     end
-
     return x
 end
 
@@ -241,11 +227,9 @@ end
 
 function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{Float64})
     profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
-
     p = normalize_surface_brightness_profile(profile)
     Nspatial = length(spatial_edges_m) - 1
     Nspatial > 0 || error("surface_brightness_profile cannot be binned because spatial_edges has fewer than two edges")
-
     # Already binned light fractions.  This is the preferred input because it
     # makes the Python data product the authority on the observed light profile.
     if haskey(p, :light_frac)
@@ -255,37 +239,30 @@ function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{F
         sum(t) > 0.0 || error("surface_brightness_profile light_frac sums to zero after cleanup")
         return t
     end
-
     # Unbinned projected profile sampled at R_pc.  Values are accumulated into
     # the model spatial bins and normalized to unit light.
     if !(haskey(p, :R_pc) && haskey(p, :Sigma))
         error("surface_brightness_profile must include light_frac or R_pc + Sigma")
     end
-
     R_m = Float64.(p[:R_pc]) .* pc
     Sigma = Float64.(p[:Sigma])
     length(R_m) == length(Sigma) || error("surface_brightness_profile R_pc and Sigma lengths do not match")
-
     target = zeros(Float64, Nspatial)
-
     @inbounds for k in eachindex(R_m)
         ib = _bin_index(spatial_edges_m, R_m[k])
         if ib > 0 && isfinite(Sigma[k]) && Sigma[k] >= 0.0
             target[ib] += Sigma[k]
         end
     end
-
     _normalize_nonnegative!(target)
     sum(target) > 0.0 || error("surface_brightness_profile produced zero light in the model spatial bins")
     return target
 end
 
-function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, spatial_edges::Vector{Float64},
-                                velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, sigma_floor::Float64=1e-8)
+function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, spatial_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, sigma_floor::Float64=1e-8)
     spatial_edges = resolve_karl_spatial_edges(spatial_edges)
     velocity_edges = Float64.(velocity_edges)
     vlos_idx = Int[]
-    
     @inbounds for i in eachindex(valid_vlos)
         valid_vlos[i] &&
             isfinite(R_star_m[i]) &&
