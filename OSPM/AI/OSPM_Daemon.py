@@ -49,7 +49,7 @@
 # run_daemon(config,engine)  config,engine → None                — outer loop: propose→eval→record→train
 # ──────────────────────────────────────────────────────────────────────────────
 
-import os, time, sys, traceback
+import os, time, sys, traceback, json
 import numpy as np, pandas as pd
 import torch, torch.nn as nn
 from collections import deque
@@ -63,36 +63,48 @@ def min_dist(theta, arr):
     if len(arr) == 0: return np.inf
     return np.linalg.norm(np.asarray(arr) - np.asarray(theta), axis=1).min()
 
-def _jl_matrix_f64(mat, Main, juliacall, name="mat"):
+def _jl_matrix_f64(mat, Main, juliacall=None, name="mat"):
     arr = np.asarray(mat, dtype=np.float64)
+
     print(f"[JL MATRIX DEBUG] {name}: shape={arr.shape}, dtype={arr.dtype}", flush=True)
+
     if arr.ndim != 2:
         raise ValueError(f"{name} must be 2D, got shape {arr.shape}")
     if not np.isfinite(arr).all():
         bad = arr[~np.isfinite(arr)]
         raise ValueError(f"{name} has non-finite values: {bad[:10]}")
+
     nrow, ncol = arr.shape
     Main._tmp_matrix_flat = arr.ravel(order="F").tolist()
     Main._tmp_matrix_nrow = int(nrow)
     Main._tmp_matrix_ncol = int(ncol)
-    return Main.seval( "reshape(Float64[y for y in _tmp_matrix_flat], _tmp_matrix_nrow, _tmp_matrix_ncol)")
+
+    return Main.seval(
+        "reshape(Float64[y for y in _tmp_matrix_flat], _tmp_matrix_nrow, _tmp_matrix_ncol)"
+    )
+
 
 def _jl_vector_f64(vec, Main, name="vec"):
     arr = np.asarray(vec, dtype=np.float64).ravel()
+
     if not np.isfinite(arr).all():
         bad = arr[~np.isfinite(arr)]
         raise ValueError(f"{name} has non-finite values: {bad[:10]}")
+
     Main._tmp_vector_f64 = arr.tolist()
     return Main.seval("Float64[y for y in _tmp_vector_f64]")
+
 
 def _jl_vector_bool(vec, Main, name="vec"):
     arr = np.asarray(vec, dtype=bool).ravel()
     Main._tmp_vector_bool = arr.tolist()
     return Main.seval("Bool[y for y in _tmp_vector_bool]")
 
+
 def _jl_surface_brightness_profile(profile, Main):
     if profile is None:
-        return Main.seval("nothing")
+        Main._sb_profile_jl = Main.seval("nothing")
+        return Main._sb_profile_jl
 
     Main._sb_R_pc = np.asarray(profile["R_pc"], dtype=np.float64).ravel().tolist()
     Main._sb_R_inner_pc = np.asarray(profile["R_inner_pc"], dtype=np.float64).ravel().tolist()
@@ -101,7 +113,7 @@ def _jl_surface_brightness_profile(profile, Main):
     Main._sb_Sigma = np.asarray(profile["Sigma"], dtype=np.float64).ravel().tolist()
     Main._sb_Sigma_err = np.asarray(profile["Sigma_err"], dtype=np.float64).ravel().tolist()
 
-    return Main.seval("""
+    Main._sb_profile_jl = Main.seval("""
 Dict{Symbol,Any}(
     :R_pc => Float64[x for x in _sb_R_pc],
     :R_inner_pc => Float64[x for x in _sb_R_inner_pc],
@@ -111,6 +123,10 @@ Dict{Symbol,Any}(
     :Sigma_err => Float64[x for x in _sb_Sigma_err],
 )
 """)
+    return Main._sb_profile_jl
+
+
+
 
 def _clean_stellar_model(model):
     if model is None:
@@ -456,6 +472,7 @@ def run_daemon(config, physics_engine):
 
     if use_batch:
         from juliacall import Main; import juliacall
+        jl_nothing = Main.seval("nothing")
         Main.seval("setindex_b(A, x, i) = (A[i] = x; A)")
         stellar_model = _clean_stellar_model(getattr(obs, "stellar_model", None))
         surface_brightness_profile = _get_surface_brightness_profile(config, physics_engine, obs)
@@ -615,34 +632,88 @@ def run_daemon(config, physics_engine):
                         print("karl_halo_params value:", karl_halo_params, flush=True)
                         print("velocity_edges type:", type(velocity_edges), flush=True)
                         print("velocity_edges value:", velocity_edges, flush=True)
-                        (status_code_vec, chi2_vec, refine_vec, chi2_inner_vec, chi2_outer_vec, chi2_light_vec, N_inner_vec, N_outer_vec, N_nonzero_weights_vec, effective_N_orbits_vec, max_weight_fraction_vec,) = jl_batch(
-                            _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat"),
-                            _jl_vector_f64(R_star_m, Main, name="R_star_m"),
-                            _jl_vector_bool(valid_vlos, Main, name="valid_vlos"),
-                            _jl_vector_f64(v_star_mps, Main, name="v_star_mps"),
-                            _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps"),
-                            sini, Norbit, halo_type_chunk,
-                            stellar_model=None,
-                            surface_brightness_profile=surface_brightness_profile_jl,
-                            Nocc=nocc_compat,
-                            lambda_occ=lambda_light,
-                            alpha=alpha,
-                            alphat=alphat,
-                            weight_mode=weight_mode,
-                            weight_solver_mode=weight_solver_mode,
-                            entropy_floor=entropy_floor,
-                            losvd_score_mode=losvd_score_mode,
-                            maxiter=maxiter,
-                            max_refine=config.get("MAX_REFINE", 0),
-                            timeout_s=float(config.get("EVAL_TIMEOUT_S", 120.0)),
-                            R_inner_pc=float(config.get("R_INNER_DIAG_PC", 30.0)),
-                            min_stars_per_bin=min_stars_per_bin,
-                            Nvbin=nvbin,
-                            Ntheta_launch=ntheta_launch,
-                            halo_q_axis_ratio=halo_q_axis_ratio,
-                            karl_halo_params=karl_halo_params,
-                            velocity_edges=velocity_edges,
-                            kinematic_bin_edges=_jl_vector_f64(kinematic_bin_edges, Main, name="kinematic_bin_edges")),
+                        Main._theta_mat_jl = _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat")
+                        Main._R_star_jl = _jl_vector_f64(R_star_m, Main, name="R_star_m")
+                        Main._valid_vlos_jl = _jl_vector_bool(valid_vlos, Main, name="valid_vlos")
+                        Main._v_star_jl = _jl_vector_f64(v_star_mps, Main, name="v_star_mps")
+                        Main._verr_star_jl = _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps")
+                        Main._kin_bins_jl = _jl_vector_f64(kinematic_bin_edges, Main, name="kinematic_bin_edges")
+
+                        # PythonCall direct Julia function invocation is broken on the cluster.
+                        # Put scalars/strings into Julia globals through seval, then call the
+                        # batch evaluator entirely from Julia.
+                        Main.seval(f"_sini_jl = {float(sini)!r}")
+                        Main.seval(f"_Norbit_jl = {int(Norbit)}")
+                        Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
+
+                        Main.seval("_stellar_model_jl = nothing")
+                        Main.seval("_karl_halo_params_jl = nothing")
+                        Main.seval("_velocity_edges_jl = nothing")
+
+                        Main.seval(f"_Nocc_jl = {int(nocc_compat)}")
+                        Main.seval(f"_lambda_occ_jl = {float(lambda_light)!r}")
+                        Main.seval(f"_alpha_jl = {float(alpha)!r}")
+                        Main.seval(f"_alphat_jl = {float(alphat)!r}")
+                        Main.seval("_weight_mode_jl = " + json.dumps(str(weight_mode)))
+                        Main.seval("_weight_solver_mode_jl = " + json.dumps(str(weight_solver_mode)))
+                        Main.seval(f"_entropy_floor_jl = {float(entropy_floor)!r}")
+                        Main.seval("_losvd_score_mode_jl = " + json.dumps(str(losvd_score_mode)))
+                        Main.seval(f"_maxiter_jl = {int(maxiter)}")
+                        Main.seval(f"_max_refine_jl = {int(config.get('MAX_REFINE', 0))}")
+                        Main.seval(f"_timeout_s_jl = {float(config.get('EVAL_TIMEOUT_S', 120.0))!r}")
+                        Main.seval(f"_R_inner_pc_jl = {float(config.get('R_INNER_DIAG_PC', 30.0))!r}")
+                        Main.seval(f"_min_stars_per_bin_jl = {int(min_stars_per_bin)}")
+                        Main.seval(f"_Nvbin_jl = {int(nvbin)}")
+                        Main.seval(f"_Ntheta_launch_jl = {int(ntheta_launch)}")
+                        Main.seval(f"_halo_q_axis_ratio_jl = {float(halo_q_axis_ratio)!r}")
+
+                        batch_result = Main.seval("""
+OSPMPhysicsSpherical.evaluate_batch_theta(
+    _theta_mat_jl,
+    _R_star_jl,
+    _valid_vlos_jl,
+    _v_star_jl,
+    _verr_star_jl,
+    _sini_jl,
+    _Norbit_jl,
+    _halo_type_jl;
+    stellar_model=_stellar_model_jl,
+    surface_brightness_profile=_sb_profile_jl,
+    Nocc=_Nocc_jl,
+    lambda_occ=_lambda_occ_jl,
+    alpha=_alpha_jl,
+    alphat=_alphat_jl,
+    weight_mode=_weight_mode_jl,
+    weight_solver_mode=_weight_solver_mode_jl,
+    entropy_floor=_entropy_floor_jl,
+    losvd_score_mode=_losvd_score_mode_jl,
+    maxiter=_maxiter_jl,
+    max_refine=_max_refine_jl,
+    timeout_s=_timeout_s_jl,
+    R_inner_pc=_R_inner_pc_jl,
+    min_stars_per_bin=_min_stars_per_bin_jl,
+    Nvbin=_Nvbin_jl,
+    Ntheta_launch=_Ntheta_launch_jl,
+    halo_q_axis_ratio=_halo_q_axis_ratio_jl,
+    karl_halo_params=_karl_halo_params_jl,
+    velocity_edges=_velocity_edges_jl,
+    kinematic_bin_edges=_kin_bins_jl
+)
+""")
+
+                        (
+                            status_code_vec,
+                            chi2_vec,
+                            refine_vec,
+                            chi2_inner_vec,
+                            chi2_outer_vec,
+                            chi2_light_vec,
+                            N_inner_vec,
+                            N_outer_vec,
+                            N_nonzero_weights_vec,
+                            effective_N_orbits_vec,
+                            max_weight_fraction_vec,
+                        ) = batch_result
 
                         t_acc["eval"] += time.perf_counter() - chunk_t0
                         t_cnt["eval"] += len(chunk_thetas)
