@@ -36,6 +36,7 @@ kms = 1.0e3
 Msun = 1.98847e30
 G = 6.67430e-11
 c = 2.99792458e8
+_NFW_VCIRC_DENOM = 4.0 * np.pi * G * (np.log(2.0) - 0.5)
 
 def _jl_init():
     global _JL_READY, _Main
@@ -94,38 +95,48 @@ def _jl_init():
 
     _JL_READY = True
 
-def _theta_sig(theta, halo_type):
-    t = np.asarray(theta, float).ravel()
+def _normalize_halo_parameterization(halo_parameterization=None):
+    hp = "rho_rs" if halo_parameterization is None else str(halo_parameterization).strip().lower()
+    if hp in ("", "default"):
+        hp = "rho_rs"
+    if hp not in ("rho_rs", "vcirc_rs"):
+        raise ValueError(f"Unknown HALO_PARAMETERIZATION: {halo_parameterization!r}")
+    return hp
 
-    if t.size < 2:
-        raise ValueError("theta must have at least [rho_s, r_s]")
+def normalize_halo_parameterization(halo_parameterization=None):
+    return _normalize_halo_parameterization(halo_parameterization)
 
-    rho_s = float(t[0])
-    r_s = float(t[1])
-    MBH = float(t[2]) if t.size >= 3 else 0.0
-    ML = float(t[3]) if t.size >= 4 else 1.0
-    ht = str(halo_type).strip().lower()
+def nfw_vcirc_rs_to_rho_s(vcirc_kms, r_s_pc):
+    vcirc_mps = float(vcirc_kms) * kms
+    r_s_m = float(r_s_pc) * pc
+    if not np.isfinite(vcirc_mps) or not np.isfinite(r_s_m):
+        raise ValueError("vcirc and r_s must be finite for vcirc_rs conversion")
+    if r_s_m <= 0.0:
+        raise ValueError("r_s must be positive for vcirc_rs conversion")
+    rho_kg_m3 = (vcirc_mps * vcirc_mps) / (_NFW_VCIRC_DENOM * r_s_m * r_s_m)
+    return rho_kg_m3 * pc**3 / Msun
 
-    return (rho_s, r_s, MBH, ML, ht)
-
-def assert_theta_contract(theta, *, halo_type, bounds=None, require_mbh=True, require_ml=True):
+def canonicalize_theta(theta, *, halo_type, halo_parameterization=None, bounds=None, require_mbh=True, require_ml=True):
     t = np.asarray(theta, float).ravel()
 
     if t.size < 2:
         raise ValueError("theta too short")
 
+    hp = _normalize_halo_parameterization(halo_parameterization)
+    first_name = "vcirc" if hp == "vcirc_rs" else "rho_s"
+
     if require_mbh and t.size < 3:
-        raise ValueError("theta missing MBH; expects [rho_s, r_s, MBH, ML]")
+        raise ValueError(f"theta missing MBH; expects [{first_name}, r_s, MBH, ML]")
 
     if require_ml and t.size < 4:
-        raise ValueError("theta missing ML; expects [rho_s, r_s, MBH, ML]")
+        raise ValueError(f"theta missing ML; expects [{first_name}, r_s, MBH, ML]")
 
     ncheck = 4 if require_ml else 3
 
     if not np.all(np.isfinite(t[:ncheck])):
         raise ValueError("theta has non-finite values")
 
-    rho_s = float(t[0])
+    first = float(t[0])
     r_s = float(t[1])
     MBH = float(t[2]) if t.size >= 3 else 0.0
     ML = float(t[3]) if t.size >= 4 else 1.0
@@ -138,7 +149,7 @@ def assert_theta_contract(theta, *, halo_type, bounds=None, require_mbh=True, re
         if b.shape[0] < need:
             raise ValueError(f"bounds must cover at least first {need} parameters")
 
-        vals = (rho_s, r_s, MBH, ML)[:need]
+        vals = (first, r_s, MBH, ML)[:need]
 
         for i, x in enumerate(vals):
             lo, hi = float(b[i, 0]), float(b[i, 1])
@@ -146,7 +157,51 @@ def assert_theta_contract(theta, *, halo_type, bounds=None, require_mbh=True, re
             if not (lo <= x <= hi):
                 raise ValueError(f"theta out of bounds at i={i}: {x} not in [{lo}, {hi}]")
 
+    rho_s = nfw_vcirc_rs_to_rho_s(first, r_s) if hp == "vcirc_rs" else first
+
     return (rho_s, r_s, MBH, ML, ht)
+
+def _theta_sig(theta, halo_type, halo_parameterization=None):
+    return canonicalize_theta(theta, halo_type=halo_type, halo_parameterization=halo_parameterization)
+
+def assert_theta_contract(theta, *, halo_type, bounds=None, require_mbh=True, require_ml=True, halo_parameterization=None):
+    return canonicalize_theta(
+        theta,
+        halo_type=halo_type,
+        halo_parameterization=halo_parameterization,
+        bounds=bounds,
+        require_mbh=require_mbh,
+        require_ml=require_ml,
+    )
+
+def _halo_parameterization_from_config(config=None):
+    cfg = config or {}
+    return _normalize_halo_parameterization(cfg.get("HALO_PARAMETERIZATION", "rho_rs"))
+
+def canonicalize_theta_matrix(thetas, *, halo_type, halo_parameterization=None, bounds=None):
+    theta_arr = np.asarray(thetas, dtype=float)
+
+    if theta_arr.ndim != 2:
+        raise RuntimeError("thetas must be a 2D array with shape (nparam, nbatch)")
+
+    if theta_arr.shape[0] < 4:
+        hp = _normalize_halo_parameterization(halo_parameterization)
+        first_name = "vcirc" if hp == "vcirc_rs" else "rho_s"
+        raise RuntimeError(f"thetas must have shape (4, nbatch): [{first_name}, r_s, MBH, ML]")
+
+    out = theta_arr.copy()
+
+    for i in range(theta_arr.shape[1]):
+        out[:4, i] = assert_theta_contract(
+            theta_arr[:4, i],
+            halo_type=halo_type,
+            halo_parameterization=halo_parameterization,
+            bounds=bounds,
+            require_mbh=True,
+            require_ml=True,
+        )[:4]
+
+    return out
 
 def _as_float_vec(x, name):
     a = np.asarray(x, float).ravel()
@@ -269,13 +324,13 @@ def maybe_reset_orbit_cache(theta, halo_type):
     # legacy Julia function is not exported.
     return
 
-def mass_enclosed_two_radii_julia(*, r_in_m, r_out_m, theta, halo_type, stellar_model=None):
+def mass_enclosed_two_radii_julia(*, r_in_m, r_out_m, theta, halo_type, stellar_model=None, halo_parameterization=None):
     if not USE_JULIA:
         raise RuntimeError("Julia required")
 
     _jl_init()
 
-    rho_s, r_s, MBH, ML, ht = assert_theta_contract(theta, halo_type=halo_type, require_mbh=True, require_ml=True)
+    rho_s, r_s, MBH, ML, ht = assert_theta_contract(theta, halo_type=halo_type, halo_parameterization=halo_parameterization, require_mbh=True, require_ml=True)
     Min, Mout = _Main.OSPMPhysicsSpherical.mass_enclosed_two_radii( float(r_in_m), float(r_out_m), float(rho_s), float(r_s), float(MBH), float(ML), str(ht), stellar_model=stellar_model)
     return float(Min), float(Mout)
 
@@ -286,14 +341,14 @@ def make_inclination(inclination_deg: float):
     edge_on = float(inclination_deg) >= 85.0
     return sini, cosi, edge_on
 
-def halo_from_theta_astro(theta, halo_type="nfw"):
-    rho_s, r_s, MBH, ML, ht = assert_theta_contract( theta, halo_type=halo_type, require_mbh=True, require_ml=True,)
+def halo_from_theta_astro(theta, halo_type="nfw", halo_parameterization=None):
+    rho_s, r_s, MBH, ML, ht = assert_theta_contract( theta, halo_type=halo_type, halo_parameterization=halo_parameterization, require_mbh=True, require_ml=True,)
     return {"rho_s": rho_s, "r_s": r_s, "MBH": MBH, "ML": ML, "type": ht}
 
-def build_dynamics_context(*, theta, halo_type, stellar_model=None, surface_brightness_profile=None, **_ignored):
+def build_dynamics_context(*, theta, halo_type, stellar_model=None, surface_brightness_profile=None, halo_parameterization=None, **_ignored):
     if not USE_JULIA:
         raise RuntimeError("Python backend is disabled. Set OSPM_USE_JULIA=1.")
-    ctx = { "halo": halo_from_theta_astro(theta, halo_type=halo_type), "stellar_model": stellar_model, }
+    ctx = { "halo": halo_from_theta_astro(theta, halo_type=halo_type, halo_parameterization=halo_parameterization), "stellar_model": stellar_model, }
     if surface_brightness_profile is not None:
         ctx["surface_brightness_profile"] = surface_brightness_profile
     return ctx
@@ -305,7 +360,7 @@ def halo_kwargs_from_ctx(ctx):
             raise KeyError(f"halo missing required key '{k}'")
     return { "rho_s": float(halo["rho_s"]), "r_s": float(halo["r_s"]), "MBH": float(halo["MBH"]), "ML": float(halo["ML"]), "halo_type": str(halo["type"]),}
 
-def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, Norbit, theta, halo_type, stellar_model=None, surface_brightness_profile=None,
+def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, Norbit, theta, halo_type, stellar_model=None, surface_brightness_profile=None, halo_parameterization=None,
     return_occ=True, Nbins_occ=0, diag=False, velocity_edges=None, kinematic_bin_edges_pc=None, min_stars_per_bin=20, Nvbin=21, Ntheta_launch=9):
     if not USE_JULIA:
         raise RuntimeError("Karl A-matrix mode requires Julia")
@@ -317,7 +372,7 @@ def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps
         )
 
     _jl_init()
-    rho_s, r_s, MBH, ML, ht = assert_theta_contract( theta, halo_type=halo_type, require_mbh=True, require_ml=True)
+    rho_s, r_s, MBH, ML, ht = assert_theta_contract( theta, halo_type=halo_type, halo_parameterization=halo_parameterization, require_mbh=True, require_ml=True)
     maybe_reset_orbit_cache((rho_s, r_s, MBH, ML), ht)
     PC = _Main.PythonCall
     VecF = _Main.Vector[_Main.Float64]
@@ -381,7 +436,8 @@ def build_A_matrix(obs, ctx, *, return_occ=True, Nbins_occ=0, diag=False, config
 
 def build_A_matrix_from_theta(obs, theta, *, halo_type="nfw", return_occ=True, Nbins_occ=0, diag=False, config=None):
     surface_brightness_profile = _get_surface_brightness_profile(obs=obs, config=config)
-    ctx = build_dynamics_context( theta=theta, halo_type=halo_type, stellar_model=getattr(obs, "stellar_model", None), surface_brightness_profile=surface_brightness_profile,)
+    halo_parameterization = _halo_parameterization_from_config(config)
+    ctx = build_dynamics_context( theta=theta, halo_type=halo_type, halo_parameterization=halo_parameterization, stellar_model=getattr(obs, "stellar_model", None), surface_brightness_profile=surface_brightness_profile,)
     return build_A_matrix( obs, ctx, return_occ=bool(return_occ), Nbins_occ=int(Nbins_occ), diag=bool(diag), config=config,)
 
 def evaluate_batch_theta_julia( *, thetas, obs, halo_type, stellar_model=None, surface_brightness_profile=None, Norbit=None, config=None,):
@@ -403,13 +459,13 @@ def evaluate_batch_theta_julia( *, thetas, obs, halo_type, stellar_model=None, s
     VecF = _Main.Vector[_Main.Float64]
     VecB = _Main.Vector[_Main.Bool]
 
-    theta_arr = np.asarray(thetas, dtype=float)
-
-    if theta_arr.ndim != 2:
-        raise RuntimeError("thetas must be a 2D array with shape (nparam, nbatch)")
-
-    if theta_arr.shape[0] < 4:
-        raise RuntimeError("thetas must have shape (4, nbatch): [rho_s, r_s, MBH, ML]")
+    halo_parameterization = _halo_parameterization_from_config(config)
+    theta_arr = canonicalize_theta_matrix(
+        thetas,
+        halo_type=halo_type,
+        halo_parameterization=halo_parameterization,
+        bounds=(config or {}).get("THETA_BOUNDS"),
+    )
 
     Rj = PC.pyconvert(VecF, R)
     validj = PC.pyconvert(VecB, valid)
@@ -432,7 +488,7 @@ def evaluate_batch_theta_julia( *, thetas, obs, halo_type, stellar_model=None, s
     return tuple(np.asarray(x) for x in out)
 
 
-def force_at_rtheta_julia(*, r_m, theta_rad, theta, halo_type, stellar_model=None):
+def force_at_rtheta_julia(*, r_m, theta_rad, theta, halo_type, stellar_model=None, halo_parameterization=None):
     if not USE_JULIA:
         raise RuntimeError("Julia required")
 
@@ -441,6 +497,7 @@ def force_at_rtheta_julia(*, r_m, theta_rad, theta, halo_type, stellar_model=Non
     rho_s, r_s, MBH, ML, ht = assert_theta_contract(
         theta,
         halo_type=halo_type,
+        halo_parameterization=halo_parameterization,
         require_mbh=True,
         require_ml=True,
     )

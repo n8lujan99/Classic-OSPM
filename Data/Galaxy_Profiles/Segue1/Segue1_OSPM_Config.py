@@ -57,6 +57,7 @@ CONFIG = {
     "MODE":      "karl",
     "GALAXY":    Galaxy,
     "HALO_TYPE": "nfw",
+    "HALO_PARAMETERIZATION": "vcirc_rs",
 
     # =========================================================
     # Galaxy geometry
@@ -148,13 +149,13 @@ CONFIG = {
     # =========================================================
     # Parameter space
     # =========================================================
-    "PARAMETER_NAMES": ["rho_s", "r_s", "MBH", "ML"],
-    "INITIAL_THETA":   [0.1, 300.0, 5e5, 2.0],
+    "PARAMETER_NAMES": ["vcirc", "r_s", "MBH", "ML"],
+    "INITIAL_THETA":   [21.0, 1000.0, 4.5e5, 0.3],
     "THETA_BOUNDS": [
-        (0.0, 5.0),
-        (100.0, 5000.0),
+        (0.0, 30.0),
+        (100.0, 10000.0),
         (0.0, 2e6),
-        (0.2, 1.6),
+        (0.2, 20.0),
     ],
 
     # =========================================================
@@ -177,7 +178,7 @@ CONFIG = {
     # Deck semantics
     # =========================================================
     "REQUIRE_COLUMNS": [
-        "rho_s", "r_s", "MBH", "ML",
+        "vcirc", "r_s", "MBH", "ML",
         "chi2", "reward", "status", "proposal_id",
         "refine_passes",
         "chi2_losvd", "chi2_light", "chi2_total",
@@ -271,7 +272,7 @@ CONFIG = {
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_Simon_stars_v2.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_segue1.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_segue1_vcirc.csv"),
 }
 
 
@@ -281,6 +282,9 @@ print("[CONFIG] NORBIT =", CONFIG["NORBIT"])
 print("[CONFIG] MAX_RUNS =", CONFIG["MAX_RUNS"])
 print("[CONFIG] BATCH_SIZE =", CONFIG["BATCH_SIZE"])
 print("[CONFIG] CHUNK_SIZE =", CONFIG["CHUNK_SIZE"])
+print("[CONFIG] HALO_PARAMETERIZATION =", CONFIG["HALO_PARAMETERIZATION"])
+print("[CONFIG] PARAMETER_NAMES =", CONFIG["PARAMETER_NAMES"])
+print("[CONFIG] THETA_BOUNDS =", CONFIG["THETA_BOUNDS"])
 print("[CONFIG] STELLAR_GEOMETRY =", CONFIG["STELLAR_MODEL"]["geometry"])
 print("[CONFIG] NTHETA_LAUNCH =", CONFIG["OBSERVABLES"]["NTHETA_LAUNCH"])
 print("[CONFIG] WEIGHT_MODE =", CONFIG["OBSERVABLES"]["WEIGHT_MODE"])

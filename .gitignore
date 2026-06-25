@@ -8,3 +8,12 @@ __pycache__/
 
 # Local plotting / analysis scratch files
 OSPM/Plotting/
+
+# Local project reminders
+OSPM-NOTES/local_next_time_note.txt
+
+# Local notes
+OSPM-NOTES/
+
+# OSPM generated run products
+Data/Galaxy_Profiles/*/default/archive/

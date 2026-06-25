@@ -39,6 +39,16 @@ def load_config():
 
     # Declare identity explicitly
     cfg["GALAXY"] = galaxy
+    cfg["HALO_PARAMETERIZATION"] = str(cfg.get("HALO_PARAMETERIZATION", "rho_rs")).strip().lower()
+
+    if cfg["HALO_PARAMETERIZATION"] in ("", "default"):
+        cfg["HALO_PARAMETERIZATION"] = "rho_rs"
+
+    if cfg["HALO_PARAMETERIZATION"] not in ("rho_rs", "vcirc_rs"):
+        raise ValueError(
+            "HALO_PARAMETERIZATION must be 'rho_rs' or 'vcirc_rs', "
+            f"got {cfg['HALO_PARAMETERIZATION']!r}"
+        )
 
     required = [
         "GALAXY",
@@ -54,5 +64,9 @@ def load_config():
     missing = [k for k in required if k not in cfg]
     if missing:
         raise KeyError(f"CONFIG missing required keys: {missing}")
+
+    print("[CONFIG LOAD] HALO_PARAMETERIZATION =", cfg["HALO_PARAMETERIZATION"])
+    print("[CONFIG LOAD] PARAMETER_NAMES =", cfg.get("PARAMETER_NAMES"))
+    print("[CONFIG LOAD] THETA_BOUNDS =", cfg.get("THETA_BOUNDS"))
 
     return cfg

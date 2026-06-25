@@ -40,6 +40,7 @@ CONFIG = {
     "MODE":        "karl",
     "GALAXY":      Galaxy,
     "HALO_TYPE":   "nfw",
+    "HALO_PARAMETERIZATION": "vcirc_rs",
     "RA0_DEG":          260.0517,
     "DEC0_DEG":         57.9153,
     "DISTANCE_PC":      76000.0,
@@ -102,9 +103,9 @@ CONFIG = {
         "HALO_Q_AXIS_RATIO": 1.0,
     },
 
-    "PARAMETER_NAMES": ["rho_s", "r_s", "MBH", "ML"],
-    "INITIAL_THETA": [1.0, 1800.0, 9e5, 1.0],
-    "THETA_BOUNDS": [(1e-8, 6.0), (100.0, 10000.0), (0.0, 1e6), (0.2, 2.0)],
+    "PARAMETER_NAMES": ["vcirc", "r_s", "MBH", "ML"],
+    "INITIAL_THETA": [183.9114355853, 1800.0, 9e5, 1.0],
+    "THETA_BOUNDS": [(0.0, 250.0), (100.0, 10000.0), (0.0, 1e6), (0.2, 2.0)],
     "PEN_SPHERE_STRENGTH": 200,
     "PEN_SPHERE_POWER":    2.0,
     "PEN_SLOPE_STRENGTH":  5000,
@@ -114,7 +115,7 @@ CONFIG = {
     "POTENTIAL_EXTENT":         10.0,
     "BH_MIN_RADIUS_MULTIPLIER": 2.0,
 
-    "REQUIRE_COLUMNS": [ "rho_s", "r_s", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light", 
+    "REQUIRE_COLUMNS": [ "vcirc", "r_s", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light", 
         "chi2_total", "chi2_inner", "chi2_outer", "N_inner", "N_outer", "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction", "halo_type",
         # Runtime contract diagnostics:
         "weight_mode", "weight_solver_mode", "losvd_score_mode", "alphat", "halo_q_axis_ratio", "karl_halo_params_active",
@@ -164,7 +165,7 @@ CONFIG = {
 
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_draco.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_draco_vcirc.csv"),
 }
 
 print("[CONFIG] CSV_PATH =", CONFIG["CSV_PATH"])
@@ -173,6 +174,9 @@ print("[CONFIG] NORBIT =", CONFIG["NORBIT"])
 print("[CONFIG] MAX_RUNS =", CONFIG["MAX_RUNS"])
 print("[CONFIG] BATCH_SIZE =", CONFIG["BATCH_SIZE"])
 print("[CONFIG] CHUNK_SIZE =", CONFIG["CHUNK_SIZE"])
+print("[CONFIG] HALO_PARAMETERIZATION =", CONFIG["HALO_PARAMETERIZATION"])
+print("[CONFIG] PARAMETER_NAMES =", CONFIG["PARAMETER_NAMES"])
+print("[CONFIG] THETA_BOUNDS =", CONFIG["THETA_BOUNDS"])
 print("[CONFIG] STELLAR_GEOMETRY =", CONFIG["STELLAR_MODEL"]["geometry"])
 print("[CONFIG] NTHETA_LAUNCH =", CONFIG["OBSERVABLES"]["NTHETA_LAUNCH"])
 print("[CONFIG] WEIGHT_MODE =", CONFIG["OBSERVABLES"]["WEIGHT_MODE"])
