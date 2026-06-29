@@ -155,6 +155,17 @@ function resolve_karl_spatial_edges(kinematic_bin_edges)
     return edges
 end
 
+function resolve_karl_light_edges(light_bin_edges)
+    light_bin_edges === nothing &&
+        error("light_bin_edges is required for Karl-style light constraints")
+    edges = Float64.(light_bin_edges)
+    length(edges) >= 2 || error("light_bin_edges must contain at least two edges")
+    any(.!isfinite.(edges)) && error("light_bin_edges contains non-finite values")
+    edges[1] = 0.0
+    any(diff(edges) .<= 0.0) && error("light_bin_edges must be strictly increasing after forcing first edge to 0 pc")
+    return edges
+end
+
 function build_velocity_edges_auto(v_mps::Vector{Float64}, verr_mps::Vector{Float64}; Nvbin::Int=DEFAULT_NVBIN)
     vv = v_mps[isfinite.(v_mps)]
     if isempty(vv)
@@ -225,7 +236,7 @@ end
     return out
 end
 
-function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{Float64})
+function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{Float64}; normalize::Bool=true)
     profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     p = normalize_surface_brightness_profile(profile)
     Nspatial = length(spatial_edges_m) - 1
@@ -234,10 +245,34 @@ function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{F
     # makes the Python data product the authority on the observed light profile.
     if haskey(p, :light_frac)
         t = Float64.(p[:light_frac])
-        length(t) == Nspatial || error("surface_brightness_profile light_frac length $(length(t)) does not match Nspatial=$Nspatial")
-        _normalize_nonnegative!(t)
-        sum(t) > 0.0 || error("surface_brightness_profile light_frac sums to zero after cleanup")
-        return t
+        if length(t) == Nspatial
+            out = copy(t)
+        elseif haskey(p, :R_inner_pc) && haskey(p, :R_outer_pc)
+            rin = Float64.(p[:R_inner_pc]) .* pc
+            rout = Float64.(p[:R_outer_pc]) .* pc
+            length(rin) == length(rout) == length(t) || error("surface_brightness_profile binned radius arrays do not match light_frac length")
+            out = zeros(Float64, Nspatial)
+            @inbounds for k in eachindex(t)
+                lk = t[k]
+                if !(isfinite(lk) && lk >= 0.0 && isfinite(rin[k]) && isfinite(rout[k]) && rout[k] > rin[k])
+                    continue
+                end
+                src_area = rout[k]^2 - rin[k]^2
+                src_area <= 0.0 && continue
+                for ib in 1:Nspatial
+                    lo = max(rin[k], spatial_edges_m[ib])
+                    hi = min(rout[k], spatial_edges_m[ib + 1])
+                    if hi > lo
+                        out[ib] += lk * (hi^2 - lo^2) / src_area
+                    end
+                end
+            end
+        else
+            error("surface_brightness_profile light_frac length $(length(t)) does not match Nspatial=$Nspatial and no binned radii are available for rebinning")
+        end
+        normalize && _normalize_nonnegative!(out)
+        sum(out) > 0.0 || error("surface_brightness_profile light_frac sums to zero after cleanup")
+        return out
     end
     # Unbinned projected profile sampled at R_pc.  Values are accumulated into
     # the model spatial bins and normalized to unit light.
@@ -259,8 +294,9 @@ function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{F
     return target
 end
 
-function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, spatial_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, sigma_floor::Float64=1e-8)
-    spatial_edges = resolve_karl_spatial_edges(spatial_edges)
+function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8)
+    kinematic_edges = resolve_karl_spatial_edges(kinematic_edges)
+    light_edges_use = light_edges === nothing ? kinematic_edges : resolve_karl_light_edges(light_edges)
     velocity_edges = Float64.(velocity_edges)
     vlos_idx = Int[]
     @inbounds for i in eachindex(valid_vlos)
@@ -271,13 +307,13 @@ function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractV
             verr_star_mps[i] > 0.0 &&
             push!(vlos_idx, i)
     end
-    Nspatial = length(spatial_edges) - 1
+    Nspatial = length(kinematic_edges) - 1
     Nvbin = length(velocity_edges) - 1
     Nlosvd = Nspatial * Nvbin
     counts_losvd = zeros(Float64, Nlosvd)
     counts_by_spatial = zeros(Float64, Nspatial)
     @inbounds for idx in vlos_idx
-        ib = _bin_index(spatial_edges, R_star_m[idx])
+        ib = _bin_index(kinematic_edges, R_star_m[idx])
         ib == 0 && continue
         counts_by_spatial[ib] += 1.0
         v0 = f64(v_star_mps[idx])
@@ -300,14 +336,15 @@ function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractV
             end
         end
     end
-    light_target = light_target_from_surface_brightness( surface_brightness_profile, spatial_edges)
+    light_target = light_target_from_surface_brightness( surface_brightness_profile, light_edges_use; normalize=true)
+    losvd_light_target = light_target_from_surface_brightness( surface_brightness_profile, kinematic_edges; normalize=false)
     losvd_target = zeros(Float64, Nlosvd)
     @inbounds for ib in 1:Nspatial
         nbin = counts_by_spatial[ib]
         nbin <= 0.0 && continue
         for jb in 1:Nvbin
             row = (ib - 1) * Nvbin + jb
-            losvd_target[row] = light_target[ib] * counts_losvd[row] / nbin
+            losvd_target[row] = losvd_light_target[ib] * counts_losvd[row] / nbin
         end
     end
 
@@ -364,7 +401,7 @@ function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractV
 
     @inbounds for ib in 1:Nspatial
         nbin = max(counts_by_spatial[ib], 1.0)
-        Li = max(light_target[ib], 0.0)
+        Li = max(losvd_light_target[ib], 0.0)
         a0 = nbin + Nvbin * alpha_dirichlet
 
         for jb in 1:Nvbin
@@ -386,7 +423,7 @@ function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractV
     # ================================================================================================================================================================================
     light_sigma = similar(light_target)
     ntot = max(sum(counts_by_spatial), 1.0)
-    @inbounds for ib in 1:Nspatial
+    @inbounds for ib in eachindex(light_target)
         light_sigma[ib] = max(sqrt(max(light_target[ib], sigma_floor)) / sqrt(ntot), sigma_floor)
     end
     return losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial

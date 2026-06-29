@@ -546,7 +546,19 @@ def run_daemon(config, physics_engine):
             kinematic_bin_edges = getattr(obs, "kinematic_bin_edges_pc", None)
         if kinematic_bin_edges is None:
             raise RuntimeError("kinematic_bin_edges_pc is required; no adaptive radial-bin fallback is allowed")
+        light_bin_edges = getattr(physics_engine, "__light_bin_edges_pc__", None)
+        if light_bin_edges is None:
+            light_bin_edges = engine_cfg.get("light_bin_edges_pc", None)
+        if light_bin_edges is None:
+            light_bin_edges = getattr(obs, "light_bin_edges_pc", None)
+        if light_bin_edges is None:
+            raise RuntimeError("light_bin_edges_pc is required for Karl-style light constraints")
         kinematic_bin_edges = np.asarray(kinematic_bin_edges, float).ravel() * 3.0856775814913673e16
+        light_bin_edges = np.asarray(light_bin_edges, float).ravel() * 3.0856775814913673e16
+        n_light = max(0, len(light_bin_edges) - 1)
+        n_kin = max(0, len(kinematic_bin_edges) - 1)
+        r_light_max_pc = float(light_bin_edges[-1] / 3.0856775814913673e16) if len(light_bin_edges) else float("nan")
+        r_kin_max_pc = float(kinematic_bin_edges[-1] / 3.0856775814913673e16) if len(kinematic_bin_edges) else float("nan")
         nocc_compat = int(opt("NBINS_OCC", "nbins_occ", default=0))
         
         jl_batch = Main.OSPMPhysicsSpherical.evaluate_batch_theta
@@ -561,6 +573,12 @@ def run_daemon(config, physics_engine):
             f"weight_mode={weight_mode}, weight_solver_mode={weight_solver_mode}, "
             f"losvd_score_mode={losvd_score_mode}, halo_q={halo_q_axis_ratio}, "
             f"karl_halo_params_active={karl_halo_params is not None}",
+            flush=True,
+        )
+        print(
+            f"[Daemon] Karl bin contract — N_light={n_light}, N_kin={n_kin}, "
+            f"R_light_max_pc={r_light_max_pc:.6g}, R_kin_max_pc={r_kin_max_pc:.6g}, "
+            f"N_constraints={n_light + n_kin * nvbin}",
             flush=True,
         )
     else: print("[Daemon] batch mode OFF — falling back to serial corpo.eval", flush=True)
@@ -666,6 +684,7 @@ def run_daemon(config, physics_engine):
                         Main._valid_vlos_jl = _jl_vector_bool(valid_vlos, Main, name="valid_vlos")
                         Main._v_star_jl = _jl_vector_f64(v_star_mps, Main, name="v_star_mps")
                         Main._verr_star_jl = _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps")
+                        Main._light_bins_jl = _jl_vector_f64(light_bin_edges, Main, name="light_bin_edges")
                         Main._kin_bins_jl = _jl_vector_f64(kinematic_bin_edges, Main, name="kinematic_bin_edges")
 
                         # PythonCall direct Julia function invocation is broken on the cluster.
@@ -726,6 +745,7 @@ OSPMPhysicsSpherical.evaluate_batch_theta(
     halo_q_axis_ratio=_halo_q_axis_ratio_jl,
     karl_halo_params=_karl_halo_params_jl,
     velocity_edges=_velocity_edges_jl,
+    light_bin_edges=_light_bins_jl,
     kinematic_bin_edges=_kin_bins_jl
 )
 """)

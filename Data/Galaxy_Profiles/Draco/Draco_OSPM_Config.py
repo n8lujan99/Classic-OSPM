@@ -53,7 +53,7 @@ CONFIG = {
 
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
-        "grid_csv": str(PROFILE_ROOT / "draco_oden_kirchen2001_axisymmetric_light_grid.csv"),
+        "grid_csv": str(PROFILE_ROOT / "draco_oden_kirchen2001_axisymmetric_light_grid_full.csv"),
         "Ltot": 2.7e5,
         "geometry": "axisymmetric_density_grid", # only other option is "spherical_enclosed_light_grid" axi is for flat
         "q_axis_ratio": 0.69,
@@ -79,7 +79,7 @@ CONFIG = {
     "RA_COL":          "ra",
     "DEC_COL":         "dec",
 
-    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "draco_oden_kirchen2001_surface_brightness_on_walker_bins_20.csv"),
+    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "draco_oden_kirchen2001_surface_brightness_profile.csv"),
     "KINEMATIC_BINS_CSV":     str(PROFILE_ROOT / "draco_walker2023_kinematic_bins_20.csv"),
 
     "NORBIT": NORBIT,

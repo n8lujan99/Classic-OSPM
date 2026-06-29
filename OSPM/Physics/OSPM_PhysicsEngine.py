@@ -92,6 +92,28 @@ def _get_kinematic_bin_edges_pc(obs, cfg):
 
     return edges
 
+def _get_light_bin_edges_pc(obs, cfg):
+    edges = _cfg_get(cfg, "LIGHT_BIN_EDGES_PC", "light_bin_edges_pc", None)
+
+    if edges is None:
+        edges = getattr(obs, "light_bin_edges_pc", None)
+
+    if edges is None:
+        return None
+
+    edges = np.asarray(edges, float).ravel()
+
+    if edges.size < 2:
+        raise ValueError("light_bin_edges_pc must contain at least two edges")
+
+    if not np.all(np.isfinite(edges)):
+        raise ValueError("light_bin_edges_pc contains non-finite values")
+
+    if not np.all(np.diff(edges) > 0):
+        raise ValueError("light_bin_edges_pc must be strictly increasing")
+
+    return edges
+
 
 def _get_velocity_edges(cfg):
     edges = _cfg_get(cfg, "VELOCITY_EDGES", "velocity_edges", None)
@@ -164,6 +186,7 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
 
     valid_vlos = _get_valid_vlos(obs, R_star_m, v_star_mps, verr_star_mps)
     surface_brightness_profile = _get_surface_brightness_profile(obs, cfg)
+    light_bin_edges_pc = _get_light_bin_edges_pc(obs, cfg)
     kinematic_bin_edges_pc = _get_kinematic_bin_edges_pc(obs, cfg)
     velocity_edges = _get_velocity_edges(cfg)
 
@@ -224,10 +247,12 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     engine.__R_star_m__ = R_star_m
     engine.__v_star_mps__ = v_star_mps
     engine.__verr_star_mps__ = verr_star_mps
+    engine.__light_bin_edges_pc__ = light_bin_edges_pc
     engine.__kinematic_bin_edges_pc__ = kinematic_bin_edges_pc
     engine.__velocity_edges__ = velocity_edges
     engine.__karl_config__ = {
         "surface_brightness_profile": surface_brightness_profile,
+        "light_bin_edges_pc": light_bin_edges_pc,
         "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
         "velocity_edges": velocity_edges,
         "min_stars_per_bin": min_stars_per_bin,

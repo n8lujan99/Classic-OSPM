@@ -79,7 +79,7 @@ CONFIG = {
     # =========================================================
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
-        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_axisymmetric_light_grid.csv"),
+        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_axisymmetric_light_grid_full.csv"),
         "Ltot": 340.0,
         "geometry": "axisymmetric_density_grid",
         "q_axis_ratio": 1.0,
@@ -116,7 +116,7 @@ CONFIG = {
     # Draco-style observed products
     # =========================================================
     "SURFACE_BRIGHTNESS_CSV": str(
-        PROFILE_ROOT / "segue1_NO09_surface_brightness_on_simon_bins_16.csv"
+        PROFILE_ROOT / "segue1_NO09_surface_brightness_full.csv"
     ),
     "KINEMATIC_BINS_CSV": str(
         PROFILE_ROOT / "segue1_simon_kinematic_bins_16.csv"

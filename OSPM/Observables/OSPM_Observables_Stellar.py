@@ -42,11 +42,14 @@ def _load_kinematic_bins(path):
         "edges_pc": edges,
     }
 
-def _validate_surface_brightness_against_kinematic_bins(surface_brightness_profile, kinematic_bins):
+def _validate_surface_brightness_profile(surface_brightness_profile):
     if surface_brightness_profile is None:
         raise KeyError("Karl-style observables require a surface_brightness_profile")
     if "light_frac" not in surface_brightness_profile:
         raise KeyError("surface_brightness_profile must include light_frac")
+    for key in ("R_inner_pc", "R_outer_pc"):
+        if key not in surface_brightness_profile:
+            raise KeyError(f"surface_brightness_profile must include {key}")
     light_frac = np.asarray(surface_brightness_profile["light_frac"], float)
     if light_frac.ndim != 1:
         raise ValueError("surface_brightness_profile light_frac must be one-dimensional")
@@ -58,51 +61,49 @@ def _validate_surface_brightness_against_kinematic_bins(surface_brightness_profi
         raise ValueError("surface_brightness_profile light_frac contains negative values")
     if not np.isfinite(light_frac.sum()) or light_frac.sum() <= 0.0:
         raise ValueError("surface_brightness_profile light_frac must sum to a positive finite value")
+    sb_inner = np.asarray(surface_brightness_profile["R_inner_pc"], float)
+    sb_outer = np.asarray(surface_brightness_profile["R_outer_pc"], float)
+    if not (len(sb_inner) == len(sb_outer) == light_frac.size):
+        raise ValueError("surface_brightness_profile radius arrays must match light_frac length")
+    if not np.all(np.isfinite(sb_inner)) or not np.all(np.isfinite(sb_outer)):
+        raise ValueError("Surface-brightness radial bin edges contain non-finite values")
+    if np.any(sb_outer <= sb_inner):
+        raise ValueError("Surface-brightness bins must have R_outer_pc > R_inner_pc")
+    if len(sb_inner) > 1 and np.any(sb_inner[1:] < sb_outer[:-1] - 1e-6):
+        raise ValueError("Surface-brightness bins must be ordered and non-overlapping")
+    return None
+
+def _validate_kinematic_bins(kinematic_bins):
     if kinematic_bins is None:
         raise KeyError("Karl-style observables require KINEMATIC_BINS_CSV; no adaptive radial-bin fallback is allowed")
     if "R_mid_pc" not in kinematic_bins:
         raise KeyError("kinematic_bins must include R_mid_pc")
-    n_light = int(light_frac.size)
-    n_kin = int(len(kinematic_bins["R_mid_pc"]))
-    if n_light != n_kin:
-        raise ValueError(
-            "Surface-brightness light_frac rows must match kinematic bins: "
-            f"got {n_light} light rows and {n_kin} kinematic bins. "
-            "Run OSPM/Mapping/observable_mapping.py rebin-sb first."
-        )
-    for key in ("R_inner_pc", "R_outer_pc"):
-        if key not in surface_brightness_profile:
-            raise KeyError(f"surface_brightness_profile must include {key}")
+    if "N_vlos" not in kinematic_bins:
+        raise KeyError("kinematic_bins must include N_vlos")
     for key in ("R_inner_pc", "R_outer_pc"):
         if key not in kinematic_bins:
             raise KeyError(f"kinematic_bins must include {key}")
-    sb_inner = np.asarray(surface_brightness_profile["R_inner_pc"], float)
-    sb_outer = np.asarray(surface_brightness_profile["R_outer_pc"], float)
     kb_inner = np.asarray(kinematic_bins["R_inner_pc"], float)
     kb_outer = np.asarray(kinematic_bins["R_outer_pc"], float)
-    if not (len(sb_inner) == len(sb_outer) == len(kb_inner) == len(kb_outer) == n_kin):
-        raise ValueError("Surface-brightness and kinematic-bin radius arrays must have matching lengths")
-    if not np.all(np.isfinite(sb_inner)) or not np.all(np.isfinite(sb_outer)):
-        raise ValueError("Surface-brightness radial bin edges contain non-finite values")
+    kb_mid = np.asarray(kinematic_bins["R_mid_pc"], float)
+    n_vlos = np.asarray(kinematic_bins["N_vlos"], int)
+    if not (len(kb_inner) == len(kb_outer) == len(kb_mid) == len(n_vlos)):
+        raise ValueError("Kinematic bin arrays must have matching lengths")
     if not np.all(np.isfinite(kb_inner)) or not np.all(np.isfinite(kb_outer)):
         raise ValueError("Kinematic radial bin edges contain non-finite values")
-    if np.any(sb_outer <= sb_inner):
-        raise ValueError("Surface-brightness bins must have R_outer_pc > R_inner_pc")
+    if not np.all(np.isfinite(kb_mid)):
+        raise ValueError("Kinematic R_mid_pc contains non-finite values")
     if np.any(kb_outer <= kb_inner):
         raise ValueError("Kinematic bins must have R_outer_pc > R_inner_pc")
-    rtol = 1e-7
-    atol = 1e-6
-    if not np.allclose(sb_inner, kb_inner, rtol=rtol, atol=atol):
-        raise ValueError(
-            "Surface-brightness R_inner_pc values do not match kinematic bins. "
-            "Run OSPM/Mapping/observable_mapping.py rebin-sb first."
-        )
-    if not np.allclose(sb_outer, kb_outer, rtol=rtol, atol=atol):
-        raise ValueError(
-            "Surface-brightness R_outer_pc values do not match kinematic bins. "
-            "Run OSPM/Mapping/observable_mapping.py rebin-sb first."
-        )
+    if len(kb_inner) > 1 and np.any(kb_inner[1:] < kb_outer[:-1] - 1e-6):
+        raise ValueError("Kinematic bins must be ordered and non-overlapping")
+    if np.any(n_vlos < 0):
+        raise ValueError("Kinematic bins must have non-negative N_vlos")
+    return None
 
+def _validate_surface_brightness_against_kinematic_bins(surface_brightness_profile, kinematic_bins):
+    _validate_surface_brightness_profile(surface_brightness_profile)
+    _validate_kinematic_bins(kinematic_bins)
     return None
 
 def _stellar_geometry_group(geometry):
@@ -183,7 +184,10 @@ class OSPMObservablesStellar:
         self.stellar_model = stellar_model
         self.surface_brightness_profile = surface_brightness_profile
         self.kinematic_bins = kinematic_bins
+        self.light_bin_edges_pc = None if surface_brightness_profile is None else np.r_[surface_brightness_profile["R_inner_pc"][0], surface_brightness_profile["R_outer_pc"]]
         self.kinematic_bin_edges_pc = None if kinematic_bins is None else kinematic_bins["edges_pc"]
+        self.N_light = 0 if surface_brightness_profile is None else int(len(surface_brightness_profile["light_frac"]))
+        self.N_kin = 0 if kinematic_bins is None else int(len(kinematic_bins["R_mid_pc"]))
         _validate_stellar_model_geometry(self.stellar_model)
         _validate_surface_brightness_against_kinematic_bins(self.surface_brightness_profile, self.kinematic_bins)
         R = np.asarray(R_star_pc, float)

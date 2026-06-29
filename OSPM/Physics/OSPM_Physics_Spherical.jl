@@ -40,6 +40,7 @@ mutable struct OrbitWorkState
     v_star_mps::Vector{Float64}
     verr_star_mps::Vector{Float64}
     spatial_edges::Vector{Float64}
+    light_edges::Vector{Float64}
     velocity_edges::Vector{Float64}
     shells::Vector{Float64}
     cost_order::Vector{Int}
@@ -62,7 +63,7 @@ end
 
 function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64},
     sini::Float64, ctx; nsteps::Int, Lfrac, dt_frac_orbit::Float64, Nbins_occ::Int, return_occ::Bool, max_attempts_factor::Int, fill_pct::Float64, t_deadline::UInt64,
-    velocity_edges=nothing, kinematic_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9)
+    velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9)
 
     iseven(Norbit) || error("Karl prograde/retrograde orbit pairing requires even Norbit because Norbit is the final A-matrix column count")
     Nbase_orbit = Norbit ÷ 2
@@ -77,6 +78,8 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
 
     spatial_edges = resolve_karl_spatial_edges(kinematic_bin_edges)
     Nspatial = length(spatial_edges) - 1
+    light_edges = light_bin_edges === nothing ? spatial_edges : resolve_karl_light_edges(light_bin_edges)
+    Nlight = length(light_edges) - 1
 
     velocity_edges_use =
         velocity_edges === nothing ?
@@ -85,7 +88,6 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
 
     Nvbin_eff = length(velocity_edges_use) - 1
     Nlosvd = Nspatial * Nvbin_eff
-    Nlight = Nspatial
 
     shells = sort(copy(R_star_m[isfinite.(R_star_m)]))
     isempty(shells) && (shells = [spatial_edges[1], spatial_edges[end]])
@@ -117,7 +119,7 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
     orbit_ctx = ( frc=ctx.frc, R_pos=ctx.R, halo=ctx.halo, force_geometry=force_geometry)
 
     return OrbitWorkState( Norbit, Nbase_orbit, Nstar, Nspatial, Nvbin_eff, Nlosvd, Nlight, Nshells, nsteps, max_attempts_factor, fill_target, orbit_budget, return_occ, theta_launches,
-        sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps, spatial_edges, velocity_edges_use, shells, cost_order, orbit_ctx, ctx.pot, ctx.frc, Lfrac,
+        sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps, spatial_edges, light_edges, velocity_edges_use, shells, cost_order, orbit_ctx, ctx.pot, ctx.frc, Lfrac,
         force_geometry, dt_frac_orbit, t_deadline, A_losvd, A_light, success_flags, min_r_reached, rapo_list, Threads.Atomic{Int}(1), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
 end
 
@@ -205,20 +207,22 @@ function _orbit_worker!(st::OrbitWorkState, rng)
         fill!(col_light, 0.0)
 
         @inbounds for k in 1:Nhits
-            ib = _bin_index(st.spatial_edges, s_arr[k])
-            ib == 0 && continue
+            il = _bin_index(st.light_edges, s_arr[k])
+            ik = _bin_index(st.spatial_edges, s_arr[k])
 
-            col_light[ib] += 1.0
+            il > 0 && (col_light[il] += 1.0)
+
+            ik == 0 && continue
 
             jb_pro = _bin_index(st.velocity_edges, vlos_pro_buf[k])
             if jb_pro > 0
-                row_pro = (ib - 1) * st.Nvbin + jb_pro
+                row_pro = (ik - 1) * st.Nvbin + jb_pro
                 col_losvd_pro[row_pro] += 1.0
             end
 
             jb_ret = _bin_index(st.velocity_edges, vlos_ret_buf[k])
             if jb_ret > 0
-                row_ret = (ib - 1) * st.Nvbin + jb_ret
+                row_ret = (ik - 1) * st.Nvbin + jb_ret
                 col_losvd_ret[row_ret] += 1.0
             end
         end
@@ -250,7 +254,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
         nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC,
         dR_frac::Float64=DEFAULT_DR_FRAC, Nbins_occ::Int=DEFAULT_NBINS_OCC, return_occ::Bool=true, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS,
         diag::Bool=false, threaded::Bool=true, fill_pct::Float64=0.80, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing,
-        kinematic_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0,
+        light_bin_edges=nothing, kinematic_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0,
         karl_halo_params=nothing)
 
     Nstar = length(R_star_m)
@@ -283,7 +287,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     st = _init_orbit_work(Norbit, R_star_m, has_vlos, v_star_mps, verr_star_mps, sini, ctx;
         nsteps=nsteps, Lfrac=Lfrac, dt_frac_orbit=dt_frac_orbit, Nbins_occ=Nbins_occ,
         return_occ=return_occ, max_attempts_factor=max_attempts_factor, fill_pct=fill_pct,
-        t_deadline=t_deadline, velocity_edges=velocity_edges, kinematic_bin_edges=kinematic_bin_edges, min_stars_per_bin=min_stars_per_bin, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch)
+        t_deadline=t_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, min_stars_per_bin=min_stars_per_bin, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch)
 
     Threads.atomic_xchg!(st.phase, 1)
     nworkers = threaded ? Threads.nthreads() : 1
@@ -307,7 +311,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
 
     if diag
         losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial = observed_targets_karl( R_star_m, has_vlos, v_star_mps,
-            verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl)
+            verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl, light_edges=st.light_edges)
 
         return (
             A,
@@ -321,6 +325,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
                 "Nlosvd" => st.Nlosvd,
                 "Nlight" => st.Nlight,
                 "spatial_edges" => st.spatial_edges,
+                "light_edges" => st.light_edges,
                 "velocity_edges" => st.velocity_edges,
                 "losvd_target" => losvd_target,
                 "light_target" => light_target,
@@ -341,7 +346,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     maxiter::Int=DEFAULT_KARL_MAXITER, max_refine::Int=0, timeout_s::Float64=120.0,
     R_inner_pc::Float64=30.0, use_radial_vlos_weights::Bool=false, use_weighted_score::Bool=false, R_weight_pc::Float64=-1.0,
     radial_weight_gamma::Float64=2.0, radial_weight_floor::Float64=0.3, velocity_edges=nothing, kinematic_bin_edges=nothing,
-    min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0,
+    light_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0,
     karl_halo_params=nothing)
 
     nrow, nbatch = size(thetas)
@@ -506,8 +511,21 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC,
                         Nbins_occ=Nocc, return_occ=true, max_attempts_factor=DEFAULT_MAX_ATTEMPTS,
                         fill_pct=0.80, t_deadline=theta_deadline, velocity_edges=velocity_edges,
-                        kinematic_bin_edges=kinematic_bin_edges, min_stars_per_bin=min_stars_per_bin, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch)
+                        light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, min_stars_per_bin=min_stars_per_bin, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch)
                     work_states[i] = ws
+                    if i == 1
+                        println(
+                            "[KARL BIN DIAG] ",
+                            "N_light=", ws.Nlight,
+                            " N_kin=", ws.Nspatial,
+                            " Nvbin=", ws.Nvbin,
+                            " A_light_rows=", size(ws.A_light, 1),
+                            " A_losvd_rows=", size(ws.A_losvd, 1),
+                            " R_light_max_pc=", ws.light_edges[end] / pc,
+                            " R_kin_max_pc=", ws.spatial_edges[end] / pc,
+                            " N_constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin,
+                        )
+                    end
 
                     Threads.atomic_xchg!(ws.phase, 1)
                     _orbit_worker!(ws, rng_own)
@@ -525,7 +543,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
 
                     losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial = observed_targets_karl(
                         R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws.spatial_edges, ws.velocity_edges;
-                        surface_brightness_profile=surface_brightness_profile_jl)
+                        surface_brightness_profile=surface_brightness_profile_jl, light_edges=ws.light_edges)
 
                     if weight_solver_sym === :expanded_cm
                         w, ok, wdiag = solve_weights_karl_expanded_cm( A_light, A_losvd, light_target, light_sigma, losvd_target, losvd_sigma;

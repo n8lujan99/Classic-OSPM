@@ -307,6 +307,7 @@ def _get_karl_options(obs=None, config=None):
         return default
 
     velocity_edges = grab("velocity_edges", None)
+    light_bin_edges_pc = grab("light_bin_edges_pc", None)
     kinematic_bin_edges_pc = grab("kinematic_bin_edges_pc", None)
 
     return {
@@ -314,6 +315,7 @@ def _get_karl_options(obs=None, config=None):
         "Nvbin": int(grab("Nvbin", 21)),
         "Ntheta_launch": int(grab("Ntheta_launch", 9)),
         "velocity_edges": velocity_edges,
+        "light_bin_edges_pc": light_bin_edges_pc,
         "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
     }
 
@@ -361,7 +363,7 @@ def halo_kwargs_from_ctx(ctx):
     return { "rho_s": float(halo["rho_s"]), "r_s": float(halo["r_s"]), "MBH": float(halo["MBH"]), "ML": float(halo["ML"]), "halo_type": str(halo["type"]),}
 
 def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, Norbit, theta, halo_type, stellar_model=None, surface_brightness_profile=None, halo_parameterization=None,
-    return_occ=True, Nbins_occ=0, diag=False, velocity_edges=None, kinematic_bin_edges_pc=None, min_stars_per_bin=20, Nvbin=21, Ntheta_launch=9):
+    return_occ=True, Nbins_occ=0, diag=False, velocity_edges=None, light_bin_edges_pc=None, kinematic_bin_edges_pc=None, min_stars_per_bin=20, Nvbin=21, Ntheta_launch=9):
     if not USE_JULIA:
         raise RuntimeError("Karl A-matrix mode requires Julia")
 
@@ -399,6 +401,8 @@ def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps
     )
     if velocity_edges is not None:
         kwargs["velocity_edges"] = PC.pyconvert(VecF, np.asarray(velocity_edges, dtype=float).ravel())
+    if light_bin_edges_pc is not None:
+        kwargs["light_bin_edges"] = PC.pyconvert( VecF, np.asarray(light_bin_edges_pc, dtype=float).ravel() * pc )
     if kinematic_bin_edges_pc is not None:
         kwargs["kinematic_bin_edges"] = PC.pyconvert( VecF, np.asarray(kinematic_bin_edges_pc, dtype=float).ravel() * pc )
     out = _Main.OSPMPhysicsSpherical.build_A_matrix_hybrid( int(Norbit), Rj, validj, vj, vej, float(sini), float(rho_s), float(r_s), float(MBH), float(ML), str(ht), **kwargs)
@@ -432,7 +436,7 @@ def build_A_matrix(obs, ctx, *, return_occ=True, Nbins_occ=0, diag=False, config
 
     return build_A_matrix_karl_julia( R_star_m=R, valid_vlos=valid, v_star_mps=v, verr_star_mps=ve, sini=float(obs.sini), Norbit=int(obs.Norbit), theta=theta, halo_type=halo_type,
         stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, return_occ=bool(return_occ), Nbins_occ=int(Nbins_occ), diag=bool(diag),
-        velocity_edges=opts["velocity_edges"], kinematic_bin_edges_pc=opts["kinematic_bin_edges_pc"], min_stars_per_bin=opts["min_stars_per_bin"], Nvbin=opts["Nvbin"], Ntheta_launch=opts["Ntheta_launch"])
+        velocity_edges=opts["velocity_edges"], light_bin_edges_pc=opts["light_bin_edges_pc"], kinematic_bin_edges_pc=opts["kinematic_bin_edges_pc"], min_stars_per_bin=opts["min_stars_per_bin"], Nvbin=opts["Nvbin"], Ntheta_launch=opts["Ntheta_launch"])
 
 def build_A_matrix_from_theta(obs, theta, *, halo_type="nfw", return_occ=True, Nbins_occ=0, diag=False, config=None):
     surface_brightness_profile = _get_surface_brightness_profile(obs=obs, config=config)
@@ -482,6 +486,8 @@ def evaluate_batch_theta_julia( *, thetas, obs, halo_type, stellar_model=None, s
 
     if opts["velocity_edges"] is not None:
         kwargs["velocity_edges"] = PC.pyconvert(VecF, np.asarray(opts["velocity_edges"], dtype=float).ravel())
+    if opts["light_bin_edges_pc"] is not None:
+        kwargs["light_bin_edges"] = PC.pyconvert( VecF, np.asarray(opts["light_bin_edges_pc"], dtype=float).ravel() * pc, )
     if opts["kinematic_bin_edges_pc"] is not None:
         kwargs["kinematic_bin_edges"] = PC.pyconvert( VecF, np.asarray(opts["kinematic_bin_edges_pc"], dtype=float).ravel() * pc, )
     out = _Main.OSPMPhysicsSpherical.evaluate_batch_theta(theta_arr, Rj, validj, vj, vej, float(obs.sini), int(Norbit), str(halo_type), **kwargs,)
