@@ -272,7 +272,8 @@ CONFIG = {
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_Simon_stars_v2.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_segue1_vcirc.csv"),
+    "COMPARISON_TAG": "full_light",
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "hpc_compare" / "full_light" / "daemon_deck_karl_segue1_full_light_vcirc.csv"),
 }
 
 

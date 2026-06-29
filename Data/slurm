@@ -97,7 +97,8 @@ print("Project:", Main.Base.active_project())
 PY
 
 echo "Launching OSPM..."
-echo "Galaxy file contents: $(cat which_galaxy)"
+echo "OSPM_GALAXY: ${OSPM_GALAXY:-}"
+echo "which_galaxy file contents: $(cat which_galaxy)"
 python - <<'PY'
 import os
 print("cwd:", os.getcwd())

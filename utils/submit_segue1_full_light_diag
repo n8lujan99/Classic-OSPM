@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR="$REPO_ROOT/logs/hpc_compare/segue1_full_light"
+
+mkdir -p "$LOG_DIR"
+
+echo "[INFO] Submitting Segue1 full-light diagnostic"
+echo "[INFO] Repo root: $REPO_ROOT"
+echo "[INFO] Config:    Data.Galaxy_Profiles.Segue1.Segue1_OSPM_Config"
+echo "[INFO] Deck:      Data/Galaxy_Profiles/Segue1/default/hpc_compare/full_light/daemon_deck_karl_segue1_full_light_vcirc.csv"
+
+sbatch \
+    --job-name=OSPM_Segue1_full_light \
+    --output="$LOG_DIR/%x_%j.out" \
+    --error="$LOG_DIR/%x_%j.err" \
+    --export=ALL,OSPM_REPO_ROOT="$REPO_ROOT",OSPM_GALAXY="Segue1",OSPM_COMPARE_LABEL="full_light",OSPM_VERSION="V2" \
+    "$REPO_ROOT/Data/slurm"
