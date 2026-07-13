@@ -29,7 +29,7 @@ def detect_workers():
 
 WORKERS = detect_workers()
 
-NORBIT = 1000 if LOCAL_DEBUG else 5000
+NORBIT = 1000 if LOCAL_DEBUG else 10000
 BATCH_SIZE = 1 if LOCAL_DEBUG else 120
 MIN_BATCH_SIZE = 1 if LOCAL_DEBUG else 120
 MAX_BATCH_SIZE = 1 if LOCAL_DEBUG else 360
