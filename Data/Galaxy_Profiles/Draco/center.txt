@@ -4,3 +4,29 @@ dec_deg = 57.9153
 pa_deg = 88
 distance_kpc = 76
 source = McConnachie 2012
+
+
+%Note the original center is from 1955 but the difference shown bellow do not justify a full restructure of the data 
+%Current center:
+%  RA  = 260.05170000 deg
+%  Dec = 57.91530000 deg
+
+%Odenkirchen center:
+%  RA  = 260.05500000 deg
+%  Dec = 57.91500000 deg
+
+%Projected coordinate shift if using Odenkirchen:
+%  median dx = -2.3252 pc
+%  median dy = 0.3979 pc
+%  median |shift| = 2.3590 pc
+%  max |shift| = 2.3650 pc
+
+%Radius changes:
+%  median dr = 0.2017 pc
+%  median |dr| = 1.8861 pc
+%  max |dr| = 2.3633 pc
+
+%Inner 100 pc vlos membership:
+%  old N = 129
+%  new N = 128
+%  changed membership N = 3
