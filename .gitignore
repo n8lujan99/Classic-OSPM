@@ -18,3 +18,20 @@ OSPM-NOTES/
 # OSPM generated run products
 Data/Galaxy_Profiles/*/default/archive/
 logs/*
+
+# Local Draco diagnostic figures
+Data/Galaxy_Profiles/Draco/draco_dwarf_galaxy_scale_inset_sigma_global.png
+Data/Galaxy_Profiles/Draco/draco_dwarf_galaxy_scale_inset_sigma_measured.png
+Data/Galaxy_Profiles/Draco/draco_dwarf_galaxy_scale_inset_v2.png
+
+# Local Segue 1 diagnostic outputs
+Data/Galaxy_Profiles/Segue1/default/hpc_compare/full_light/daemon_deck_karl_segue1_full_light_vcirc_chi2_landscape.png
+Data/Galaxy_Profiles/Segue1/default/hpc_compare/full_light/daemon_deck_karl_segue1_full_light_vcirc_diagnostics.png
+Data/Galaxy_Profiles/Segue1/default/hpc_compare/matched_bins/daemon_deck_karl_segue1_matched_bins_vcirc_chi2_landscape.png
+Data/Galaxy_Profiles/Segue1/default/hpc_compare/matched_bins/daemon_deck_karl_segue1_matched_bins_vcirc_diagnostics.png
+Data/Galaxy_Profiles/Segue1/default/hpc_compare/paired_full_vs_matched_diagnostics.csv
+
+# Local figure-generation scripts and output
+OSPM/Mapping/gen_fig.py
+OSPM/Mapping/gen_fig_standard.py
+draco_fig
