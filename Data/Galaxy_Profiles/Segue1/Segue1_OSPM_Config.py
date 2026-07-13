@@ -79,7 +79,7 @@ CONFIG = {
     # =========================================================
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
-        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_axisymmetric_light_grid_full.csv"),
+        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_surface_brightness_on_simon_bins_16.csv"),
         "Ltot": 340.0,
         "geometry": "axisymmetric_density_grid",
         "q_axis_ratio": 1.0,
@@ -116,7 +116,7 @@ CONFIG = {
     # Draco-style observed products
     # =========================================================
     "SURFACE_BRIGHTNESS_CSV": str(
-        PROFILE_ROOT / "segue1_NO09_surface_brightness_full.csv"
+        PROFILE_ROOT / "segue1_NO09_surface_brightness_on_simon_bins_16.csv"
     ),
     "KINEMATIC_BINS_CSV": str(
         PROFILE_ROOT / "segue1_simon_kinematic_bins_16.csv"
@@ -272,8 +272,8 @@ CONFIG = {
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_Simon_stars_v2.csv"),
-    "COMPARISON_TAG": "full_light",
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "hpc_compare" / "full_light" / "daemon_deck_karl_segue1_full_light_vcirc.csv"),
+    "COMPARISON_TAG": "matched_bins",
+    "CSV_PATH": str( PROFILE_ROOT / "default" / "daemon_deck.csv"),
 }
 
 
