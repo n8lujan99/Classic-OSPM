@@ -79,7 +79,7 @@ CONFIG = {
     # =========================================================
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
-        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_surface_brightness_on_simon_bins_16.csv"),
+        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_axisymmetric_light_grid_full.csv"),
         "Ltot": 340.0,
         "geometry": "axisymmetric_density_grid",
         "q_axis_ratio": 1.0,
@@ -115,12 +115,8 @@ CONFIG = {
     # =========================================================
     # Draco-style observed products
     # =========================================================
-    "SURFACE_BRIGHTNESS_CSV": str(
-        PROFILE_ROOT / "segue1_NO09_surface_brightness_on_simon_bins_16.csv"
-    ),
-    "KINEMATIC_BINS_CSV": str(
-        PROFILE_ROOT / "segue1_simon_kinematic_bins_16.csv"
-    ),
+    "SURFACE_BRIGHTNESS_CSV": str( PROFILE_ROOT / "segue1_NO09_surface_brightness_full.csv" ),
+    "KINEMATIC_BINS_CSV": str( PROFILE_ROOT / "segue1_simon_kinematic_bins_16.csv" ),
 
     # =========================================================
     # OSPM numerical setup
@@ -272,8 +268,8 @@ CONFIG = {
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_Simon_stars_v2.csv"),
-    "COMPARISON_TAG": "matched_bins",
-    "CSV_PATH": str( PROFILE_ROOT / "default" / "daemon_deck.csv"),
+    "COMPARISON_TAG": "full_light",
+    "CSV_PATH": str( PROFILE_ROOT / "default" / "daemon_deck_karl_segue1_full_light_test.csv"),
 }
 
 
@@ -291,3 +287,14 @@ print("[CONFIG] NTHETA_LAUNCH =", CONFIG["OBSERVABLES"]["NTHETA_LAUNCH"])
 print("[CONFIG] WEIGHT_MODE =", CONFIG["OBSERVABLES"]["WEIGHT_MODE"])
 print("[CONFIG] WEIGHT_SOLVER =", CONFIG["OBSERVABLES"]["WEIGHT_SOLVER"])
 print("[CONFIG] LOSVD_SCORE_MODE =", CONFIG["OBSERVABLES"]["LOSVD_SCORE_MODE"])
+
+
+
+"""
+16JUL2026 run full_light
+MODE              = karl
+stellar model     = karl_light_grid
+light inputs      = full
+kinematic inputs  = binned
+comparison tag    = full_light
+"""
