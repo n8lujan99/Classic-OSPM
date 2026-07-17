@@ -35,3 +35,9 @@ Data/Galaxy_Profiles/Segue1/default/hpc_compare/paired_full_vs_matched_diagnosti
 OSPM/Mapping/gen_fig.py
 OSPM/Mapping/gen_fig_standard.py
 draco_fig
+Cockpit/
+Data/Galaxy_Profiles/Draco/Data prep/
+Data/Galaxy_Profiles/Draco/archive/
+Data/Galaxy_Profiles/Segue1/archive/
+utils/local_cockpit
+utils/local_snapshot
