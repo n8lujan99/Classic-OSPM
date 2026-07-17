@@ -29,18 +29,28 @@ CHUNK_SIZE = 1 if LOCAL_DEBUG else 60
 LOG_INTERVAL = 1 if LOCAL_DEBUG else 10
 PROF_EVERY = 1 if LOCAL_DEBUG else 20
 EVAL_TIMEOUT_S = 200.0 if LOCAL_DEBUG else 600.0
-MAX_RUNS = 1 if LOCAL_DEBUG else 100000
+MAX_RUNS = 1 if LOCAL_DEBUG else 300000
 
 if NORBIT % 2 != 0:
     raise ValueError( f"Karl paired-orbit Spherical path requires even NORBIT because NORBIT is the final A-matrix column count; got {NORBIT}" )
 
 CONFIG = {
+    # =========================================================
+    # Parallelization
+    # =========================================================
     "N_WORKERS": WORKERS,
-
+    
+    # =========================================================
+    # Identity
+    # =========================================================
     "MODE":        "karl",
     "GALAXY":      Galaxy,
     "HALO_TYPE":   "nfw",
     "HALO_PARAMETERIZATION": "vcirc_rs",
+    
+    # =========================================================
+    # Galaxy geometry
+    # =========================================================
     "RA0_DEG":          260.0517,
     "DEC0_DEG":         57.9153,
     "DISTANCE_PC":      76000.0,
@@ -50,10 +60,13 @@ CONFIG = {
     "R_MAX_STARS_PC":   1500.0,
     "VLOS_COL":        "vlos",
     "V_SYS_KMS":       -291.68214888089926, 
-
+    
+    # =========================================================
+    # Stellar tracer/light model
+    # =========================================================
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
-        "grid_csv": str(PROFILE_ROOT / "draco_oden_kirchen2001_axisymmetric_light_grid.csv"),
+        "grid_csv": str(PROFILE_ROOT / "draco_oden_kirchen2001_axisymmetric_light_grid_full.csv"),
         "Ltot": 2.7e5,
         "geometry": "axisymmetric_density_grid", # only other option is "spherical_enclosed_light_grid" axi is for flat
         "q_axis_ratio": 0.69,
@@ -62,26 +75,38 @@ CONFIG = {
         "nu_col": "nu_Lsun_pc3",
         "volume_col": "cell_volume_pc3",
         "luminosity_col": "cell_luminosity_Lsun",
-        "force_softening_pc": 0.5,
+        "force_softening_pc": 0.2,
         "force_nR": 96,
         "force_nZ": 96,
         "force_nphi": 32,
         "source": "Odenkirchen2001",
     },
-
+    # =========================================================
+    # Data harvesting and quality
+    # =========================================================
     "INCLINATION_DEG":  78.0,
     "RADIUS_DEG":   0.6,
     "RUWE_MAX":     1.4,
     "PAR_SNR_MIN":  5.0,
+    
+    # =========================================================
+    # Column authority
+    # =========================================================
     "STAR_R_COL":      "r_pc",
     "STAR_V_COL":      "vlos",
     "STAR_VERR_COL":   "vlos_err",
     "RA_COL":          "ra",
     "DEC_COL":         "dec",
-
-    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "draco_oden_kirchen2001_surface_brightness_on_walker_bins_20.csv"),
+    
+    # =========================================================
+    # Draco-style observed products
+    # =========================================================
+    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "draco_oden_kirchen2001_surface_brightness_profile.csv"),
     "KINEMATIC_BINS_CSV":     str(PROFILE_ROOT / "draco_walker2023_kinematic_bins_20.csv"),
-
+    
+    # =========================================================
+    # OSPM numerical setup
+    # =========================================================
     "NORBIT": NORBIT,
 
     "OBSERVABLES": {
@@ -102,19 +127,37 @@ CONFIG = {
         # Stellar flattening stays in STELLAR_MODEL["q_axis_ratio"].
         "HALO_Q_AXIS_RATIO": 1.0,
     },
-
+    
+    # =========================================================
+    # Parameter space
+    # =========================================================
     "PARAMETER_NAMES": ["vcirc", "r_s", "MBH", "ML"],
     "INITIAL_THETA": [183.9114355853, 1800.0, 9e5, 1.0],
-    "THETA_BOUNDS": [(0.0, 250.0), (100.0, 10000.0), (0.0, 1e6), (0.2, 2.0)],
+    "THETA_BOUNDS": [
+        (0.0, 250.0),       #vcirc
+        (100.0, 100000.0),  # r_s
+        (0.0, 3e6),         # MBH  
+        (0.2, 20.0)],       # ML
+    
+    # =========================================================
+    # Penalties
+    # =========================================================
     "PEN_SPHERE_STRENGTH": 200,
     "PEN_SPHERE_POWER":    2.0,
     "PEN_SLOPE_STRENGTH":  5000,
+    
+    # =========================================================
+    # Physical domain
+    # =========================================================
     "MIN_DISTANCE":             1e-6,
     "MAX_DISTANCE":             5e3,
     "R_GRID_POINTS":            256,
     "POTENTIAL_EXTENT":         10.0,
     "BH_MIN_RADIUS_MULTIPLIER": 2.0,
 
+    # =========================================================
+    # Deck semantics
+    # =========================================================
     "REQUIRE_COLUMNS": [ "vcirc", "r_s", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light", 
         "chi2_total", "chi2_inner", "chi2_outer", "N_inner", "N_outer", "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction", "halo_type",
         # Runtime contract diagnostics:
@@ -130,42 +173,58 @@ CONFIG = {
         "numeric_fail_ml_up", "numeric_fail_ml_down", "orbit_fail_bh_up", "orbit_fail_bh_down", "orbit_fail_halo_up", "orbit_fail_halo_down", "orbit_fail_ml_up", "orbit_fail_ml_down",
     ],
     "FILL_DEFAULT_STATUS": "todo",
-
+    
+    # =========================================================
+    # Sampling and control
+    # =========================================================
     "BATCH_SIZE":          BATCH_SIZE,
     "MIN_BATCH_SIZE":      MIN_BATCH_SIZE,
     "MAX_BATCH_SIZE":      MAX_BATCH_SIZE,
     "CHUNK_SIZE":          CHUNK_SIZE,
     "_PRINT_EVERY":        10,
     "_print_counter":      0,
-
-    "AI_START_AFTER":        100, # normally closer to 500 for initial seeding but reduced to 100 for local debug
+    
+    # =========================================================
+    # AI / learning
+    # =========================================================
+    "AI_START_AFTER":        300, # normally closer to 500 for initial seeding but reduced to 100 for local debug
     "MIN_TRAIN_POINTS":      300,
-    "TRAIN_WINDOW":          3000,
+    "TRAIN_WINDOW":          500,
     "AI_NOISE_INIT":         0.30,
     "AI_NOISE_MIN":          0.02,
-    "AI_NOISE_TAU":          8000,
-    "AI_MIN_DISTINCT_PASS":  500,
+    "AI_NOISE_TAU":          5000,
+    "AI_MIN_DISTINCT_PASS":  800,
     "RESET_INTERVAL":        10000,
     "AI_DEBUG_EVERY":        200,
     "AI_SNAPSHOT_EVERY":     2000,
-    "FLAT_WINDOW":           300,
+    "FLAT_WINDOW":           200,
     "FLAT_THRESHOLD":        1e-6,
-    "FLAT_PATIENCE":         5,
-    "AI_RESET_ON_FLAT":      False,
-
+    "FLAT_PATIENCE":         10,
+    "AI_RESET_ON_FLAT":      True,
+    
+    # =========================================================
+    # Termination
+    # =========================================================
     "MAX_RUNS":              MAX_RUNS,
-    "STOP_NO_IMPROVEMENT":   5000,
+    "STOP_NO_IMPROVEMENT":   2000,
     "IMPROVEMENT_EPSILON":   1e-6,
     "LOG_INTERVAL":          LOG_INTERVAL,
     "PROF_EVERY":            PROF_EVERY,
     "EVAL_TIMEOUT_S":        EVAL_TIMEOUT_S,
-
+    
+    # =========================================================
+    # Physical constants
+    # =========================================================
     "G":    6.67430e-11,
     "Msun": 1.98847e30,
-
+    
+    # =========================================================
+    # Paths
+    # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_draco_vcirc.csv"),
+    "COMPARISON_TAG": "full_light",
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_draco_full_light_test.csv"),
 }
 
 print("[CONFIG] CSV_PATH =", CONFIG["CSV_PATH"])
@@ -182,3 +241,20 @@ print("[CONFIG] NTHETA_LAUNCH =", CONFIG["OBSERVABLES"]["NTHETA_LAUNCH"])
 print("[CONFIG] WEIGHT_MODE =", CONFIG["OBSERVABLES"]["WEIGHT_MODE"])
 print("[CONFIG] WEIGHT_SOLVER =", CONFIG["OBSERVABLES"]["WEIGHT_SOLVER"])
 print("[CONFIG] LOSVD_SCORE_MODE =", CONFIG["OBSERVABLES"]["LOSVD_SCORE_MODE"])
+
+
+"""
+16JUL2026 Draco full_light reset
+
+MODE              = karl
+stellar model     = karl_light_grid
+light inputs      = full Odenkirchen profile
+kinematic inputs  = Walker binned
+comparison tag    = full_light
+
+The previous Draco runs used the matched-bin light products, so they are not directly
+comparable to this setup. This run switches both the stellar light grid and the
+surface-brightness constraints to the full Odenkirchen profile while keeping the
+Walker kinematic bins. The daemon run settings now match Segue 1. The remaining
+configuration differences are intended to be galaxy-specific.
+"""

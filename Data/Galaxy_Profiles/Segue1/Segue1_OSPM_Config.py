@@ -37,13 +37,10 @@ CHUNK_SIZE = 1 if LOCAL_DEBUG else 60
 LOG_INTERVAL = 1 if LOCAL_DEBUG else 10
 PROF_EVERY = 1 if LOCAL_DEBUG else 20
 EVAL_TIMEOUT_S = 200.0 if LOCAL_DEBUG else 600.0
-MAX_RUNS = 1 if LOCAL_DEBUG else 100000
+MAX_RUNS = 1 if LOCAL_DEBUG else 300000
 
 if NORBIT % 2 != 0:
-    raise ValueError(
-        f"Karl paired-orbit path requires even NORBIT; got {NORBIT}"
-    )
-
+    raise ValueError( f"Karl paired-orbit path requires even NORBIT; got {NORBIT}" )
 
 CONFIG = {
     # =========================================================
@@ -148,10 +145,10 @@ CONFIG = {
     "PARAMETER_NAMES": ["vcirc", "r_s", "MBH", "ML"],
     "INITIAL_THETA":   [21.0, 1000.0, 4.5e5, 0.3],
     "THETA_BOUNDS": [
-        (0.0, 30.0),
-        (100.0, 10000.0),
-        (0.0, 2e6),
-        (0.2, 20.0),
+        (0.0, 80.0),        #vcirc
+        (100.0, 10000.0),   #r_s
+        (0.0, 2e6),         #MBH
+        (0.2, 20.0),        #ML
     ],
 
     # =========================================================
@@ -232,7 +229,7 @@ CONFIG = {
     # =========================================================
     # AI / learning
     # =========================================================
-    "AI_START_AFTER":       300,
+    "AI_START_AFTER":       500,
     "MIN_TRAIN_POINTS":     300,
     "TRAIN_WINDOW":         500,
     "AI_NOISE_INIT":        0.30,
@@ -251,7 +248,7 @@ CONFIG = {
     # Termination
     # =========================================================
     "MAX_RUNS":            MAX_RUNS,
-    "STOP_NO_IMPROVEMENT": 1000,
+    "STOP_NO_IMPROVEMENT": 2000,
     "IMPROVEMENT_EPSILON": 1e-6,
     "LOG_INTERVAL":        LOG_INTERVAL,
     "PROF_EVERY":          PROF_EVERY,
@@ -297,4 +294,16 @@ stellar model     = karl_light_grid
 light inputs      = full
 kinematic inputs  = binned
 comparison tag    = full_light
+
+17JUL2026 analysis of 16JUL2026 run full_light
+Run shows that we are not giving v_circ a large enough range and its running into a wall
+while at the same time the mbh is begining to become distinguished the M/L is degenerate like expected and the r_s 
+looks like its going degenearate as weell so no changes for those two, and mbh should still be in proper range. 
+Going to expand the v_circ range from 0-30 to 0-80 and see if that helps.
+
+17JUL2026 run full_light
+Extending the 16JUL2026 full_light run to 300,000 runs and expanding the v_circ range to 0-80.
+
+
+
 """
