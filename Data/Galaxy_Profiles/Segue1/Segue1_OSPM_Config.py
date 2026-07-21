@@ -145,8 +145,8 @@ CONFIG = {
     "PARAMETER_NAMES": ["vcirc", "r_s", "MBH", "ML"],
     "INITIAL_THETA":   [21.0, 1000.0, 4.5e5, 0.3],
     "THETA_BOUNDS": [
-        (0.0, 80.0),        #vcirc
-        (100.0, 10000.0),   #r_s
+        (0.0, 200.0),        #vcirc
+        (100.0, 100000.0),   #r_s
         (0.0, 2e6),         #MBH
         (0.2, 20.0),        #ML
     ],
