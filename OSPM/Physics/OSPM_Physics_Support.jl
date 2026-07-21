@@ -403,17 +403,12 @@ function observed_targets_karl( R_star_m::Vector{Float64}, valid_vlos::AbstractV
         nbin = max(counts_by_spatial[ib], 1.0)
         Li = max(losvd_light_target[ib], 0.0)
         a0 = nbin + Nvbin * alpha_dirichlet
-
         for jb in 1:Nvbin
             row = (ib - 1) * Nvbin + jb
             kij = max(counts_losvd[row], 0.0)
             aj = kij + alpha_dirichlet
             var_pij = aj * (a0 - aj) / (a0 * a0 * (a0 + 1.0))
-
-            losvd_sigma[row] = max(
-                Li * sqrt(max(var_pij, 0.0)),
-                sigma_floor,
-            )
+            losvd_sigma[row] = max( Li * sqrt(max(var_pij, 0.0)), sigma_floor)
         end
     end
 
@@ -435,8 +430,6 @@ end
 # The entropy, wphase, expanded Cm, LOSVD slack-variable SPEAR solve,
 # xmu helpers, and χ² scoring live in OSPM_Physics_Weights.jl.
 include("OSPM_Physics_Weights.jl")
-
-
 include("OSPM_Physics_Force.jl")
 
 # ============================================================
@@ -445,23 +438,18 @@ include("OSPM_Physics_Force.jl")
 
 @inline function derivs(s::SVector{4,Float64}, Lz::Float64, frc, R)
     r, theta, vr, vtheta = s
-
     !(isfinite(r) && isfinite(theta) && isfinite(vr) && isfinite(vtheta)) &&
         return SVector(0.0, 0.0, 0.0, 0.0)
-
     r_safe = max(abs(r), 1e-12)
     st, ct = _sincos_safe(theta)
     r_tab = clamp(r_safe, R[1], R[end])
     fr, ftheta = frc(r_tab, theta)
-
     !(isfinite(fr) && isfinite(ftheta)) &&
         return SVector(0.0, 0.0, 0.0, 0.0)
-
     dr = vr
     dtheta = vtheta / r_safe
     dvr = (vtheta * vtheta) / r_safe + (Lz * Lz) / (r_safe^3 * st * st) + fr
     dvtheta = (Lz * Lz) * ct / (r_safe^3 * st^3) - (vr * vtheta) / r_safe + ftheta
-
     return SVector(dr, dtheta, dvr, dvtheta)
 end
 
@@ -490,7 +478,6 @@ function launch_orbit_apocenter(; rapo::Float64, theta0::Float64, Lz_frac::Float
         vc2 = fr_tol * rapo
     end
     vc = sqrt(vc2)
-
     if !(isfinite(vc) && vc > EPS_VEL)
         return debug ?
             ((rapo, theta0, ss, frs, vc, EPS_VEL), 0.0, 0.0, 0.0, :reject_vc) :

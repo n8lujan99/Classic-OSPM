@@ -64,34 +64,26 @@ end
 function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64},
     sini::Float64, ctx; nsteps::Int, Lfrac, dt_frac_orbit::Float64, Nbins_occ::Int, return_occ::Bool, max_attempts_factor::Int, fill_pct::Float64, t_deadline::UInt64,
     velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9)
-
     iseven(Norbit) || error("Karl prograde/retrograde orbit pairing requires even Norbit because Norbit is the final A-matrix column count")
     Nbase_orbit = Norbit ÷ 2
-
     Nstar = length(R_star_m)
     valid_vec = collect(Bool, valid_vlos)
     vlos_idx = Int[]
-
     @inbounds for i in 1:Nstar
         valid_vec[i] && push!(vlos_idx, i)
     end
-
     spatial_edges = resolve_karl_spatial_edges(kinematic_bin_edges)
     Nspatial = length(spatial_edges) - 1
     light_edges = light_bin_edges === nothing ? spatial_edges : resolve_karl_light_edges(light_bin_edges)
     Nlight = length(light_edges) - 1
-
     velocity_edges_use =
         velocity_edges === nothing ?
         build_velocity_edges_auto(v_star_mps[vlos_idx], verr_star_mps[vlos_idx]; Nvbin=Nvbin) :
         Float64.(velocity_edges)
-
     Nvbin_eff = length(velocity_edges_use) - 1
     Nlosvd = Nspatial * Nvbin_eff
-
     shells = sort(copy(R_star_m[isfinite.(R_star_m)]))
     isempty(shells) && (shells = [spatial_edges[1], spatial_edges[end]])
-
     Nshells = length(shells)
     A_losvd = zeros(Float64, Nlosvd, Norbit)
     A_light = zeros(Float64, Nlight, Norbit)
@@ -99,13 +91,11 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
     min_r_reached = fill(Inf, Nbase_orbit)
     rapo_list = fill(NaN, Nbase_orbit)
     _orbit_cost = Vector{Float64}(undef, Nbase_orbit)
-
     @inbounds for c in 1:Nbase_orbit
         lf = Lfrac[1 + ((c - 1) % length(Lfrac))]
         rapo = shells[mod1(c, Nshells)]
         _orbit_cost[c] = lf * rapo
     end
-
     cost_order = sortperm(_orbit_cost)
     fill_target = max(1, round(Int, clamp(fill_pct, 0.0, 1.0) * Nbase_orbit))
     orbit_budget = max_attempts_factor * Nbase_orbit
@@ -115,9 +105,7 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
         [f64(pi / 2)]
     sini_use = clamp01(f64(sini))
     cosi_use = sqrt(max(0.0, 1.0 - sini_use * sini_use))
-
     orbit_ctx = ( frc=ctx.frc, R_pos=ctx.R, halo=ctx.halo, force_geometry=force_geometry)
-
     return OrbitWorkState( Norbit, Nbase_orbit, Nstar, Nspatial, Nvbin_eff, Nlosvd, Nlight, Nshells, nsteps, max_attempts_factor, fill_target, orbit_budget, return_occ, theta_launches,
         sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps, spatial_edges, light_edges, velocity_edges_use, shells, cost_order, orbit_ctx, ctx.pot, ctx.frc, Lfrac,
         force_geometry, dt_frac_orbit, t_deadline, A_losvd, A_light, success_flags, min_r_reached, rapo_list, Threads.Atomic{Int}(1), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
@@ -135,7 +123,6 @@ end
     ysky = cosi * x - sini * z
     Rproj = sqrt(xsky * xsky + ysky * ysky)
     vlos = sini * vx + cosi * vz
-
     return Rproj, vlos
 end
 
