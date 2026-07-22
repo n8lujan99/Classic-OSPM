@@ -55,6 +55,30 @@ end
     return xrho * num / max(den, 1e-30)
 end
 
+@inline function nonsingular_isothermal_density_cylindrical(
+    R::Float64,
+    z::Float64,
+    halo,
+)
+    q = halo_q_axis_ratio(halo)
+    v0 = f64(halo[:v0_ms])
+    rc = max(f64(halo[:rc_m]), 1e-30)
+
+    q2 = q * q
+    R2 = R * R
+    z2 = z * z
+    rc2 = rc * rc
+
+    numerator =
+        (2.0 * q2 + 1.0) * rc2 +
+        R2 +
+        (2.0 - 1.0 / q2) * z2
+    denominator = (rc2 + R2 + z2 / q2)^2
+
+    return (v0 * v0 / (4.0 * pi * G * q2)) *
+           numerator / max(denominator, 1e-30)
+end
+
 function karl_halo_from_params(; ihalo::Int=4, qdm::Float64=1.0, dis::Float64=1.0, v0::Float64=0.0, rc_pc::Float64=1.0, xmgamma::Float64=0.0, rsgamma_pc::Float64=1.0, gamma::Float64=1.0, cnfw::Float64=1.0, rsnfw_pc::Float64=1.0, gdennorm::Float64=1.0)
     return Dict{Symbol,Any}( :type => :karl_halo, :ihalo => ihalo, :qdm => qdm, :dis => dis, :v0 => v0, :rc_pc => rc_pc, :xmgamma => xmgamma, :rsgamma_pc => rsgamma_pc, :gamma => gamma, :cnfw => cnfw, :rsnfw_pc => rsnfw_pc, :gdennorm => gdennorm)
 end
@@ -111,6 +135,8 @@ function rho_interp(rv, halo)
         return rhos / (x * (1 + x)^2 + 1e-30)
     halo[:type] === :cored &&
         return rhos / ((1 + x) * (1 + x^2) + 1e-30)
+    halo[:type] === :nonsingular_isothermal &&
+        return nonsingular_isothermal_density_cylindrical(r, 0.0, halo)
     halo[:type] === :einasto && begin
         α = halo[:alpha]          # curvature parameter
         return rhos * exp(-2/α * (x^α - 1))
@@ -135,6 +161,9 @@ end
 @inline function rho_halo_axisym(R::Float64, z::Float64, halo)
     if get(halo, :type, :none) === :karl_halo
         return rho_karl_halo_cylindrical(R, z, halo)
+    end
+    if get(halo, :type, :none) === :nonsingular_isothermal
+        return nonsingular_isothermal_density_cylindrical(R, z, halo)
     end
     m = halo_m_axisym(R, z, halo)
     return rho_interp((m, 0.0), halo)
@@ -565,16 +594,35 @@ function halo_from_theta(rho_s, r_s, MBH, ML; halo_type="nfw", alpha=nothing, st
     ht = Symbol(lowercase(String(halo_type)))
     qh = max(abs(f64(halo_q_axis_ratio)), 1e-6)
     rs_pc = f64(r_s)
-    h = Dict(
-        :rho_s => f64(rho_s) * Msun / pc^3,
-        :r_s   => rs_pc * pc,
-        :rs    => rs_pc * pc,
-        :MBH   => f64(MBH) * Msun,
-        :ML    => f64(ML),
-        :type  => ht,
-        :rmin  => 1e-6 * rs_pc * pc,
-        :halo_q_axis_ratio => qh,
-    )
+    if ht === :nonsingular_isothermal
+        rc_pc = max(rs_pc, 1e-12)
+        v0_kms = f64(rho_s)
+        h = Dict(
+            :rho_s => 0.0,
+            :r_s   => rc_pc * pc,
+            :rs    => rc_pc * pc,
+            :v0_ms => v0_kms * 1.0e3,
+            :rc_m  => rc_pc * pc,
+            :v0_kms => v0_kms,
+            :rc_pc => rc_pc,
+            :MBH   => f64(MBH) * Msun,
+            :ML    => f64(ML),
+            :type  => ht,
+            :rmin  => 1e-6 * rc_pc * pc,
+            :halo_q_axis_ratio => qh,
+        )
+    else
+        h = Dict(
+            :rho_s => f64(rho_s) * Msun / pc^3,
+            :r_s   => rs_pc * pc,
+            :rs    => rs_pc * pc,
+            :MBH   => f64(MBH) * Msun,
+            :ML    => f64(ML),
+            :type  => ht,
+            :rmin  => 1e-6 * rs_pc * pc,
+            :halo_q_axis_ratio => qh,
+        )
+    end
     if ht === :karl_halo
         # Karl halo mode is a real force path.  The theta r_s value supplies the
         # default scale radius in pc.  Specific Karl fields may override through

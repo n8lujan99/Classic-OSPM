@@ -10,6 +10,7 @@ from .AI_defaults import CONFIG as AI_DEFAULTS
 OSPM_ROOT = Path(__file__).resolve().parents[1]
 WHICH_FILE = OSPM_ROOT / "which_galaxy"
 
+
 def _get_galaxy_name():
     env_name = os.environ.get("OSPM_GALAXY", "").strip()
     if env_name:
@@ -21,9 +22,11 @@ def _get_galaxy_name():
         raise RuntimeError("which_galaxy is empty")
     return name
 
+
 def get_profile_root():
     gal = _get_galaxy_name()
     return OSPM_ROOT / "Data" / "Galaxy_Profiles" / gal
+
 
 # --------------------------------------------------
 # Config loader
@@ -43,15 +46,36 @@ def load_config():
 
     # Declare identity explicitly
     cfg["GALAXY"] = galaxy
-    cfg["HALO_PARAMETERIZATION"] = str(cfg.get("HALO_PARAMETERIZATION", "rho_rs")).strip().lower()
+    cfg["HALO_TYPE"] = str(cfg.get("HALO_TYPE", "none")).strip().lower()
+    cfg["HALO_PARAMETERIZATION"] = str(
+        cfg.get("HALO_PARAMETERIZATION", "rho_rs")
+    ).strip().lower()
 
     if cfg["HALO_PARAMETERIZATION"] in ("", "default"):
         cfg["HALO_PARAMETERIZATION"] = "rho_rs"
 
-    if cfg["HALO_PARAMETERIZATION"] not in ("rho_rs", "vcirc_rs"):
+    allowed_halo_parameterizations = ("rho_rs", "vcirc_rs", "v0_rc")
+    if cfg["HALO_PARAMETERIZATION"] not in allowed_halo_parameterizations:
         raise ValueError(
-            "HALO_PARAMETERIZATION must be 'rho_rs' or 'vcirc_rs', "
+            "HALO_PARAMETERIZATION must be 'rho_rs', 'vcirc_rs', or 'v0_rc', "
             f"got {cfg['HALO_PARAMETERIZATION']!r}"
+        )
+
+    halo_type = cfg["HALO_TYPE"]
+    halo_parameterization = cfg["HALO_PARAMETERIZATION"]
+
+    if halo_parameterization == "v0_rc" and halo_type != "nonsingular_isothermal":
+        raise ValueError(
+            "HALO_PARAMETERIZATION='v0_rc' requires "
+            "HALO_TYPE='nonsingular_isothermal', "
+            f"got HALO_TYPE={halo_type!r}"
+        )
+
+    if halo_type == "nonsingular_isothermal" and halo_parameterization != "v0_rc":
+        raise ValueError(
+            "HALO_TYPE='nonsingular_isothermal' requires "
+            "HALO_PARAMETERIZATION='v0_rc', "
+            f"got HALO_PARAMETERIZATION={halo_parameterization!r}"
         )
 
     required = [

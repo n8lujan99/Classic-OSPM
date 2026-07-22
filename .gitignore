@@ -41,3 +41,5 @@ Data/Galaxy_Profiles/Draco/archive/
 Data/Galaxy_Profiles/Segue1/archive/
 utils/local_cockpit
 utils/local_snapshot
+utils/plot_reduced
+Data/Galaxy_Profiles/*/default/*.png

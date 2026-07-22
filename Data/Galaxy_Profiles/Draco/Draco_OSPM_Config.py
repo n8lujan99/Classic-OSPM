@@ -45,8 +45,8 @@ CONFIG = {
     # =========================================================
     "MODE":        "karl",
     "GALAXY":      Galaxy,
-    "HALO_TYPE":   "nfw",
-    "HALO_PARAMETERIZATION": "vcirc_rs",
+    "HALO_TYPE":   "nonsingular_isothermal", #  a few options "nonsingular_isothermal" and "NFW"
+    "HALO_PARAMETERIZATION": "v0_rc", # two options: "v0_rc" or "vcirc_rs" which are cored and nfw respectively 
     
     # =========================================================
     # Galaxy geometry
@@ -131,12 +131,12 @@ CONFIG = {
     # =========================================================
     # Parameter space
     # =========================================================
-    "PARAMETER_NAMES": ["vcirc", "r_s", "MBH", "ML"],
-    "INITIAL_THETA": [183.9114355853, 1800.0, 9e5, 1.0],
+    "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"],
+    "INITIAL_THETA": [100, 1800.0, 9e5, 1.0],
     "THETA_BOUNDS": [
-        (0.0, 500.0),       #vcirc
-        (100.0, 1000000.0),  # r_s
-        (0.0, 4e6),         # MBH  
+        (0.0, 200.0),       # v0, km/s or v_circ for nfw
+        (100.0, 1000000.0),  # r_c, pc or r_s for nfw
+        (0.0, 4e6),         # MBH, Msun
         (0.2, 20.0)],       # ML
     
     # =========================================================
@@ -158,7 +158,7 @@ CONFIG = {
     # =========================================================
     # Deck semantics
     # =========================================================
-    "REQUIRE_COLUMNS": [ "vcirc", "r_s", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light", 
+    "REQUIRE_COLUMNS": [ "v0", "r_c", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light", 
         "chi2_total", "chi2_inner", "chi2_outer", "N_inner", "N_outer", "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction", "halo_type",
         # Runtime contract diagnostics:
         "weight_mode", "weight_solver_mode", "losvd_score_mode", "alphat", "halo_q_axis_ratio", "karl_halo_params_active",
@@ -223,8 +223,8 @@ CONFIG = {
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),
-    "COMPARISON_TAG": "full_light",
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "daemon_deck_karl_draco_full_light_test.csv"),
+    "COMPARISON_TAG": "nonsingular_isothermal_full_light",
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_nonsingular_isothermal_full_light.csv"),
 }
 
 print("[CONFIG] CSV_PATH =", CONFIG["CSV_PATH"])

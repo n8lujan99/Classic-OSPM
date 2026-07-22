@@ -99,9 +99,17 @@ def _normalize_halo_parameterization(halo_parameterization=None):
     hp = "rho_rs" if halo_parameterization is None else str(halo_parameterization).strip().lower()
     if hp in ("", "default"):
         hp = "rho_rs"
-    if hp not in ("rho_rs", "vcirc_rs"):
+    if hp not in ("rho_rs", "vcirc_rs", "v0_rc"):
         raise ValueError(f"Unknown HALO_PARAMETERIZATION: {halo_parameterization!r}")
     return hp
+
+def _halo_parameter_names(halo_parameterization):
+    hp = _normalize_halo_parameterization(halo_parameterization)
+    if hp == "vcirc_rs":
+        return "vcirc", "r_s"
+    if hp == "v0_rc":
+        return "v0", "r_c"
+    return "rho_s", "r_s"
 
 def normalize_halo_parameterization(halo_parameterization=None):
     return _normalize_halo_parameterization(halo_parameterization)
@@ -123,13 +131,13 @@ def canonicalize_theta(theta, *, halo_type, halo_parameterization=None, bounds=N
         raise ValueError("theta too short")
 
     hp = _normalize_halo_parameterization(halo_parameterization)
-    first_name = "vcirc" if hp == "vcirc_rs" else "rho_s"
+    first_name, scale_name = _halo_parameter_names(hp)
 
     if require_mbh and t.size < 3:
-        raise ValueError(f"theta missing MBH; expects [{first_name}, r_s, MBH, ML]")
+        raise ValueError(f"theta missing MBH; expects [{first_name}, {scale_name}, MBH, ML]")
 
     if require_ml and t.size < 4:
-        raise ValueError(f"theta missing ML; expects [{first_name}, r_s, MBH, ML]")
+        raise ValueError(f"theta missing ML; expects [{first_name}, {scale_name}, MBH, ML]")
 
     ncheck = 4 if require_ml else 3
 
@@ -137,10 +145,22 @@ def canonicalize_theta(theta, *, halo_type, halo_parameterization=None, bounds=N
         raise ValueError("theta has non-finite values")
 
     first = float(t[0])
-    r_s = float(t[1])
+    halo_scale = float(t[1])
     MBH = float(t[2]) if t.size >= 3 else 0.0
     ML = float(t[3]) if t.size >= 4 else 1.0
     ht = str(halo_type).strip().lower()
+
+    if hp == "v0_rc" and ht not in ("nonsingular_isothermal", "none"):
+        raise ValueError(
+            "HALO_PARAMETERIZATION='v0_rc' requires "
+            "HALO_TYPE='nonsingular_isothermal' or 'none'"
+        )
+
+    if ht == "nonsingular_isothermal" and hp != "v0_rc":
+        raise ValueError(
+            "HALO_TYPE='nonsingular_isothermal' requires "
+            "HALO_PARAMETERIZATION='v0_rc'"
+        )
 
     if bounds is not None:
         b = np.asarray(bounds, float)
@@ -149,7 +169,7 @@ def canonicalize_theta(theta, *, halo_type, halo_parameterization=None, bounds=N
         if b.shape[0] < need:
             raise ValueError(f"bounds must cover at least first {need} parameters")
 
-        vals = (first, r_s, MBH, ML)[:need]
+        vals = (first, halo_scale, MBH, ML)[:need]
 
         for i, x in enumerate(vals):
             lo, hi = float(b[i, 0]), float(b[i, 1])
@@ -157,9 +177,13 @@ def canonicalize_theta(theta, *, halo_type, halo_parameterization=None, bounds=N
             if not (lo <= x <= hi):
                 raise ValueError(f"theta out of bounds at i={i}: {x} not in [{lo}, {hi}]")
 
-    rho_s = nfw_vcirc_rs_to_rho_s(first, r_s) if hp == "vcirc_rs" else first
+    halo_param = (
+        nfw_vcirc_rs_to_rho_s(first, halo_scale)
+        if hp == "vcirc_rs"
+        else first
+    )
 
-    return (rho_s, r_s, MBH, ML, ht)
+    return (halo_param, halo_scale, MBH, ML, ht)
 
 def _theta_sig(theta, halo_type, halo_parameterization=None):
     return canonicalize_theta(theta, halo_type=halo_type, halo_parameterization=halo_parameterization)
@@ -175,8 +199,11 @@ def canonicalize_theta_matrix(thetas, *, halo_type, halo_parameterization=None, 
         raise RuntimeError("thetas must be a 2D array with shape (nparam, nbatch)")
     if theta_arr.shape[0] < 4:
         hp = _normalize_halo_parameterization(halo_parameterization)
-        first_name = "vcirc" if hp == "vcirc_rs" else "rho_s"
-        raise RuntimeError(f"thetas must have shape (4, nbatch): [{first_name}, r_s, MBH, ML]")
+        first_name, scale_name = _halo_parameter_names(hp)
+        raise RuntimeError(
+            "thetas must have shape (4, nbatch): "
+            f"[{first_name}, {scale_name}, MBH, ML]"
+        )
     out = theta_arr.copy()
     for i in range(theta_arr.shape[1]):
         out[:4, i] = assert_theta_contract( theta_arr[:4, i], halo_type=halo_type, halo_parameterization=halo_parameterization,
@@ -359,6 +386,11 @@ def build_A_matrix(obs, ctx, *, return_occ=True, Nbins_occ=0, diag=False, config
     hk = halo_kwargs_from_ctx(ctx)
     theta = [hk["rho_s"], hk["r_s"], hk["MBH"], hk["ML"]]
     halo_type = hk["halo_type"]
+    canonical_parameterization = (
+        "v0_rc"
+        if halo_type.strip().lower() == "nonsingular_isothermal"
+        else None
+    )
     stellar_model = (
         ctx.get("stellar_model", getattr(obs, "stellar_model", None))
         if isinstance(ctx, dict)
@@ -369,7 +401,8 @@ def build_A_matrix(obs, ctx, *, return_occ=True, Nbins_occ=0, diag=False, config
     valid = _get_valid_vlos(obs, R, v, ve)
     opts = _get_karl_options(obs=obs, config=config)
     return build_A_matrix_karl_julia( R_star_m=R, valid_vlos=valid, v_star_mps=v, verr_star_mps=ve, sini=float(obs.sini), Norbit=int(obs.Norbit), theta=theta, halo_type=halo_type,
-        stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, return_occ=bool(return_occ), Nbins_occ=int(Nbins_occ), diag=bool(diag),
+        stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, halo_parameterization=canonical_parameterization,
+        return_occ=bool(return_occ), Nbins_occ=int(Nbins_occ), diag=bool(diag),
         velocity_edges=opts["velocity_edges"], light_bin_edges_pc=opts["light_bin_edges_pc"], kinematic_bin_edges_pc=opts["kinematic_bin_edges_pc"], min_stars_per_bin=opts["min_stars_per_bin"], Nvbin=opts["Nvbin"], Ntheta_launch=opts["Ntheta_launch"])
 
 def build_A_matrix_from_theta(obs, theta, *, halo_type="nfw", return_occ=True, Nbins_occ=0, diag=False, config=None):
@@ -378,24 +411,17 @@ def build_A_matrix_from_theta(obs, theta, *, halo_type="nfw", return_occ=True, N
     ctx = build_dynamics_context( theta=theta, halo_type=halo_type, halo_parameterization=halo_parameterization, stellar_model=getattr(obs, "stellar_model", None), surface_brightness_profile=surface_brightness_profile,)
     return build_A_matrix( obs, ctx, return_occ=bool(return_occ), Nbins_occ=int(Nbins_occ), diag=bool(diag), config=config,)
 
-def evaluate_batch_theta_julia(
-    *,
-    thetas,
-    obs,
-    halo_type,
-    stellar_model=None,
-    surface_brightness_profile=None,
-    Norbit=None,
-    config=None,
-):
+def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, surface_brightness_profile=None, Norbit=None, config=None):
     """
     Sole Python -> Julia batch-evaluation boundary.
 
     External theta:
         [vcirc, r_s, MBH, ML] when HALO_PARAMETERIZATION="vcirc_rs"
+        [v0, r_c, MBH, ML] when HALO_PARAMETERIZATION="v0_rc"
 
-    Julia theta:
-        [rho_s, r_s, MBH, ML]
+    Canonical positional theta sent to Julia:
+        [rho_s, r_s, MBH, ML] for rho_rs and vcirc_rs
+        [v0, r_c, MBH, ML] for v0_rc
 
     This function owns:
         - theta canonicalization
@@ -434,40 +460,15 @@ def evaluate_batch_theta_julia(
         return default
 
     if stellar_model is None:
-        stellar_model = opt(
-            "STELLAR_MODEL",
-            "stellar_model",
-            default=getattr(obs, "stellar_model", None),
-        )
-
+        stellar_model = opt( "STELLAR_MODEL", "stellar_model", default=getattr(obs, "stellar_model", None))
     if surface_brightness_profile is None:
-        surface_brightness_profile = opt(
-            "SURFACE_BRIGHTNESS_PROFILE",
-            "surface_brightness_profile",
-            default=None,
-        )
-
+        surface_brightness_profile = opt( "SURFACE_BRIGHTNESS_PROFILE", "surface_brightness_profile", default=None)
     if surface_brightness_profile is None:
-        surface_brightness_profile = _get_surface_brightness_profile(
-            obs=obs,
-            config=cfg,
-        )
+        surface_brightness_profile = _get_surface_brightness_profile( obs=obs, config=cfg )
 
-    light_bin_edges_pc = opt(
-        "LIGHT_BIN_EDGES_PC",
-        "light_bin_edges_pc",
-        default=None,
-    )
-    kinematic_bin_edges_pc = opt(
-        "KINEMATIC_BIN_EDGES_PC",
-        "kinematic_bin_edges_pc",
-        default=None,
-    )
-    velocity_edges = opt(
-        "VELOCITY_EDGES",
-        "velocity_edges",
-        default=None,
-    )
+    light_bin_edges_pc = opt( "LIGHT_BIN_EDGES_PC", "light_bin_edges_pc", default=None)
+    kinematic_bin_edges_pc = opt("KINEMATIC_BIN_EDGES_PC", "kinematic_bin_edges_pc", default=None)
+    velocity_edges = opt( "VELOCITY_EDGES", "velocity_edges", default=None)
 
     if light_bin_edges_pc is None:
         raise RuntimeError("light_bin_edges_pc is required")
@@ -475,60 +476,17 @@ def evaluate_batch_theta_julia(
     if kinematic_bin_edges_pc is None:
         raise RuntimeError("kinematic_bin_edges_pc is required")
 
-    min_stars_per_bin = int(
-        opt("MIN_STARS_PER_BIN", "min_stars_per_bin", default=20)
-    )
-    Nvbin = int(
-        opt("NVBIN", "Nvbin", "nvbin", default=21)
-    )
-    Ntheta_launch = int(
-        opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9)
-    )
-
-    Nocc = int(
-        opt("NBINS_OCC", "Nocc", "nbins_occ", default=0)
-    )
-    lambda_light = float(
-        opt(
-            "LAMBDA_LIGHT",
-            "LAMBDA_OCC",
-            "lambda_light",
-            "lambda_occ",
-            default=1.0,
-        )
-    )
-
-    alpha = float(
-        opt("KARL_ALPHA", "ALPHA", "alpha", default=1e-4)
-    )
-    alphat = float(
-        opt("KARL_ALPHAT", "ALPHAT", "alphat", default=1.0)
-    )
-    maxiter = int(
-        opt("KARL_MAXITER", "MAXITER", "maxiter", default=60)
-    )
-
-    weight_mode = str(
-        opt("WEIGHT_MODE", "weight_mode", default="entropy")
-    ).strip().lower()
-
-    weight_solver_mode = str(
-        opt(
-            "WEIGHT_SOLVER",
-            "WEIGHT_SOLVER_MODE",
-            "weight_solver_mode",
-            default="orbit_only",
-        )
-    ).strip().lower()
-
-    losvd_score_mode = str(
-        opt(
-            "LOSVD_SCORE_MODE",
-            "losvd_score_mode",
-            default="karl_fracnew",
-        )
-    ).strip().lower()
-
+    min_stars_per_bin = int( opt("MIN_STARS_PER_BIN", "min_stars_per_bin", default=20))
+    Nvbin = int( opt("NVBIN", "Nvbin", "nvbin", default=21))
+    Ntheta_launch = int( opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9))
+    Nocc = int( opt("NBINS_OCC", "Nocc", "nbins_occ", default=0))
+    lambda_light = float( opt("LAMBDA_LIGHT", "LAMBDA_OCC", "lambda_light", "lambda_occ", default=1.0))
+    alpha = float( opt("KARL_ALPHA", "ALPHA", "alpha", default=1e-4))
+    alphat = float( opt("KARL_ALPHAT", "ALPHAT", "alphat", default=1.0))
+    maxiter = int( opt("KARL_MAXITER", "MAXITER", "maxiter", default=60))
+    weight_mode = str( opt("WEIGHT_MODE", "weight_mode", default="entropy")).strip().lower()
+    weight_solver_mode = str( opt( "WEIGHT_SOLVER", "WEIGHT_SOLVER_MODE", "weight_solver_mode", default="orbit_only")).strip().lower()
+    losvd_score_mode = str( opt( "LOSVD_SCORE_MODE", "losvd_score_mode", default="karl_fracnew")).strip().lower()
     entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=1e-12))
     max_refine = int(opt("MAX_REFINE", "max_refine", default=0))
     timeout_s = float(opt( "EVAL_TIMEOUT_S", "EVAL_TIMEOUT", "timeout_s", default=120.0, ))
@@ -542,13 +500,11 @@ def evaluate_batch_theta_julia(
     radial_weight_floor = float(opt( "RADIAL_WEIGHT_FLOOR", "radial_weight_floor", default=0.3,))
     R, v, ve = _get_obs_arrays(obs)
     valid = _get_valid_vlos(obs, R, v, ve)
+    
     if Norbit is None:
         Norbit = int(getattr(obs, "Norbit"))
     if Norbit % 2 != 0:
-        raise RuntimeError(
-            "Karl paired-orbit mode requires an even Norbit; "
-            f"got Norbit={Norbit}"
-        )
+        raise RuntimeError("Karl paired-orbit mode requires an even Norbit; "f"got Norbit={Norbit}" )
 
     _jl_init()
     halo_parameterization = _halo_parameterization_from_config(cfg)

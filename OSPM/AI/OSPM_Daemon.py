@@ -2,7 +2,7 @@
 #
 # WHAT THIS DOES
 # Drives an RL-guided search over dark-matter halo parameters θ.  The first
-# halo parameter is config-dependent: rho_s for rho_rs, vcirc for vcirc_rs.
+# halo parameters are config-dependent: (rho_s,r_s), (vcirc,r_s), or (v0,r_c).
 # Each iteration proposes a batch of candidate θ, ships them to the Julia orbit-
 # superposition engine (OSPM_Physics) for χ² evaluation, records results in a CSV
 # ledger, and trains a small surrogate network + policy agent so future proposals
@@ -54,11 +54,7 @@ import os, time, sys, traceback, json
 import numpy as np, pandas as pd
 import torch, torch.nn as nn
 from collections import deque
-from OSPM.Physics.OSPM_Physics import (
-    canonicalize_theta_matrix,
-    nfw_vcirc_rs_to_rho_s,
-    normalize_halo_parameterization,
-)
+from OSPM.Physics.OSPM_Physics import (canonicalize_theta_matrix, nfw_vcirc_rs_to_rho_s, normalize_halo_parameterization,)
 torch.backends.cudnn.benchmark = False
 try: from sklearn.preprocessing import StandardScaler
 except Exception: StandardScaler = None
@@ -464,22 +460,16 @@ def run_daemon(config, physics_engine):
     from collections import defaultdict
     deck, runner, corpo, fixer = Deck(config), Runner(config), Corpo(physics_engine), Fixer(config)
     halo_parameterization = normalize_halo_parameterization(config.get("HALO_PARAMETERIZATION", "rho_rs"))
-    if len(config["PARAMETER_NAMES"]) < 4:
-        raise ValueError("PARAMETER_NAMES must cover four theta entries")
-    expected_first = "vcirc" if halo_parameterization == "vcirc_rs" else "rho_s"
-    if config["PARAMETER_NAMES"][0] != expected_first:
-        raise ValueError(
-            f"HALO_PARAMETERIZATION={halo_parameterization!r} expects first PARAMETER_NAMES entry "
-            f"to be {expected_first!r}, got {config['PARAMETER_NAMES'][0]!r}"
-        )
-    if len(config["THETA_BOUNDS"]) < len(config["PARAMETER_NAMES"]):
-        raise ValueError("THETA_BOUNDS must cover PARAMETER_NAMES")
+    if len(config["PARAMETER_NAMES"]) < 4: raise ValueError("PARAMETER_NAMES must cover four theta entries")
+    expected_halo_names = {"rho_rs": ("rho_s", "r_s"), "vcirc_rs": ("vcirc", "r_s"), "v0_rc": ("v0", "r_c")}[halo_parameterization]
+    actual_halo_names = tuple(config["PARAMETER_NAMES"][:2])
+    if actual_halo_names != expected_halo_names: raise ValueError(f"HALO_PARAMETERIZATION={halo_parameterization!r} expects PARAMETER_NAMES to begin with {list(expected_halo_names)!r}, got {list(actual_halo_names)!r}")
+    if len(config["THETA_BOUNDS"]) < len(config["PARAMETER_NAMES"]): raise ValueError("THETA_BOUNDS must cover PARAMETER_NAMES")
     print("CONFIG HALO_PARAMETERIZATION:", halo_parameterization)
     print("CONFIG PARAMETER_NAMES:", config["PARAMETER_NAMES"])
     print("CONFIG THETA_BOUNDS:", config["THETA_BOUNDS"])
     if halo_parameterization == "vcirc_rs":
-        vcirc0 = float(config["INITIAL_THETA"][0])
-        rs0 = float(config["INITIAL_THETA"][1])
+        vcirc0, rs0 = float(config["INITIAL_THETA"][0]), float(config["INITIAL_THETA"][1])
         rho0 = nfw_vcirc_rs_to_rho_s(vcirc0, rs0)
         print(f"[HALO CONVERSION] vcirc={vcirc0:g} km/s, r_s={rs0:g} pc -> rho_s={rho0:.8g} Msun/pc^3")
     print("runner.bounds:", runner.bounds)
@@ -589,21 +579,21 @@ def run_daemon(config, physics_engine):
         print("base_props[:3] =", base_props[:3])
         props = []
         for theta, pid in base_props:
-            halo_param, r_s, MBH, ML = theta
+            halo_param, halo_scale, MBH, ML = theta
             variants = [
-                ("full",       [halo_param,       r_s, MBH,       ML], base_halo_type),
+                ("full",       [halo_param,       halo_scale, MBH,       ML], base_halo_type),
                 # isolate major gravitating components
-                ("bh_only",    [0.0,              r_s, MBH,       ML], "none"),  # stars + BH, no halo
-                ("halo_only",  [halo_param,       r_s, 0.0,       ML], base_halo_type),
+                ("bh_only",    [0.0,              halo_scale, MBH,       ML], "none"),  # stars + BH, no halo
+                ("halo_only",  [halo_param,       halo_scale, 0.0,       ML], base_halo_type),
                 # BH perturbations
-                ("bh_up",      [halo_param,       r_s, MBH * 2.0, ML], base_halo_type),
-                ("bh_down",    [halo_param,       r_s, MBH * 0.5, ML], base_halo_type),
+                ("bh_up",      [halo_param,       halo_scale, MBH * 2.0, ML], base_halo_type),
+                ("bh_down",    [halo_param,       halo_scale, MBH * 0.5, ML], base_halo_type),
                 # halo perturbations
-                ("halo_up",    [halo_param * 2.0, r_s, MBH,       ML], base_halo_type),
-                ("halo_down",  [halo_param * 0.5, r_s, MBH,       ML], base_halo_type),
+                ("halo_up",    [halo_param * 2.0, halo_scale, MBH,       ML], base_halo_type),
+                ("halo_down",  [halo_param * 0.5, halo_scale, MBH,       ML], base_halo_type),
                 # stellar M/L perturbations
-                ("ml_up",      [halo_param,       r_s, MBH,       ML * 2.0], base_halo_type),
-                ("ml_down",    [halo_param,       r_s, MBH,       ML * 0.5], base_halo_type),
+                ("ml_up",      [halo_param,       halo_scale, MBH,       ML * 2.0], base_halo_type),
+                ("ml_down",    [halo_param,       halo_scale, MBH,       ML * 0.5], base_halo_type),
             ]
             # keep each perturbed theta inside bounds
             bounded_variants = []

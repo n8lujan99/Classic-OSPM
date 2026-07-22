@@ -53,8 +53,8 @@ CONFIG = {
     # =========================================================
     "MODE":      "karl",
     "GALAXY":    Galaxy,
-    "HALO_TYPE": "nfw",
-    "HALO_PARAMETERIZATION": "vcirc_rs",
+    "HALO_TYPE": "nonsingular_isothermal", #  a few options "nonsingular_isothermal" and "NFW"
+    "HALO_PARAMETERIZATION": "v0_rc", # two options: "v0_rc" or "vcirc_rs" which are cored and nfw respectively 
 
     # =========================================================
     # Galaxy geometry
@@ -142,13 +142,13 @@ CONFIG = {
     # =========================================================
     # Parameter space
     # =========================================================
-    "PARAMETER_NAMES": ["vcirc", "r_s", "MBH", "ML"],
-    "INITIAL_THETA":   [21.0, 1000.0, 4.5e5, 0.3],
+    "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"],
+    "INITIAL_THETA": [21.0, 1000.0, 4.5e5, 0.3],
     "THETA_BOUNDS": [
-        (0.0, 200.0),        #vcirc
-        (100.0, 100000.0),   #r_s
-        (0.0, 2e6),         #MBH
-        (0.2, 20.0),        #ML
+        (0.0, 35.0),         # v0, km/s
+        (100.0, 100000.0),   # r_c, pc
+        (0.0, 2e6),          # MBH, Msun
+        (0.2, 20.0),         # M/L
     ],
 
     # =========================================================
@@ -171,7 +171,7 @@ CONFIG = {
     # Deck semantics
     # =========================================================
     "REQUIRE_COLUMNS": [
-        "vcirc", "r_s", "MBH", "ML",
+        "v0", "r_c", "MBH", "ML",
         "chi2", "reward", "status", "proposal_id",
         "refine_passes",
         "chi2_losvd", "chi2_light", "chi2_total",
@@ -265,8 +265,8 @@ CONFIG = {
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_Simon_stars_v2.csv"),
-    "COMPARISON_TAG": "full_light",
-    "CSV_PATH": str( PROFILE_ROOT / "default" / "daemon_deck_karl_segue1_full_light_test.csv"),
+    "COMPARISON_TAG": "nonsingular_isothermal_full_light",
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1_nonsingular_isothermal_full_light.csv"),
 }
 
 
