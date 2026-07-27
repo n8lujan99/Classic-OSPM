@@ -88,6 +88,11 @@ echo "JULIA_CONDAPKG_BACKEND=$JULIA_CONDAPKG_BACKEND"
 echo "JULIA_PROJECT=$JULIA_PROJECT"
 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
+echo "JULIA_PROJECT=$JULIA_PROJECT"
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+echo "[SLURM] Instantiating Julia project..."
+julia --project="$JULIA_PROJECT" -e 'using Pkg; Pkg.instantiate(); using PythonCall; println("PythonCall installed and loaded")'
+
 echo "[SLURM] JuliaCall smoke test..."
 python - <<'PY'
 from juliacall import Main

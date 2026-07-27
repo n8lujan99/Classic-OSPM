@@ -66,6 +66,7 @@ echo "[INFO] Repo root: $REPO_ROOT"
 echo "[INFO] Galaxy:    $GALAXY"
 echo "[INFO] Profiles:  $GALAXY_PROFILE_DIR"
 echo "[INFO] Slurm:     $SLURM_SCRIPT"
+echo "[NOTE] Wait 1 min before submitting additional runs"
 
 sbatch \
     --export=ALL,OSPM_REPO_ROOT="$REPO_ROOT",OSPM_GALAXY="$GALAXY",OSPM_VERSION="V2" \
