@@ -304,6 +304,25 @@ Going to expand the v_circ range from 0-30 to 0-80 and see if that helps.
 17JUL2026 run full_light
 Extending the 16JUL2026 full_light run to 300,000 runs and expanding the v_circ range to 0-80.
 
+22JUL2026 analysis of 17JUL2026 run full_light
+Finishing the current full_light runs for both Segue 1 and Draco using the NFW halo.
+Segue 1 roughly recovers the previously identified SMBH result, although the final constraint
+will depend on the completed landscape. Draco is beginning to form an SMBH basin, but the
+result is still uncertain and is not yet strong enough to claim a recovered SMBH.
 
+22JUL2026 run nonsingular_isothermal full_light
+MODE                   = karl
+stellar model          = karl_light_grid
+light inputs           = full
+kinematic inputs       = binned
+halo type              = nonsingular_isothermal
+halo parameterization  = v0_rc
+halo parameters        = v0, r_c
+comparison tag         = nonsingular_isothermal_full_light
+
+Starting cored-halo runs for Segue 1 and Draco to test whether the emerging SMBH results
+survive a change in halo profile. For Segue 1, this will test whether the roughly recovered
+SMBH remains present with a cored halo. For Draco, this will show whether the cored halo
+sharpens, weakens, or removes the currently uncertain SMBH basin.
 
 """
