@@ -185,7 +185,7 @@ CONFIG = {
     "MAX_BATCH_SIZE":      MAX_BATCH_SIZE,
     "CHUNK_SIZE":          CHUNK_SIZE,
     "FIXED_THETA":         FIXED_THETA,
-    "EVAL_VARIANTS":       ["full"],
+    "EVAL_VARIANTS":       EVAL_VARIANTS,
     "_PRINT_EVERY":        10,
     "_print_counter":      0,
     
