@@ -1,18 +1,13 @@
-# HOT PATH — Karl-style OSPM A-matrix builder & batch evaluator.
-
-# Applied new karl fixes on 04/06/26 @1600
-
 module OSPMPhysicsSpherical
 @info "OSPMPhysicsSpherical Karl-style loaded from" @__FILE__
-
 using LinearAlgebra, StaticArrays, Statistics, Random, Base.Threads, Optim
-
 export build_R_halo_physical, rho_interp, halo_from_theta, tables_spherical,
     make_potential_force_funcs, integrate_orbit_rk4, build_A_matrix_hybrid,
     mass_enclosed_two_radii, evaluate_batch_theta, NTHREADS, force_at_rtheta
-
 include("OSPM_Physics_Support.jl")
 @info "OSPMPhysicsSpherical supports spherical frc(r,theta)->(fr,0) and axisymmetric frc(r,theta)->(fr,ftheta)"
+# HOT PATH — Karl-style OSPM A-matrix builder & batch evaluator.
+# Applied new karl fixes on 04/06/26 @1600
 
 # -----------------------------------------------------------------------------
 # Work state
@@ -29,8 +24,6 @@ mutable struct OrbitWorkState
     Nshells::Int
     nsteps::Int
     max_attempts_factor::Int
-    fill_target::Int
-    orbit_budget::Int
     return_light::Bool
     theta_launches::Vector{Float64}
     sini::Float64
@@ -54,6 +47,7 @@ mutable struct OrbitWorkState
     A_losvd::Matrix{Float64}
     A_light::Matrix{Float64}
     success_flags::BitVector
+    attempts_used::Vector{Int}
     min_r_reached::Vector{Float64}
     rapo_list::Vector{Float64}
     next_orbit::Threads.Atomic{Int}
@@ -61,10 +55,34 @@ mutable struct OrbitWorkState
     phase::Threads.Atomic{Int}
 end
 
+function _build_orbit_shells(R_star_m::Vector{Float64}, light_edges::Vector{Float64})
+    shells = Float64[]
+    sizehint!(shells, length(R_star_m) + length(light_edges))
+    @inbounds for r in R_star_m
+        if isfinite(r) && r > 0.0
+            push!(shells, r)
+        end
+    end
+    @inbounds for j in 1:(length(light_edges) - 1)
+        rlo = light_edges[j]
+        rhi = light_edges[j + 1]
+        if isfinite(rlo) && isfinite(rhi) && rhi > max(rlo, 0.0)
+            rmid = rlo > 0.0 ? sqrt(rlo * rhi) : 0.5 * rhi
+            isfinite(rmid) && rmid > 0.0 && push!(shells, rmid)
+        end
+    end
+    rlight_max = light_edges[end]
+    isfinite(rlight_max) && rlight_max > 0.0 && push!(shells, rlight_max)
+    sort!(shells)
+    unique!(shells)
+    return shells
+end
+
 function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64},
-    sini::Float64, ctx; nsteps::Int, Lfrac, dt_frac_orbit::Float64, Nbins_occ::Int, return_occ::Bool, max_attempts_factor::Int, fill_pct::Float64, t_deadline::UInt64,
+    sini::Float64, ctx; nsteps::Int, Lfrac, dt_frac_orbit::Float64, Nbins_occ::Int, return_occ::Bool, max_attempts_factor::Int, t_deadline::UInt64,
     velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9)
     iseven(Norbit) || error("Karl prograde/retrograde orbit pairing requires even Norbit because Norbit is the final A-matrix column count")
+    max_attempts_factor > 0 || error("max_attempts_factor must be positive")
     Nbase_orbit = Norbit ÷ 2
     Nstar = length(R_star_m)
     valid_vec = collect(Bool, valid_vlos)
@@ -82,12 +100,14 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
         Float64.(velocity_edges)
     Nvbin_eff = length(velocity_edges_use) - 1
     Nlosvd = Nspatial * Nvbin_eff
-    shells = sort(copy(R_star_m[isfinite.(R_star_m)]))
-    isempty(shells) && (shells = [spatial_edges[1], spatial_edges[end]])
+    shells = _build_orbit_shells(R_star_m, light_edges)
+    isempty(shells) && error("Orbit shell grid has no finite positive radii")
     Nshells = length(shells)
+    Nbase_orbit >= Nshells || error("Orbit library has $Nbase_orbit base slots for $Nshells required radial shells; increase Norbit")
     A_losvd = zeros(Float64, Nlosvd, Norbit)
     A_light = zeros(Float64, Nlight, Norbit)
     success_flags = falses(Nbase_orbit)
+    attempts_used = zeros(Int, Nbase_orbit)
     min_r_reached = fill(Inf, Nbase_orbit)
     rapo_list = fill(NaN, Nbase_orbit)
     _orbit_cost = Vector{Float64}(undef, Nbase_orbit)
@@ -97,8 +117,6 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
         _orbit_cost[c] = lf * rapo
     end
     cost_order = sortperm(_orbit_cost)
-    fill_target = max(1, round(Int, clamp(fill_pct, 0.0, 1.0) * Nbase_orbit))
-    orbit_budget = max_attempts_factor * Nbase_orbit
     force_geometry = haskey(ctx.halo, :stellar_model) ? stellar_model_geometry(ctx.halo[:stellar_model]) : :spherical_shell_grid
     theta_launches = force_geometry === :axisymmetric_density_grid ?
         collect(range(0.15 * pi, 0.85 * pi; length=max(3, Ntheta_launch))) :
@@ -106,9 +124,9 @@ function _init_orbit_work( Norbit::Int, R_star_m::Vector{Float64}, valid_vlos::A
     sini_use = clamp01(f64(sini))
     cosi_use = sqrt(max(0.0, 1.0 - sini_use * sini_use))
     orbit_ctx = ( frc=ctx.frc, R_pos=ctx.R, halo=ctx.halo, force_geometry=force_geometry)
-    return OrbitWorkState( Norbit, Nbase_orbit, Nstar, Nspatial, Nvbin_eff, Nlosvd, Nlight, Nshells, nsteps, max_attempts_factor, fill_target, orbit_budget, return_occ, theta_launches,
+    return OrbitWorkState( Norbit, Nbase_orbit, Nstar, Nspatial, Nvbin_eff, Nlosvd, Nlight, Nshells, nsteps, max_attempts_factor, return_occ, theta_launches,
         sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps, spatial_edges, light_edges, velocity_edges_use, shells, cost_order, orbit_ctx, ctx.pot, ctx.frc, Lfrac,
-        force_geometry, dt_frac_orbit, t_deadline, A_losvd, A_light, success_flags, min_r_reached, rapo_list, Threads.Atomic{Int}(1), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
+        force_geometry, dt_frac_orbit, t_deadline, A_losvd, A_light, success_flags, attempts_used, min_r_reached, rapo_list, Threads.Atomic{Int}(1), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
 end
 
 @inline function _project_axisym_sample(ri::Float64, vr::Float64, vtheta::Float64, vphi::Float64, theta::Float64, phi::Float64, sini::Float64, cosi::Float64)
@@ -126,110 +144,111 @@ end
     return Rproj, vlos
 end
 
-function _orbit_worker!(st::OrbitWorkState, rng)
+@inline function _orbit_attempt_seed(c_claim::Int, attempt::Int)
+    return UInt(0x5eed1234) + UInt(c_claim) * UInt(104729) + UInt(attempt) * UInt(13007)
+end
+
+@inline function _orbit_library_complete(st::OrbitWorkState)
+    return st.filled_atomic[] == st.Nbase_orbit && all(st.success_flags)
+end
+
+function _orbit_library_usable(st::OrbitWorkState)
+    @inbounds for col in 1:st.Norbit
+        activity = sum(abs, @view(st.A_losvd[:, col])) + sum(abs, @view(st.A_light[:, col]))
+        if !(isfinite(activity) && activity > 0.0)
+            return false
+        end
+    end
+    @inbounds for row in 1:st.Nlight
+        activity = sum(abs, @view(st.A_light[row, :]))
+        if !(isfinite(activity) && activity > 0.0)
+            return false
+        end
+    end
+    return true
+end
+
+function _orbit_worker!(st::OrbitWorkState)
     col_losvd_pro = zeros(Float64, st.Nlosvd)
     col_losvd_ret = zeros(Float64, st.Nlosvd)
     col_light = zeros(Float64, st.Nlight)
-
     s_arr = Vector{Float64}(undef, st.nsteps)
     vlos_pro_buf = Vector{Float64}(undef, st.nsteps)
     vlos_ret_buf = Vector{Float64}(undef, st.nsteps)
-
     while true
         time_ns() > st.t_deadline && break
-        st.filled_atomic[] >= st.fill_target && break
         st.phase[] != 1 && break
-
-        c_seq = Threads.atomic_add!(st.next_orbit, 1)
-        c_seq > st.orbit_budget && break
-
-        attempt = (c_seq - 1) ÷ st.Nbase_orbit
-        c_claim = st.cost_order[mod1(c_seq, st.Nbase_orbit)]
-
-        attempt > 0 && st.success_flags[c_claim] && continue
-
+        slot_seq = Threads.atomic_add!(st.next_orbit, 1)
+        slot_seq > st.Nbase_orbit && break
+        c_claim = st.cost_order[slot_seq]
         idx_local = mod1(c_claim, st.Nshells)
         rapo = f64(st.shells[idx_local])
         st.rapo_list[c_claim] = rapo
-
         !(isfinite(rapo) && rapo > 0.0) && continue
-
         lf = st.Lfrac[1 + ((c_claim - 1) % length(st.Lfrac))]
 
-        r0_frac = 0.95 - 0.05 * f64(attempt) / st.max_attempts_factor + 0.04 * rand(rng)
+        for attempt in 0:(st.max_attempts_factor - 1)
+            time_ns() > st.t_deadline && return nothing
+            st.phase[] != 1 && return nothing
+            st.attempts_used[c_claim] = attempt + 1
+            rng = MersenneTwister(_orbit_attempt_seed(c_claim, attempt))
+            r0_frac = 0.95 - 0.05 * f64(attempt) / st.max_attempts_factor + 0.04 * rand(rng)
+            theta0 = st.theta_launches[mod1(c_claim, length(st.theta_launches))]
+            ic, Lz0, E0, vc, launch_state = launch_orbit_apocenter(rapo=rapo, theta0=theta0, Lz_frac=f64(lf), pot=st.pot, frc=st.frc, r0_frac=r0_frac, dt_frac=st.dt_frac_orbit)
+            launch_state != :ok && continue
+            r, vr, theta, vtheta = integrate_orbit_rk4( ic=ic, xLz=Lz0, orbit_ctx=st.orbit_ctx, nsteps=st.nsteps)
+            isempty(r) && continue
 
-        theta0 = st.theta_launches[mod1(c_claim, length(st.theta_launches))]
-        ic, Lz0, E0, vc, launch_state = launch_orbit_apocenter(rapo=rapo, theta0=theta0, Lz_frac=f64(lf), pot=st.pot, frc=st.frc, r0_frac=r0_frac, dt_frac=st.dt_frac_orbit)
-
-        launch_state != :ok && continue
-
-        r, vr, theta, vtheta = integrate_orbit_rk4( ic=ic, xLz=Lz0, orbit_ctx=st.orbit_ctx, nsteps=st.nsteps)
-
-        isempty(r) && continue
-
-        st.success_flags[c_claim] = true
-        st.min_r_reached[c_claim] = minimum(r)
-
-        Nhits = length(r)
-        dt_orb = f64(ic[3])
-
-        resize!(s_arr, Nhits)
-        resize!(vlos_pro_buf, Nhits)
-        resize!(vlos_ret_buf, Nhits)
-
-        phi = 0.0
-
-        @inbounds for i in 1:Nhits
-            ri = f64(r[i])
-            thi = f64(theta[i])
-            si = _ssin(thi)
-            vphi_i = f64(Lz0) / max(ri * si, 1e-30)
-            s_arr[i], vlos_pro_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), vphi_i, thi, phi, st.sini, st.cosi)
-            _, vlos_ret_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), -vphi_i, thi, phi, st.sini, st.cosi)
-            phi += f64(Lz0) / max(ri * ri * si * si, 1e-30) * dt_orb
-        end
-
-        fill!(col_losvd_pro, 0.0)
-        fill!(col_losvd_ret, 0.0)
-        fill!(col_light, 0.0)
-
-        @inbounds for k in 1:Nhits
-            il = _bin_index(st.light_edges, s_arr[k])
-            ik = _bin_index(st.spatial_edges, s_arr[k])
-
-            il > 0 && (col_light[il] += 1.0)
-
-            ik == 0 && continue
-
-            jb_pro = _bin_index(st.velocity_edges, vlos_pro_buf[k])
-            if jb_pro > 0
-                row_pro = (ik - 1) * st.Nvbin + jb_pro
-                col_losvd_pro[row_pro] += 1.0
+            st.min_r_reached[c_claim] = minimum(r)
+            Nhits = length(r)
+            dt_orb = f64(ic[3])
+            resize!(s_arr, Nhits)
+            resize!(vlos_pro_buf, Nhits)
+            resize!(vlos_ret_buf, Nhits)
+            phi = 0.0
+            @inbounds for i in 1:Nhits
+                ri = f64(r[i])
+                thi = f64(theta[i])
+                si = _ssin(thi)
+                vphi_i = f64(Lz0) / max(ri * si, 1e-30)
+                s_arr[i], vlos_pro_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), vphi_i, thi, phi, st.sini, st.cosi)
+                _, vlos_ret_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), -vphi_i, thi, phi, st.sini, st.cosi)
+                phi += f64(Lz0) / max(ri * ri * si * si, 1e-30) * dt_orb
             end
-
-            jb_ret = _bin_index(st.velocity_edges, vlos_ret_buf[k])
-            if jb_ret > 0
-                row_ret = (ik - 1) * st.Nvbin + jb_ret
-                col_losvd_ret[row_ret] += 1.0
+            fill!(col_losvd_pro, 0.0)
+            fill!(col_losvd_ret, 0.0)
+            fill!(col_light, 0.0)
+            @inbounds for k in 1:Nhits
+                il = _bin_index(st.light_edges, s_arr[k])
+                ik = _bin_index(st.spatial_edges, s_arr[k])
+                il > 0 && (col_light[il] += 1.0)
+                ik == 0 && continue
+                jb_pro = _bin_index(st.velocity_edges, vlos_pro_buf[k])
+                if jb_pro > 0
+                    row_pro = (ik - 1) * st.Nvbin + jb_pro
+                    col_losvd_pro[row_pro] += 1.0
+                end
+                jb_ret = _bin_index(st.velocity_edges, vlos_ret_buf[k])
+                if jb_ret > 0
+                    row_ret = (ik - 1) * st.Nvbin + jb_ret
+                    col_losvd_ret[row_ret] += 1.0
+                end
             end
-        end
-
-        if Nhits > 0
             col_light ./= Nhits
             col_losvd_pro ./= Nhits
             col_losvd_ret ./= Nhits
+            col_pro = 2 * c_claim - 1
+            col_ret = 2 * c_claim
+            @inbounds st.A_losvd[:, col_pro] .= col_losvd_pro
+            @inbounds st.A_losvd[:, col_ret] .= col_losvd_ret
+            @inbounds st.A_light[:, col_pro] .= col_light
+            @inbounds st.A_light[:, col_ret] .= col_light
+            st.success_flags[c_claim] = true
+            Threads.atomic_add!(st.filled_atomic, 1)
+            break
         end
-
-        col_pro = 2 * c_claim - 1
-        col_ret = 2 * c_claim
-
-        @inbounds st.A_losvd[:, col_pro] .= col_losvd_pro
-        @inbounds st.A_losvd[:, col_ret] .= col_losvd_ret
-        @inbounds st.A_light[:, col_pro] .= col_light
-        @inbounds st.A_light[:, col_ret] .= col_light
-
-        Threads.atomic_add!(st.filled_atomic, 1)
     end
+    return nothing
 end
 
 # -----------------------------------------------------------------------------
@@ -240,7 +259,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
         rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing,
         nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC,
         dR_frac::Float64=DEFAULT_DR_FRAC, Nbins_occ::Int=DEFAULT_NBINS_OCC, return_occ::Bool=true, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS,
-        diag::Bool=false, threaded::Bool=true, fill_pct::Float64=0.80, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing,
+        diag::Bool=false, threaded::Bool=true, fill_pct::Float64=1.0, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing,
         light_bin_edges=nothing, kinematic_bin_edges=nothing, min_stars_per_bin::Int=20, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0,
         karl_halo_params=nothing)
 
@@ -248,21 +267,14 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     @assert length(has_vlos) == Nstar
     @assert length(v_star_mps) == Nstar
     @assert length(verr_star_mps) == Nstar
+    isapprox(fill_pct, 1.0; atol=0.0, rtol=0.0) || error("Partial orbit libraries are disabled; fill_pct must be 1.0")
     surface_brightness_profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     Nstar == 0 && return zeros(Float64, 0, Norbit)
 
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
-    ctx = get_halo_context(
-        rho_s,
-        r_s,
-        MBH,
-        ML,
-        halo_type;
-        stellar_model=stellar_model_jl,
-        halo_q_axis_ratio=halo_q_axis_ratio,
-        karl_halo_params=karl_halo_params,
-    )
+    ctx = get_halo_context( rho_s, r_s, MBH, ML, halo_type; 
+        stellar_model=stellar_model_jl, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params,)
     sini = clamp01(f64(sini))
     Rmin = minimum(R_star_m)
     Rmax = maximum(R_star_m)
@@ -273,26 +285,24 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
 
     st = _init_orbit_work(Norbit, R_star_m, has_vlos, v_star_mps, verr_star_mps, sini, ctx;
         nsteps=nsteps, Lfrac=Lfrac, dt_frac_orbit=dt_frac_orbit, Nbins_occ=Nbins_occ,
-        return_occ=return_occ, max_attempts_factor=max_attempts_factor, fill_pct=fill_pct,
+        return_occ=return_occ, max_attempts_factor=max_attempts_factor,
         t_deadline=t_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, min_stars_per_bin=min_stars_per_bin, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch)
 
     Threads.atomic_xchg!(st.phase, 1)
     nworkers = threaded ? Threads.nthreads() : 1
-    rngs = [MersenneTwister(0x5eed1234 + UInt(t)) for t in 1:nworkers]
 
     if threaded && nworkers > 1
         Threads.@threads for t in 1:nworkers
-            _orbit_worker!(st, rngs[t])
+            _orbit_worker!(st)
         end
     else
-        _orbit_worker!(st, rngs[1])
+        _orbit_worker!(st)
     end
+    Threads.atomic_xchg!(st.phase, 2)
 
     filled = st.filled_atomic[]
-    if filled < st.fill_target
-        println("WARNING: build_A_matrix_hybrid filled ", filled, " / ", st.fill_target,
-            " | missing ", round(100 * (st.fill_target - filled) / st.fill_target, digits=1), "%")
-    end
+    _orbit_library_complete(st) || error("Incomplete orbit library: filled $filled / $(st.Nbase_orbit) base slots")
+    _orbit_library_usable(st) || error("Unusable orbit library: a paired orbit column or projected-light row has no support")
 
     A = return_occ ? vcat(st.A_losvd, st.A_light) : st.A_losvd
 
@@ -305,12 +315,15 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
             Dict(
                 "filled" => filled,
                 "Nbase_orbit" => st.Nbase_orbit,
+                "complete" => true,
                 "paired_orbit_columns" => true,
-                "attempts" => Norbit,
+                "attempts" => sum(st.attempts_used),
                 "Nspatial" => st.Nspatial,
                 "Nvbin" => st.Nvbin,
                 "Nlosvd" => st.Nlosvd,
                 "Nlight" => st.Nlight,
+                "Nshells" => st.Nshells,
+                "shell_max_pc" => st.shells[end] / pc,
                 "spatial_edges" => st.spatial_edges,
                 "light_edges" => st.light_edges,
                 "velocity_edges" => st.velocity_edges,
@@ -364,11 +377,8 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     effective_N_orbits = zeros(Float64, nbatch)
     max_weight_fraction = zeros(Float64, nbatch)
 
-    work_states = Vector{Union{Nothing, OrbitWorkState}}(undef, nbatch)
-    fill!(work_states, nothing)
     next_theta = Threads.Atomic{Int}(1)
     nthreads = Threads.nthreads()
-    helper_rngs = [MersenneTwister(0x0E100000 + UInt(t) + UInt(nbatch)) for t in 1:nthreads]
 
     function _store_weight_diagnostics!(i::Int, w_best::Vector{Float64})
         wsum = sum(w_best)
@@ -437,8 +447,19 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         slack_max_abs = _wdiag_value(wdiag, :slack_max_abs)
         rcond_est = _wdiag_value(wdiag, :rcond_est)
         max_abs_dw = _wdiag_value(wdiag, :max_abs_dw)
+        stepfac = _wdiag_value(wdiag, :stepfac)
+        iterations = _wdiag_value(wdiag, :iterations)
         profit = _wdiag_value(wdiag, :profit)
         N_slack = _wdiag_value(wdiag, :N_slack)
+        normalization_error = _wdiag_value(wdiag, :normalization_error)
+        light_residual_l2 = _wdiag_value(wdiag, :light_residual_l2)
+        constraint_l2 = _wdiag_value(wdiag, :constraint_l2)
+        slack_residual_l2 = _wdiag_value(wdiag, :slack_residual_l2)
+        normalization_row_enforced = _wdiag_value(wdiag, :normalization_row_enforced)
+        converged = _wdiag_value(wdiag, :converged)
+        constraint_ok = _wdiag_value(wdiag, :constraint_ok)
+        slack_consistent = _wdiag_value(wdiag, :slack_consistent)
+        normalized = _wdiag_value(wdiag, :normalized)
 
         chi_slack_over_alphat = (isfinite(chi_slack) && alphat > 0.0) ? chi_slack / alphat : NaN
         slack_to_losvd = (isfinite(chi_slack_over_alphat) && isfinite(chi_losvd_solver) && chi_losvd_solver > 0.0) ?
@@ -461,8 +482,19 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
             " slack_max_abs=", slack_max_abs,
             " rcond_est=", rcond_est,
             " max_abs_dw=", max_abs_dw,
+            " stepfac=", stepfac,
+            " iterations=", iterations,
             " profit=", profit,
             " N_slack=", N_slack,
+            " normalization_error=", normalization_error,
+            " light_residual_l2=", light_residual_l2,
+            " constraint_l2=", constraint_l2,
+            " slack_residual_l2=", slack_residual_l2,
+            " normalization_row_enforced=", normalization_row_enforced,
+            " converged=", converged,
+            " constraint_ok=", constraint_ok,
+            " slack_consistent=", slack_consistent,
+            " normalized=", normalized,
             " N_nonzero=", N_nonzero_weights[i],
             " Neff=", effective_N_orbits[i],
             " max_weight_fraction=", max_weight_fraction[i],
@@ -471,10 +503,21 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         return nothing
     end
 
-    function _batch_worker!(tid::Int)
-        rng_own = MersenneTwister(0x5eed1234 + UInt(tid))
-        rng_help = helper_rngs[tid]
+    function _print_expanded_cm_failure!(i::Int, tid::Int, wdiag)
+        weight_solver_sym === :expanded_cm || return nothing
+        println(
+            "[EXPANDED CM FAIL] ",
+            "i=", i,
+            " tid=", tid,
+            " rcond_est=", _wdiag_value(wdiag, :rcond_est),
+            " max_abs_dw=", _wdiag_value(wdiag, :max_abs_dw),
+            " stepfac=", _wdiag_value(wdiag, :stepfac),
+            " chi_slack=", _wdiag_value(wdiag, :chi_slack),
+        )
+        return nothing
+    end
 
+    function _batch_worker!(tid::Int)
         while true
             i = Threads.atomic_add!(next_theta, 1)
             if i <= nbatch
@@ -497,9 +540,8 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx;
                         nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC,
                         Nbins_occ=Nocc, return_occ=true, max_attempts_factor=DEFAULT_MAX_ATTEMPTS,
-                        fill_pct=0.80, t_deadline=theta_deadline, velocity_edges=velocity_edges,
+                        t_deadline=theta_deadline, velocity_edges=velocity_edges,
                         light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, min_stars_per_bin=min_stars_per_bin, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch)
-                    work_states[i] = ws
                     if i == 1
                         println(
                             "[KARL BIN DIAG] ",
@@ -510,16 +552,43 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                             " A_losvd_rows=", size(ws.A_losvd, 1),
                             " R_light_max_pc=", ws.light_edges[end] / pc,
                             " R_kin_max_pc=", ws.spatial_edges[end] / pc,
+                            " R_shell_max_pc=", ws.shells[end] / pc,
+                            " N_shells=", ws.Nshells,
                             " N_constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin,
                         )
                     end
 
                     Threads.atomic_xchg!(ws.phase, 1)
-                    _orbit_worker!(ws, rng_own)
+                    _orbit_worker!(ws)
                     Threads.atomic_xchg!(ws.phase, 2)
 
                     A_losvd = ws.A_losvd
                     A_light = ws.A_light
+
+                    if !_orbit_library_complete(ws)
+                        status[i] = time_ns() > theta_deadline ? 4 : 1
+                        println(
+                            "[ORBIT LIBRARY REJECTED] ",
+                            "i=", i,
+                            " filled=", ws.filled_atomic[],
+                            " required=", ws.Nbase_orbit,
+                            " attempts=", sum(ws.attempts_used),
+                            " timed_out=", status[i] == 4,
+                        )
+                        Threads.atomic_xchg!(ws.phase, 3)
+                        continue
+                    end
+
+                    if !_orbit_library_usable(ws)
+                        status[i] = 1
+                        println(
+                            "[ORBIT LIBRARY REJECTED] ",
+                            "i=", i,
+                            " reason=zero_support_column_or_light_row",
+                        )
+                        Threads.atomic_xchg!(ws.phase, 3)
+                        continue
+                    end
 
                     if size(A_losvd, 1) == 0 || size(A_losvd, 2) == 0 || !all(isfinite, A_losvd) ||
                        size(A_light, 1) == 0 || size(A_light, 2) == 0 || !all(isfinite, A_light)
@@ -556,6 +625,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         )
                     end
                     if !ok
+                        _print_expanded_cm_failure!(i, tid, wdiag)
                         status[i] = 2
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
@@ -614,24 +684,12 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     Threads.atomic_xchg!(ws.phase, 3)
                 catch e
                     status[i] = 3
-                    ws_i = work_states[i]
-                    ws_i !== nothing && Threads.atomic_xchg!(ws_i.phase, 3)
                     @warn "evaluate_batch_theta Karl exception on i=$i" exception=(e, catch_backtrace()) halo_type=halo_type
                 end
                 continue
             end
 
-            helped = false
-            for scan in 1:nbatch
-                ws_scan = work_states[scan]
-                ws_scan === nothing && continue
-                ws_scan.phase[] != 1 && continue
-                time_ns() > ws_scan.t_deadline && continue
-                _orbit_worker!(ws_scan, rng_help)
-                helped = true
-                break
-            end
-            helped || break
+            break
         end
     end
 
@@ -680,7 +738,9 @@ end # module
 # Norbit/2 base orbits and writes two columns per base orbit:
 #   2i-1 -> prograde / +vphi
 #   2i   -> retrograde / -vphi
-# This is not optional in this Karl-style copy.
+# Each base slot owns its deterministic retry stream.  A parameter point cannot
+# reach the weight solver unless every paired slot completed and every final
+# column has projected light or LOSVD support.
 #
 # KARL HALO PARAMETER RULE
 # evaluate_batch_theta and build_A_matrix_hybrid accept karl_halo_params and pass

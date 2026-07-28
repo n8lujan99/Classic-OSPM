@@ -165,19 +165,14 @@ def _get_valid_vlos(obs, R_star_m, v_star_mps, verr_star_mps):
 
 def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     cfg = dict(config or {})
-
     print_every = int(_cfg_get(cfg, "PRINT_EVERY", "print_every", _PRINT_EVERY))
-
     R_star_m = _get_required_obs_array(obs, "R_star_m", "R_m")
     v_star_mps = _get_required_obs_array(obs, "v_star_mps", "v_mps")
-
     verr_star_mps = _as_array_or_none(getattr(obs, "verr_star_mps", None))
     if verr_star_mps is None:
         verr_star_mps = _as_array_or_none(getattr(obs, "verr_mps", None))
-
     if verr_star_mps is None:
         raise AttributeError("obs must expose verr_star_mps or verr_mps")
-
     if not (R_star_m.size == v_star_mps.size == verr_star_mps.size):
         raise ValueError(
             "obs arrays must have matching lengths: "
@@ -189,7 +184,6 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     light_bin_edges_pc = _get_light_bin_edges_pc(obs, cfg)
     kinematic_bin_edges_pc = _get_kinematic_bin_edges_pc(obs, cfg)
     velocity_edges = _get_velocity_edges(cfg)
-
     min_stars_per_bin = int(_cfg_get(cfg, "MIN_STARS_PER_BIN", "min_stars_per_bin", 20))
     Nvbin = int(_cfg_get(cfg, "NVBIN", "Nvbin", 21))
     Ntheta_launch = int(_cfg_get(cfg, "NTHETA_LAUNCH", "Ntheta_launch", 9))
@@ -202,19 +196,15 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
 
     if min_stars_per_bin <= 0:
         raise ValueError("MIN_STARS_PER_BIN/min_stars_per_bin must be positive")
-
     if Nvbin <= 0:
         raise ValueError("NVBIN/Nvbin must be positive")
-
     if Ntheta_launch <= 0:
         raise ValueError("NTHETA_LAUNCH/Ntheta_launch must be positive")
 
     def engine(theta):
         global _print_counter
-
         _print_counter += 1
         out = base_engine(theta)
-
         if isinstance(out, (float, int, np.floating, np.integer)):
             chi2 = float(out)
         elif (
@@ -231,11 +221,9 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
 
         if not np.isfinite(chi2):
             return float("inf")
-
         if print_every > 0 and (_print_counter % print_every == 0):
             MBH = float(theta[2]) if len(theta) > 2 else 0.0
             print(f"[PHYS] chi2_losvd={chi2:10.4f} MBH={MBH:9.3e}")
-
         return chi2
 
     # Attach obs and config so the daemon can bypass this scalar wrapper and call
@@ -250,15 +238,6 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     engine.__light_bin_edges_pc__ = light_bin_edges_pc
     engine.__kinematic_bin_edges_pc__ = kinematic_bin_edges_pc
     engine.__velocity_edges__ = velocity_edges
-    engine.__karl_config__ = {
-        "surface_brightness_profile": surface_brightness_profile,
-        "light_bin_edges_pc": light_bin_edges_pc,
-        "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
-        "velocity_edges": velocity_edges,
-        "min_stars_per_bin": min_stars_per_bin,
-        "Nvbin": Nvbin,
-        "Ntheta_launch": Ntheta_launch,
-        "lambda_light": lambda_light,
-    }
-
+    engine.__karl_config__ = { "surface_brightness_profile": surface_brightness_profile, "light_bin_edges_pc": light_bin_edges_pc, "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
+                                "velocity_edges": velocity_edges, "min_stars_per_bin": min_stars_per_bin, "Nvbin": Nvbin, "Ntheta_launch": Ntheta_launch, "lambda_light": lambda_light}
     return engine

@@ -60,7 +60,13 @@ def _jl_init():
     if not os.path.exists(jl_path):
         raise FileNotFoundError(f"Julia backend file not found: {jl_path}")
 
-    if not hasattr(_Main, "OSPMPhysicsSpherical"):
+    # Ask Julia whether the binding exists. PythonCall's hasattr() can return a
+    # stale false result immediately after Base.include creates a new binding.
+    module_defined = bool(
+        _Main.seval("isdefined(Main, :OSPMPhysicsSpherical)")
+    )
+
+    if not module_defined:
         # Safer HPC bridge include:
         # pass the path as a plain Julia string inside seval instead of
         # routing the Python string through _Main.include(jl_path).
@@ -76,21 +82,23 @@ def _jl_init():
         catch err
             println("[JLINIT ERROR TYPE]")
             println(typeof(err))
-
             println("[JLINIT ERROR]")
             showerror(stdout, err)
             println()
-
             println("[JLINIT STACKTRACE]")
             for frame in stacktrace(catch_backtrace())
                 println(frame)
             end
-
             rethrow(err)
         end
         """)
 
-    if not hasattr(_Main, "OSPMPhysicsSpherical"):
+    module_defined = bool(
+        _Main.seval("isdefined(Main, :OSPMPhysicsSpherical)")
+    )
+    print("[JLINIT] OSPMPhysicsSpherical defined in Main:", module_defined)
+
+    if not module_defined:
         raise RuntimeError("OSPMPhysicsSpherical failed to load into Main")
 
     _JL_READY = True
@@ -200,10 +208,7 @@ def canonicalize_theta_matrix(thetas, *, halo_type, halo_parameterization=None, 
     if theta_arr.shape[0] < 4:
         hp = _normalize_halo_parameterization(halo_parameterization)
         first_name, scale_name = _halo_parameter_names(hp)
-        raise RuntimeError(
-            "thetas must have shape (4, nbatch): "
-            f"[{first_name}, {scale_name}, MBH, ML]"
-        )
+        raise RuntimeError( "thetas must have shape (4, nbatch): " f"[{first_name}, {scale_name}, MBH, ML]" )
     out = theta_arr.copy()
     for i in range(theta_arr.shape[1]):
         out[:4, i] = assert_theta_contract( theta_arr[:4, i], halo_type=halo_type, halo_parameterization=halo_parameterization,
@@ -267,10 +272,8 @@ def _get_surface_brightness_profile(obs=None, ctx=None, config=None):
                 value = getattr(obs, name)
                 if value is not None:
                     return value
-    raise RuntimeError(
-        "surface_brightness_profile is required for Karl-style OSPM; "
-        "no star-count fallback is allowed"
-    )
+    raise RuntimeError( "surface_brightness_profile is required for Karl-style OSPM; "
+        "no star-count fallback is allowed")
 
 def _get_karl_options(obs=None, config=None):
     cfg = config or {}
@@ -622,45 +625,14 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     _Main.seval( f"_ospm_radial_weight_gamma = {radial_weight_gamma!r}")
     _Main.seval(f"_ospm_radial_weight_floor = {radial_weight_floor!r}")
     
-    out = _Main.seval("""
-        OSPMPhysicsSpherical.evaluate_batch_theta(
-            _ospm_theta,
-            _ospm_R,
-            _ospm_valid,
-            _ospm_v,
-            _ospm_ve,
-            _ospm_sini,
-            _ospm_Norbit,
-            _ospm_halo_type;
-            stellar_model=_ospm_stellar_model,
-            surface_brightness_profile=_ospm_sb_profile,
-            Nocc=_ospm_Nocc,
-            lambda_occ=_ospm_lambda_light,
-            alpha=_ospm_alpha,
-            alphat=_ospm_alphat,
-            weight_mode=_ospm_weight_mode,
-            weight_solver_mode=_ospm_weight_solver_mode,
-            entropy_floor=_ospm_entropy_floor,
-            losvd_score_mode=_ospm_losvd_score_mode,
-            maxiter=_ospm_maxiter,
-            max_refine=_ospm_max_refine,
-            timeout_s=_ospm_timeout_s,
-            R_inner_pc=_ospm_R_inner_pc,
-            use_radial_vlos_weights=_ospm_use_radial_vlos_weights,
-            use_weighted_score=_ospm_use_weighted_score,
-            R_weight_pc=_ospm_R_weight_pc,
-            radial_weight_gamma=_ospm_radial_weight_gamma,
-            radial_weight_floor=_ospm_radial_weight_floor,
-            velocity_edges=_ospm_velocity_edges,
-            light_bin_edges=_ospm_light_edges,
-            kinematic_bin_edges=_ospm_kinematic_edges,
-            min_stars_per_bin=_ospm_min_stars_per_bin,
-            Nvbin=_ospm_Nvbin,
-            Ntheta_launch=_ospm_Ntheta_launch,
-            halo_q_axis_ratio=_ospm_halo_q_axis_ratio,
-            karl_halo_params=_ospm_karl_halo_params,
-        )
-    """)
+    out = _Main.seval(""" OSPMPhysicsSpherical.evaluate_batch_theta( _ospm_theta, _ospm_R, _ospm_valid, _ospm_v, _ospm_ve, _ospm_sini, _ospm_Norbit, _ospm_halo_type;
+            stellar_model=_ospm_stellar_model, surface_brightness_profile=_ospm_sb_profile, Nocc=_ospm_Nocc, lambda_occ=_ospm_lambda_light,
+            alpha=_ospm_alpha, alphat=_ospm_alphat, weight_mode=_ospm_weight_mode, weight_solver_mode=_ospm_weight_solver_mode,
+            entropy_floor=_ospm_entropy_floor, losvd_score_mode=_ospm_losvd_score_mode, maxiter=_ospm_maxiter, max_refine=_ospm_max_refine,
+            timeout_s=_ospm_timeout_s, R_inner_pc=_ospm_R_inner_pc, use_radial_vlos_weights=_ospm_use_radial_vlos_weights, use_weighted_score=_ospm_use_weighted_score,
+            R_weight_pc=_ospm_R_weight_pc,radial_weight_gamma=_ospm_radial_weight_gamma, radial_weight_floor=_ospm_radial_weight_floor, velocity_edges=_ospm_velocity_edges,
+            light_bin_edges=_ospm_light_edges, kinematic_bin_edges=_ospm_kinematic_edges, min_stars_per_bin=_ospm_min_stars_per_bin, Nvbin=_ospm_Nvbin,
+            Ntheta_launch=_ospm_Ntheta_launch, halo_q_axis_ratio=_ospm_halo_q_axis_ratio, karl_halo_params=_ospm_karl_halo_params,)""")
     return tuple(np.asarray(value) for value in out)
 
 def force_at_rtheta_julia(*, r_m, theta_rad, theta, halo_type, stellar_model=None, halo_parameterization=None):

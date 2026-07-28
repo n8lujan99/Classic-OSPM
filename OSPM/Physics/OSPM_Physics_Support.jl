@@ -458,6 +458,9 @@ function launch_orbit_apocenter(; rapo::Float64, theta0::Float64, Lz_frac::Float
     if !(isfinite(ss) && abs(ss) > EPS_SIN)
         return (nothing, 0.0, 0.0, 0.0, :reject_sin)
     end
+    if !(isfinite(Lz_frac) && 0.0 <= Lz_frac <= 1.0)
+        return (nothing, 0.0, 0.0, 0.0, :reject_lfrac)
+    end
     frs, _ = frc(rapo, theta0)
     if !(isfinite(frs) && isfinite(rapo) && rapo > 0.0)
         return (nothing, 0.0, 0.0, 0.0, :reject_force)
@@ -483,12 +486,20 @@ function launch_orbit_apocenter(; rapo::Float64, theta0::Float64, Lz_frac::Float
             ((rapo, theta0, ss, frs, vc, EPS_VEL), 0.0, 0.0, 0.0, :reject_vc) :
             (nothing, 0.0, 0.0, 0.0, :reject_vc)
     end
-    Lz = Lz_frac * rapo * vc
+    Lz = Lz_frac * rapo * abs(ss) * vc
     Papo = pot(rapo, theta0)
     if !isfinite(Papo)
         return (nothing, 0.0, 0.0, vc, :reject_pot)
     end
     E = Papo + (Lz^2) / (2 * rapo^2 * ss^2)
+    if Lz_frac == 1.0
+        Om = abs(vc / rapo)
+        dt = dt_frac / max(Om, dt_floor)
+        return ((rapo, theta0, dt, 0.0, 0.0), Lz, E, vc, :ok)
+    end
+    if !(isfinite(r0_frac) && 0.0 < r0_frac < 1.0)
+        return (nothing, Lz, E, vc, :reject_r0)
+    end
     r0 = r0_frac * rapo
     P0 = pot(r0, theta0)
     if !isfinite(P0)

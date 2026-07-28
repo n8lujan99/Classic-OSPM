@@ -72,10 +72,57 @@ def is_diagnostic_pass(status):
     status = str(status)
     return status.startswith("pass") and status != "pass_full"
 
+def batch_result_status(code, chi2, weight_solver_mode):
+    valid_pass = (int(code) == 0) and np.isfinite(chi2) and (float(chi2) > 1e-12)
+    if valid_pass:
+        return "pass", float(chi2)
+    if int(code) == 0:
+        return "numeric_fail", np.inf
+    return {
+        1: "orbit_fail",
+        2: "solver_failed",
+        3: "physics_exception",
+        4: "timeout",
+    }.get(int(code), "unknown_fail"), np.inf
+
 def real_pass_rows(df):
     if "status" not in df.columns:
         return df.iloc[0:0]
     return df[df["status"].astype(str).map(is_real_pass)]
+
+def _fixed_theta_from_config(config):
+    fixed = config.get("FIXED_THETA", None)
+    if fixed is None:
+        return None
+    theta = [float(x) for x in fixed]
+    names = list(config["PARAMETER_NAMES"])
+    bounds = list(config["THETA_BOUNDS"])
+    if len(theta) != len(names):
+        raise ValueError(
+            f"FIXED_THETA must contain {len(names)} values for {names}, got {len(theta)}"
+        )
+    for name, x, (lo, hi) in zip(names, theta, bounds):
+        if not (np.isfinite(x) and float(lo) <= x <= float(hi)):
+            raise ValueError(
+                f"FIXED_THETA value {name}={x} is outside [{float(lo)}, {float(hi)}]"
+            )
+    return theta
+
+def _selected_variants(config, variant_map):
+    selected = config.get("EVAL_VARIANTS", None)
+    if selected is None:
+        return list(variant_map)
+    if isinstance(selected, str):
+        selected = [selected]
+    selected = [str(label).strip().lower() for label in selected]
+    if not selected:
+        raise ValueError("EVAL_VARIANTS must contain at least one variant label")
+    unknown = [label for label in selected if label not in variant_map]
+    if unknown:
+        raise ValueError(
+            f"Unknown EVAL_VARIANTS={unknown}; choose from {list(variant_map)}"
+        )
+    return selected
 
 def _jl_matrix_f64(mat, Main, juliacall=None, name="mat"):
     arr = np.asarray(mat, dtype=np.float64)
@@ -103,6 +150,36 @@ def _jl_vector_bool(vec, Main, name="vec"):
     arr = np.asarray(vec, dtype=bool).ravel()
     Main._tmp_vector_bool = arr.tolist()
     return Main.seval("Bool[y for y in _tmp_vector_bool]")
+
+def _julia_literal(value, name):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None:
+        return "nothing"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} contains a non-finite value")
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    raise TypeError(f"{name} contains unsupported value type {type(value).__name__}")
+
+def _jl_primitive_dict(value, Main, name):
+    if value is None:
+        return Main.seval("nothing")
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be a dict or None")
+    entries = []
+    for key, item in value.items():
+        key_literal = json.dumps(str(key))
+        value_literal = _julia_literal(item, name)
+        entries.append(f"{key_literal} => {value_literal}")
+    expression = "Dict{String,Any}(" + ", ".join(entries) + ")"
+    return Main.seval(expression)
 
 def _jl_surface_brightness_profile(profile, Main):
     if profile is None:
@@ -460,6 +537,7 @@ def run_daemon(config, physics_engine):
     from collections import defaultdict
     deck, runner, corpo, fixer = Deck(config), Runner(config), Corpo(physics_engine), Fixer(config)
     halo_parameterization = normalize_halo_parameterization(config.get("HALO_PARAMETERIZATION", "rho_rs"))
+    fixed_theta = _fixed_theta_from_config(config)
     if len(config["PARAMETER_NAMES"]) < 4: raise ValueError("PARAMETER_NAMES must cover four theta entries")
     expected_halo_names = {"rho_rs": ("rho_s", "r_s"), "vcirc_rs": ("vcirc", "r_s"), "v0_rc": ("v0", "r_c")}[halo_parameterization]
     actual_halo_names = tuple(config["PARAMETER_NAMES"][:2])
@@ -468,6 +546,8 @@ def run_daemon(config, physics_engine):
     print("CONFIG HALO_PARAMETERIZATION:", halo_parameterization)
     print("CONFIG PARAMETER_NAMES:", config["PARAMETER_NAMES"])
     print("CONFIG THETA_BOUNDS:", config["THETA_BOUNDS"])
+    if fixed_theta is not None:
+        print("CONFIG FIXED_THETA:", fixed_theta)
     if halo_parameterization == "vcirc_rs":
         vcirc0, rs0 = float(config["INITIAL_THETA"][0]), float(config["INITIAL_THETA"][1])
         rho0 = nfw_vcirc_rs_to_rho_s(vcirc0, rs0)
@@ -486,7 +566,6 @@ def run_daemon(config, physics_engine):
         from juliacall import Main; import juliacall
         jl_nothing = Main.seval("nothing")
         Main.seval("setindex_b(A, x, i) = (A[i] = x; A)")
-        stellar_model = _clean_stellar_model(getattr(obs, "stellar_model", None))
         surface_brightness_profile = _get_surface_brightness_profile(config, physics_engine, obs)
         surface_brightness_profile_jl = _jl_surface_brightness_profile(surface_brightness_profile, Main)
         obs_cfg = _observable_config(config)
@@ -501,8 +580,16 @@ def run_daemon(config, physics_engine):
                     return engine_cfg[name]
                 if name in config and config[name] is not None:
                     return config[name]
+            for name in names:
+                if hasattr(obs, name):
+                    value = getattr(obs, name)
+                    if value is not None:
+                        return value
             return default
 
+        stellar_model = _clean_stellar_model(opt("STELLAR_MODEL", "stellar_model", default=getattr(obs, "stellar_model", None)))
+        if stellar_model is None:
+            raise RuntimeError("stellar_model is required for the Karl daemon path; M/L cannot enter the force without it")
         lambda_light = float(opt("LAMBDA_LIGHT", "LAMBDA_OCC", "lambda_light", "lambda_occ", default=1.0))
         min_stars_per_bin = int(opt("MIN_STARS_PER_BIN", "min_stars_per_bin", default=20))
         nvbin = int(opt("NVBIN", "Nvbin", "nvbin", default=21))
@@ -517,6 +604,17 @@ def run_daemon(config, physics_engine):
         entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=config.get("ENTROPY_FLOOR", 1e-12)))
         halo_q_axis_ratio = float(opt("HALO_Q_AXIS_RATIO", "halo_q_axis_ratio", default=config.get("HALO_Q_AXIS_RATIO", 1.0)))
         karl_halo_params = _clean_karl_halo_params(opt("KARL_HALO_PARAMS", "karl_halo_params", default=config.get("KARL_HALO_PARAMS", None)))
+        if base_halo_type == "karl_halo":
+            raise RuntimeError(
+                "HALO_TYPE='karl_halo' is disabled: its density functions use parsec-valued "
+                "radii, while the current halo-table path supplies radii in meters"
+            )
+        if abs(halo_q_axis_ratio - 1.0) > 1e-8:
+            raise RuntimeError(
+                "Flattened halo forces are disabled because their axisymmetric force table "
+                "does not share the potential used for orbit launch energy; set "
+                "HALO_Q_AXIS_RATIO=1.0"
+            )
         R_star_m = getattr(physics_engine, "__R_star_m__", getattr(obs, "R_star_m", None))
         valid_vlos = getattr(physics_engine, "__valid_vlos__", getattr(obs, "valid_vlos", None))
         v_star_mps = getattr(physics_engine, "__v_star_mps__", getattr(obs, "v_star_mps", None))
@@ -550,6 +648,25 @@ def run_daemon(config, physics_engine):
         r_light_max_pc = float(light_bin_edges[-1] / 3.0856775814913673e16) if len(light_bin_edges) else float("nan")
         r_kin_max_pc = float(kinematic_bin_edges[-1] / 3.0856775814913673e16) if len(kinematic_bin_edges) else float("nan")
         nocc_compat = int(opt("NBINS_OCC", "nbins_occ", default=0))
+        Main._stellar_model_jl = _jl_primitive_dict(stellar_model, Main, "stellar_model")
+        Main._karl_halo_params_jl = _jl_primitive_dict(karl_halo_params, Main, "karl_halo_params")
+        if velocity_edges is None:
+            Main._velocity_edges_jl = Main.seval("nothing")
+        else:
+            Main._velocity_edges_jl = _jl_vector_f64(velocity_edges, Main, name="velocity_edges")
+        Main.seval("""
+            _stellar_model_jl isa AbstractDict ||
+                error("stellar_model handoff must be a Julia dictionary")
+            (_karl_halo_params_jl === nothing || _karl_halo_params_jl isa AbstractDict) ||
+                error("karl_halo_params handoff must be nothing or a Julia dictionary")
+            (_velocity_edges_jl === nothing || _velocity_edges_jl isa AbstractVector{<:Real}) ||
+                error("velocity_edges handoff must be nothing or a real Julia vector")
+            println(
+                "[Daemon] Julia handoff — stellar_model=", typeof(_stellar_model_jl),
+                ", karl_halo_params=", typeof(_karl_halo_params_jl),
+                ", velocity_edges=", typeof(_velocity_edges_jl),
+            )
+        """)
         
         jl_batch = Main.OSPMPhysicsSpherical.evaluate_batch_theta
         sini = float(obs.sini)
@@ -575,25 +692,33 @@ def run_daemon(config, physics_engine):
     while runs < config["MAX_RUNS"]:
         print(f"[Daemon] loop iter runs={runs}", flush=True); t0 = time.perf_counter()
         deck._flush_buf()
-        base_props = runner.propose(deck)
+        base_props = (
+            [(list(fixed_theta), runs + 1)]
+            if fixed_theta is not None
+            else runner.propose(deck)
+        )
         print("base_props[:3] =", base_props[:3])
         props = []
         for theta, pid in base_props:
             halo_param, halo_scale, MBH, ML = theta
-            variants = [
-                ("full",       [halo_param,       halo_scale, MBH,       ML], base_halo_type),
+            variant_map = {
+                "full":       ([halo_param,       halo_scale, MBH,       ML], base_halo_type),
                 # isolate major gravitating components
-                ("bh_only",    [0.0,              halo_scale, MBH,       ML], "none"),  # stars + BH, no halo
-                ("halo_only",  [halo_param,       halo_scale, 0.0,       ML], base_halo_type),
+                "bh_only":    ([0.0,              halo_scale, MBH,       ML], "none"),  # stars + BH, no halo
+                "halo_only":  ([halo_param,       halo_scale, 0.0,       ML], base_halo_type),
                 # BH perturbations
-                ("bh_up",      [halo_param,       halo_scale, MBH * 2.0, ML], base_halo_type),
-                ("bh_down",    [halo_param,       halo_scale, MBH * 0.5, ML], base_halo_type),
+                "bh_up":      ([halo_param,       halo_scale, MBH * 2.0, ML], base_halo_type),
+                "bh_down":    ([halo_param,       halo_scale, MBH * 0.5, ML], base_halo_type),
                 # halo perturbations
-                ("halo_up",    [halo_param * 2.0, halo_scale, MBH,       ML], base_halo_type),
-                ("halo_down",  [halo_param * 0.5, halo_scale, MBH,       ML], base_halo_type),
+                "halo_up":    ([halo_param * 2.0, halo_scale, MBH,       ML], base_halo_type),
+                "halo_down":  ([halo_param * 0.5, halo_scale, MBH,       ML], base_halo_type),
                 # stellar M/L perturbations
-                ("ml_up",      [halo_param,       halo_scale, MBH,       ML * 2.0], base_halo_type),
-                ("ml_down",    [halo_param,       halo_scale, MBH,       ML * 0.5], base_halo_type),
+                "ml_up":      ([halo_param,       halo_scale, MBH,       ML * 2.0], base_halo_type),
+                "ml_down":    ([halo_param,       halo_scale, MBH,       ML * 0.5], base_halo_type),
+            }
+            variants = [
+                (label, *variant_map[label])
+                for label in _selected_variants(config, variant_map)
             ]
             # keep each perturbed theta inside bounds
             bounded_variants = []
@@ -615,6 +740,14 @@ def run_daemon(config, physics_engine):
 
         def _record(theta, pid, label, status, chi2, refine_passes, diag=None):
             nonlocal best, runs
+            if status != "pass" or not np.isfinite(chi2) or chi2 <= 1e-12:
+                status = status if status != "pass" else "numeric_fail"
+                chi2 = np.inf
+                if diag is not None:
+                    diag = dict(diag)
+                    diag["chi2_losvd"] = np.inf
+                    diag["chi2_light"] = np.inf
+                    diag["chi2_total"] = np.inf
             base_reward = fixer.reward(status, chi2)
             reward = base_reward + 0.5 * (1.0 - refine_passes / max(1, config.get("MAX_REFINE", 1))) if status == "pass" else base_reward
             final_status = f"{status}_{label}"
@@ -628,6 +761,10 @@ def run_daemon(config, physics_engine):
                 if chi2 < best: best = chi2
             else: flat.push(np.inf)
             runs += 1
+            if runs >= int(config["MAX_RUNS"]):
+                deck.save()
+                print(f"[Daemon] Reached MAX_RUNS={config['MAX_RUNS']}", flush=True)
+                return True
             if not runner.fill_triggered and runner.detect_basin(deck):
                 runner.fill_mode = runner.fill_triggered = True
                 print(f"[Daemon] Basin detected at run {runs} — switching to fill mode", flush=True)
@@ -683,10 +820,6 @@ def run_daemon(config, physics_engine):
                         Main.seval(f"_sini_jl = {float(sini)!r}")
                         Main.seval(f"_Norbit_jl = {int(Norbit)}")
                         Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
-
-                        Main.seval("_stellar_model_jl = nothing")
-                        Main.seval("_karl_halo_params_jl = nothing")
-                        Main.seval("_velocity_edges_jl = nothing")
 
                         Main.seval(f"_Nocc_jl = {int(nocc_compat)}")
                         Main.seval(f"_lambda_occ_jl = {float(lambda_light)!r}")
@@ -758,14 +891,15 @@ OSPMPhysicsSpherical.evaluate_batch_theta(
                         t_cnt["eval"] += len(chunk_thetas)
 
                         for j, (theta, pid, label, halo_type_variant) in enumerate(chunk_props):
-                            chi2 = float(chi2_vec[j])
                             code = int(status_code_vec[j])
                             refine_passes = int(refine_vec[j])
-                            valid_pass = (code == 0) and np.isfinite(chi2) and (chi2 > 1e-12)
-                            status = "pass" if valid_pass else {1: "orbit_fail", 2: "numeric_fail", 4: "timeout"}.get(code, "unknown_fail")
+                            status, chi2 = batch_result_status(code, float(chi2_vec[j]), weight_solver_mode)
                             chi2_light = float(chi2_light_vec[j])
+                            if status != "pass":
+                                chi2_light = np.inf
                             diag = dict( chi2_losvd=chi2, chi2_light=chi2_light,
                                 chi2_total=chi2 + lambda_light * chi2_light if np.isfinite(chi2) and np.isfinite(chi2_light) else np.inf,
+                                julia_status_code=code,
                                 chi2_inner=float(chi2_inner_vec[j]),
                                 chi2_outer=float(chi2_outer_vec[j]),
                                 N_inner=int(N_inner_vec[j]),
@@ -782,8 +916,6 @@ OSPMPhysicsSpherical.evaluate_batch_theta(
                                 karl_halo_params_active=bool(karl_halo_params),
                             )
 
-                            if not valid_pass:
-                                chi2 = np.inf
                             if _record(theta, pid, label, status, chi2, refine_passes, diag=diag):
                                 stop = True
                                 break

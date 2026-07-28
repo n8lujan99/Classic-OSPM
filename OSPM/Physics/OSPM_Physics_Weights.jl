@@ -25,17 +25,13 @@ function _prepare_wphase(wphase, n::Int; entropy_floor::Float64=DEFAULT_KARL_ENT
     if wphase === nothing
         return ones(Float64, n)
     end
-
     wp = Float64.(wphase)
     length(wp) == n || error("wphase length $(length(wp)) does not match Norbit=$n")
-
     @inbounds for i in eachindex(wp)
         (!isfinite(wp[i]) || wp[i] <= 0.0) && (wp[i] = entropy_floor)
     end
-
     return wp
 end
-
 
 @inline function _safe_positive(x::Float64; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     return (isfinite(x) && x > floor) ? x : floor
@@ -45,14 +41,12 @@ function normalize_wphase(wphase, n::Int; floor::Float64=DEFAULT_KARL_ENTROPY_FL
     if wphase === nothing
         return ones(Float64, n)
     end
-
     wp = Float64.(wphase)
     length(wp) == n || error("wphase length $(length(wp)) does not match number of orbit weights $n")
 
     @inbounds for i in eachindex(wp)
         wp[i] = _safe_positive(wp[i]; floor=floor)
     end
-
     return wp
 end
 
@@ -276,7 +270,6 @@ function karl_weight_diagnostics(A::Matrix{Float64}, w::Vector{Float64}, d::Vect
     return (entropy=ent, chi=chi, profit=profit, alphat=alphat)
 end
 
-
 # ============================================================
 # §3c  KARL SPEAR / MAXIMUM-ENTROPY WEIGHT SOLVER
 # ============================================================
@@ -459,7 +452,6 @@ function solve_weights_karl_spear(A::Matrix{Float64}, d::Vector{Float64}, sigma:
     return (w, true)
 end
 
-
 # ============================================================
 # §3d  KARL EXPANDED CM WITH LOSVD SLACK VARIABLES
 # ============================================================
@@ -471,25 +463,36 @@ end
 # internal SPEAR variables that carry the LOSVD residual term the way Karl's
 # entropy.f / spear.f system does.
 
-function build_expanded_Cm_with_losvd_slack(A_light::Matrix{Float64}, A_losvd::Matrix{Float64})
+function _expanded_light_implies_normalization(A_light::Matrix{Float64}, light_target::Vector{Float64}; tol::Float64=1e-12)
+    size(A_light, 1) == length(light_target) || return false
+    isempty(light_target) && return false
+    orbit_light_sums = vec(sum(A_light, dims=1))
+    return maximum(abs.(orbit_light_sums .- 1.0)) <= tol && abs(sum(light_target) - 1.0) <= tol
+end
+
+function build_expanded_Cm_with_losvd_slack(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}; enforce_normalization::Bool=true)
     Nlight, Norbit = size(A_light)
     Nlosvd, Norbit2 = size(A_losvd)
     Norbit == Norbit2 || error("A_light and A_losvd must have the same number of orbit columns")
 
-    Narr = Nlight + Nlosvd
+    Narr = Nlight + Nlosvd + (enforce_normalization ? 1 : 0)
     Nslack = Nlosvd
 
     Cm = zeros(Float64, Narr, Norbit + Nslack)
 
     Cm[1:Nlight, 1:Norbit] .= A_light
-    Cm[(Nlight + 1):Narr, 1:Norbit] .= A_losvd
-    Cm[(Nlight + 1):Narr, (Norbit + 1):(Norbit + Nslack)] .= Matrix{Float64}(I, Nlosvd, Nlosvd)
+    losvd_rows = (Nlight + 1):(Nlight + Nlosvd)
+    Cm[losvd_rows, 1:Norbit] .= A_losvd
+    Cm[losvd_rows, (Norbit + 1):(Norbit + Nslack)] .= Matrix{Float64}(I, Nlosvd, Nlosvd)
+    if enforce_normalization
+        Cm[Narr, 1:Norbit] .= 1.0
+    end
 
     return Cm
 end
 
-function build_expanded_target(light_target::Vector{Float64}, losvd_target::Vector{Float64})
-    return vcat(light_target, losvd_target)
+function build_expanded_target(light_target::Vector{Float64}, losvd_target::Vector{Float64}; enforce_normalization::Bool=true)
+    return enforce_normalization ? vcat(light_target, losvd_target, 1.0) : vcat(light_target, losvd_target)
 end
 
 function build_expanded_weights_initial(w_orbit::Vector{Float64}, A_losvd::Matrix{Float64}, losvd_target::Vector{Float64})
@@ -545,65 +548,157 @@ function build_expanded_entropy_derivatives(w_all::Vector{Float64}, Norbit::Int,
     return entropy, chi_slack, dS, ddS
 end
 
-function karl_spear_update_expanded(w_all::Vector{Float64}, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
-    Narr, nvar = size(Cm)
-
-    length(w_all) == nvar || error("w_all length must match Cm columns")
-    length(target) == Narr || error("target length must match Cm rows")
-    length(dS) == nvar || error("dS length must match Cm columns")
-    length(ddS) == nvar || error("ddS length must match Cm columns")
-
-    model = Cm * w_all
-    delY = target .- model
-
-    Am = karl_spear_build_Am(Cm, ddS; floor=entropy_floor)
-    karl_spear_rhs!(delY, Cm, dS, ddS; floor=entropy_floor)
-
-    lambda = _solve_spear_system(Am, delY)
-    dw = karl_spear_delta_w(Cm, lambda, dS, ddS; floor=entropy_floor)
-
-    wnew = similar(w_all)
-    @inbounds for j in eachindex(w_all)
-        wnew[j] = w_all[j] + apfac * dw[j]
-    end
-
-    rcond_est = 1.0 / max(cond(Am), 1.0)
-    max_abs_dw = maximum(abs.(dw))
-
-    return (w=wnew, dw=dw, lambda=lambda, Am=Am, delY=delY, model=model, rcond_est=rcond_est, max_abs_dw=max_abs_dw)
-end
-
 function _project_expanded_weights!(w_all::Vector{Float64}, Norbit::Int; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
-    Norbit <= length(w_all) || error("Norbit cannot exceed length(w_all)")
-
-    worb = @view w_all[1:Norbit]
-
-    @inbounds for i in eachindex(worb)
-        (!isfinite(worb[i]) || worb[i] < floor) && (worb[i] = floor)
+    0 < Norbit <= length(w_all) || error("Norbit must be between 1 and length(w_all)")
+    all(isfinite, w_all) || return false
+    @inbounds for j in 1:Norbit
+        w_all[j] >= floor || return false
     end
-
-    s = sum(worb)
-    (!isfinite(s) || s <= 0.0) && return false
-    worb ./= s
-
-    @inbounds for i in (Norbit + 1):length(w_all)
-        !isfinite(w_all[i]) && (w_all[i] = 0.0)
-    end
-
     return true
 end
 
-function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, wphase_orbit::Vector{Float64}; alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
+function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
+    Narr, nvar = size(Cm)
+    length(w_all) == nvar || error("w_all length must match Cm columns")
+    0 < Norbit <= nvar || error("Norbit must be between 1 and length(w_all)")
+    length(target) == Narr || error("target length must match Cm rows")
+    length(dS) == nvar || error("dS length must match Cm columns")
+    length(ddS) == nvar || error("ddS length must match Cm columns")
+    model = Cm * w_all
+
+    # Active-boundary solve for physical orbit weights.  A floor-bound orbit
+    # whose unconstrained Newton direction is negative cannot move.  Remove
+    # that column from the Newton/Lagrange system, hold its update at zero, and
+    # resolve the remaining free orbit and signed LOSVD-slack variables.  This
+    # preserves the linearized constraints; zeroing dw after the solve would not.
+    active_bound = falses(Norbit)
+    dw = zeros(Float64, nvar)
+    lambda = zeros(Float64, Narr)
+    Am = zeros(Float64, Narr, Narr)
+    delY = target .- model
+    active_passes = 0
+
+    for pass in 1:(Norbit + 1)
+        active_passes = pass
+        free_idx = Int[]
+        sizehint!(free_idx, nvar - count(active_bound))
+        @inbounds for j in 1:nvar
+            if j > Norbit || !active_bound[j]
+                push!(free_idx, j)
+            end
+        end
+        isempty(free_idx) && error("expanded SPEAR active set removed every variable")
+
+        Cm_free = Cm[:, free_idx]
+        dS_free = dS[free_idx]
+        ddS_free = ddS[free_idx]
+        delY = target .- model
+        Am = karl_spear_build_Am(Cm_free, ddS_free; floor=entropy_floor)
+        karl_spear_rhs!(delY, Cm_free, dS_free, ddS_free; floor=entropy_floor)
+        lambda = _solve_spear_system(Am, delY)
+        dw_free = karl_spear_delta_w(Cm_free, lambda, dS_free, ddS_free; floor=entropy_floor)
+
+        fill!(dw, 0.0)
+        @inbounds for k in eachindex(free_idx)
+            dw[free_idx[k]] = dw_free[k]
+        end
+
+        newly_active = 0
+        @inbounds for j in 1:Norbit
+            if !active_bound[j] && w_all[j] <= entropy_floor && dw[j] < 0.0
+                active_bound[j] = true
+                newly_active += 1
+            end
+        end
+        newly_active == 0 && break
+        pass <= Norbit || error("expanded SPEAR active-boundary solve did not stabilize")
+    end
+
+    stepfac = apfac
+    limiting_idx = 0
+    limiting_weight = NaN
+    limiting_dw = NaN
+    limiting_candidate = apfac
+    min_orbit_weight = minimum(@view w_all[1:Norbit])
+    n_at_floor = 0
+    n_negative_dw = 0
+    @inbounds for j in 1:Norbit
+        if w_all[j] <= entropy_floor
+            n_at_floor += 1
+        end
+        if dw[j] < 0.0
+            n_negative_dw += 1
+            candidate = 0.99 * (w_all[j] - entropy_floor) / (-dw[j])
+            if candidate < stepfac
+                stepfac = candidate
+                limiting_idx = j
+                limiting_weight = w_all[j]
+                limiting_dw = dw[j]
+                limiting_candidate = candidate
+            end
+        end
+    end
+    wnew = similar(w_all)
+    @inbounds for j in eachindex(w_all)
+        wnew[j] = w_all[j] + stepfac * dw[j]
+    end
+    rcond_est = 1.0 / max(cond(Am), 1.0)
+    max_abs_dw = maximum(abs.(dw))
+    return (
+        w=wnew,
+        dw=dw,
+        lambda=lambda,
+        Am=Am,
+        delY=delY,
+        model=model,
+        rcond_est=rcond_est,
+        max_abs_dw=max_abs_dw,
+        stepfac=stepfac,
+        limiting_idx=limiting_idx,
+        limiting_weight=limiting_weight,
+        limiting_dw=limiting_dw,
+        limiting_candidate=limiting_candidate,
+        min_orbit_weight=min_orbit_weight,
+        n_at_floor=n_at_floor,
+        n_negative_dw=n_negative_dw,
+        n_active_bound=count(active_bound),
+        active_passes=active_passes,
+    )
+end
+
+function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, wphase_orbit::Vector{Float64}; alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, enforce_normalization::Bool=true)
     # Karl SPEAR state rule:
-    #   w_all = orbit weights followed by LOSVD slack weights.
+    # w_all = orbit weights followed by LOSVD slack weights.
     # The slack variables are state variables.  They must not be rebuilt from
     # target - A*w at each Newton/SPEAR step, or they hide the LOSVD residual.
-    Cm = build_expanded_Cm_with_losvd_slack(A_light, A_losvd)
-    target = build_expanded_target(light_target, losvd_target)
+    Cm = build_expanded_Cm_with_losvd_slack(A_light, A_losvd; enforce_normalization=enforce_normalization)
+    target = build_expanded_target(light_target, losvd_target; enforce_normalization=enforce_normalization)
     length(w_all) == size(Cm, 2) || error("w_all length does not match expanded Cm columns")
     Norbit < length(w_all) || error("expanded Cm state must contain LOSVD slack variables after orbit weights")
     entropy, chi_slack, dS, ddS = build_expanded_entropy_derivatives(w_all, Norbit, wphase_orbit, losvd_sigma; alphat=alphat, entropy_floor=entropy_floor)
-    out = karl_spear_update_expanded(w_all, Cm, target, dS, ddS; apfac=apfac, entropy_floor=entropy_floor)
+    out = karl_spear_update_expanded(w_all, Norbit, Cm, target, dS, ddS; apfac=apfac, entropy_floor=entropy_floor)
+    if !isfinite(out.stepfac) || out.stepfac <= 0.0
+        failure_reason = !isfinite(out.stepfac) ? :nonfinite_stepfac : :nonpositive_stepfac
+        return w_all, false, (
+            entropy=entropy,
+            chi_slack=chi_slack,
+            rcond_est=out.rcond_est,
+            max_abs_dw=out.max_abs_dw,
+            stepfac=out.stepfac,
+            slack=Float64[],
+            w_all=w_all,
+            failure_reason=failure_reason,
+            limiting_idx=out.limiting_idx,
+            limiting_weight=out.limiting_weight,
+            limiting_dw=out.limiting_dw,
+            limiting_candidate=out.limiting_candidate,
+            min_orbit_weight=out.min_orbit_weight,
+            n_at_floor=out.n_at_floor,
+            n_negative_dw=out.n_negative_dw,
+            n_active_bound=out.n_active_bound,
+            active_passes=out.active_passes,
+        )
+    end
     w_all_new = Vector{Float64}(out.w)
 
     # Expanded-Cm has two kinds of variables:
@@ -612,14 +707,32 @@ function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, A_
     #   Norbit+1:end   = LOSVD slack / residual variables
     #
     # Slack variables may be signed.  Orbit weights are luminosity/mass weights,
-    # so they must remain finite, non-negative, and normalized.
+    # so they must remain finite and above the entropy floor.
     if !all(isfinite, w_all_new)
-        return w_all, false, ( entropy=entropy, chi_slack=chi_slack, rcond_est=0.0, max_abs_dw=Inf, slack=Float64[], w_all=w_all)
+        return w_all, false, (
+            entropy=entropy, chi_slack=chi_slack, rcond_est=0.0, max_abs_dw=Inf,
+            stepfac=out.stepfac, slack=Float64[], w_all=w_all,
+            failure_reason=:nonfinite_updated_state,
+            limiting_idx=out.limiting_idx, limiting_weight=out.limiting_weight,
+            limiting_dw=out.limiting_dw, limiting_candidate=out.limiting_candidate,
+            min_orbit_weight=out.min_orbit_weight, n_at_floor=out.n_at_floor,
+            n_negative_dw=out.n_negative_dw,
+            n_active_bound=out.n_active_bound, active_passes=out.active_passes,
+        )
     end
     if !_project_expanded_weights!(w_all_new, Norbit; floor=entropy_floor)
-        return w_all, false, (entropy=entropy, chi_slack=chi_slack, rcond_est=0.0, max_abs_dw=Inf, slack=Float64[], w_all=w_all)
+        return w_all, false, (
+            entropy=entropy, chi_slack=chi_slack, rcond_est=0.0, max_abs_dw=Inf,
+            stepfac=out.stepfac, slack=Float64[], w_all=w_all,
+            failure_reason=:orbit_weight_below_floor,
+            limiting_idx=out.limiting_idx, limiting_weight=out.limiting_weight,
+            limiting_dw=out.limiting_dw, limiting_candidate=out.limiting_candidate,
+            min_orbit_weight=out.min_orbit_weight, n_at_floor=out.n_at_floor,
+            n_negative_dw=out.n_negative_dw,
+            n_active_bound=out.n_active_bound, active_passes=out.active_passes,
+        )
     end
-    return w_all_new, true, ( entropy=entropy, chi_slack=chi_slack, rcond_est=out.rcond_est, max_abs_dw=out.max_abs_dw, slack=Vector{Float64}(w_all_new[(Norbit + 1):end]), w_all=w_all_new)
+    return w_all_new, true, (entropy=entropy, chi_slack=chi_slack, rcond_est=out.rcond_est, max_abs_dw=out.max_abs_dw, stepfac=out.stepfac, slack=Vector{Float64}(w_all_new[(Norbit + 1):end]), w_all=w_all_new, n_active_bound=out.n_active_bound, active_passes=out.active_passes)
 end
 
 function karl_spear_step_light_losvd(w_orbit::Vector{Float64}, A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, wphase_orbit::Vector{Float64}; alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
@@ -627,12 +740,13 @@ function karl_spear_step_light_losvd(w_orbit::Vector{Float64}, A_light::Matrix{F
     # builds w_all once in solve_weights_karl_expanded_cm and carries it through
     # all SPEAR steps.
     w_all = build_expanded_weights_initial(w_orbit, A_losvd, losvd_target)
-    w_all_new, ok, diag = karl_spear_step_light_losvd_all(w_all, length(w_orbit), A_light, A_losvd, light_target, losvd_target, losvd_sigma, wphase_orbit; alphat=alphat, apfac=apfac, entropy_floor=entropy_floor)
+    enforce_normalization = !_expanded_light_implies_normalization(A_light, light_target)
+    w_all_new, ok, diag = karl_spear_step_light_losvd_all(w_all, length(w_orbit), A_light, A_losvd, light_target, losvd_target, losvd_sigma, wphase_orbit; alphat=alphat, apfac=apfac, entropy_floor=entropy_floor, enforce_normalization=enforce_normalization)
 
     return Vector{Float64}(w_all_new[1:length(w_orbit)]), ok, diag
 end
 
-##CHI##
+##CHI SQUARE PORTION##
 function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, light_sigma::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}; alphat::Float64=DEFAULT_KARL_ALPHAT, lambda_light::Float64=1.0, wphase=nothing, maxiter::Int=DEFAULT_KARL_MAXITER, seed::UInt=UInt(0), entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, apfac::Float64=DEFAULT_KARL_APFAC, return_diag::Bool=false)
     Nlight, Norbit = size(A_light)
     Nlosvd, Norbit2 = size(A_losvd)
@@ -659,52 +773,82 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     losvd_target_w = losvd_target .* vscale
     losvd_sigma_w = vsig
     wp = _prepare_wphase(wphase, Norbit; entropy_floor=entropy_floor)
-
     if iseven(Norbit)
         w = karl_initial_weights_from_wphase(wp; paired=true, rotfrac=0.75, floor=entropy_floor)
     else
         w = karl_initial_weights_from_wphase(wp; paired=false, floor=entropy_floor)
     end
-
     # Build the full Karl SPEAR state once.  Orbit weights occupy columns
     # 1:Norbit.  LOSVD slack weights occupy the remaining columns.  The slack
     # block is then carried forward as state, matching Karl's spear.f behavior.
     w_all = build_expanded_weights_initial(w, A_losvd_w, losvd_target_w)
+    enforce_normalization = !(lambda_light > 0.0) || !_expanded_light_implies_normalization(A_light, light_target)
+    Cm = build_expanded_Cm_with_losvd_slack(A_light_w, A_losvd_w; enforce_normalization=enforce_normalization)
+    target = build_expanded_target(light_target_w, losvd_target_w; enforce_normalization=enforce_normalization)
     last_diag = nothing
     ok = true
-
-    for _ in 1:maxiter
-        w_all_new, step_ok, sdiag = karl_spear_step_light_losvd_all(w_all, Norbit, A_light_w, A_losvd_w, light_target_w, losvd_target_w, losvd_sigma_w, wp; alphat=alphat, apfac=apfac, entropy_floor=entropy_floor)
+    converged = false
+    constraint_l2 = Inf
+    iterations = 0
+    for iter in 1:maxiter
+        iterations = iter
+        w_all_new, step_ok, sdiag = karl_spear_step_light_losvd_all(w_all, Norbit, A_light_w, A_losvd_w, light_target_w, losvd_target_w, losvd_sigma_w, wp; alphat=alphat, apfac=apfac, entropy_floor=entropy_floor, enforce_normalization=enforce_normalization)
         last_diag = sdiag
         if !step_ok
+            println(
+                "[EXPANDED CM ROOT] ",
+                "iteration=", iter,
+                " reason=", sdiag.failure_reason,
+                " stepfac=", sdiag.stepfac,
+                " limiting_orbit=", sdiag.limiting_idx,
+                " limiting_weight=", sdiag.limiting_weight,
+                " entropy_floor=", entropy_floor,
+                " limiting_dw=", sdiag.limiting_dw,
+                " limiting_candidate=", sdiag.limiting_candidate,
+                " min_orbit_weight=", sdiag.min_orbit_weight,
+                " N_at_floor=", sdiag.n_at_floor,
+                " N_negative_dw=", sdiag.n_negative_dw,
+                " rcond_est=", sdiag.rcond_est,
+                " max_abs_dw=", sdiag.max_abs_dw,
+            )
             ok = false
             break
         end
-        if norm(w_all_new .- w_all) <= 1e-8 * max(1.0, norm(w_all))
+        step_l2 = norm(w_all_new .- w_all)
+        constraint_l2 = norm(target .- Cm * w_all_new)
+        if step_l2 <= 1e-8 * max(1.0, norm(w_all)) && constraint_l2 <= 1e-8 * max(1.0, norm(target)) && sdiag.max_abs_dw <= 1e-6 * max(1.0, norm(w_all))
             w_all .= w_all_new
+            converged = true
             break
         end
         w_all .= w_all_new
     end
-
     w = Vector{Float64}(w_all[1:Norbit])
     slack = Vector{Float64}(w_all[(Norbit + 1):end])
-    (!ok || !all(isfinite, w) || !all(isfinite, slack)) && return return_diag ? (fail_w, false, last_diag) : (fail_w, false)
-
+    finite_state = all(isfinite, w) && all(isfinite, slack)
+    (!ok || !finite_state) && return return_diag ? (fail_w, false, last_diag) : (fail_w, false)
+    losvd_residual = losvd_target .- A_losvd * w
+    slack_residual_l2 = norm(slack .- losvd_residual)
+    slack_scale = max(1.0, norm(slack), norm(losvd_residual))
+    normalization_error = abs(sum(w) - 1.0)
+    constraint_ok = constraint_l2 <= 1e-8 * max(1.0, norm(target))
+    slack_consistent = slack_residual_l2 <= 1e-8 * slack_scale
+    normalized = normalization_error <= 1e-8
     if return_diag
         chi_losvd = chi2_block(A_losvd, w, losvd_target, vsig)
         chi_light = chi2_block(A_light, w, light_target, lsig)
+        chi_slack = alphat * sum((slack ./ vsig) .^ 2)
+        light_residual_l2 = norm(light_target .- A_light * w)
+        chi_slack_over_alphat = alphat > 0.0 ? chi_slack / alphat : NaN
+        slack_to_losvd = chi_losvd > 0.0 ? chi_slack_over_alphat / chi_losvd : NaN
         ent = karl_entropy_value(w, wp; entropy_floor=entropy_floor)
-        diag = (entropy=ent, chi=chi_losvd + lambda_light * chi_light, chi_losvd=chi_losvd, chi_light=chi_light, profit=ent - alphat * chi_losvd - lambda_light * chi_light, alphat=alphat, rcond_est=last_diag === nothing ? NaN : last_diag.rcond_est, max_abs_dw=last_diag === nothing ? NaN : last_diag.max_abs_dw, chi_slack=last_diag === nothing ? NaN : last_diag.chi_slack, slack_l2=sum(slack .^ 2), slack_max_abs=isempty(slack) ? 0.0 : maximum(abs.(slack)), N_slack=Nlosvd)
+        diag = (entropy=ent, chi=chi_losvd + lambda_light * chi_light, chi_losvd=chi_losvd, chi_light=chi_light, profit=ent - alphat * chi_losvd - lambda_light * chi_light, alphat=alphat, rcond_est=last_diag === nothing ? NaN : last_diag.rcond_est, max_abs_dw=last_diag === nothing ? NaN : last_diag.max_abs_dw, stepfac=last_diag === nothing ? NaN : last_diag.stepfac, iterations=iterations, converged=converged, constraint_ok=constraint_ok, slack_consistent=slack_consistent, normalized=normalized, chi_slack=chi_slack, chi_slack_over_alphat=chi_slack_over_alphat, slack_to_losvd=slack_to_losvd, normalization_error=normalization_error, light_residual_l2=light_residual_l2, constraint_l2=constraint_l2, slack_residual_l2=slack_residual_l2, slack_l2=sum(slack .^ 2), slack_max_abs=isempty(slack) ? 0.0 : maximum(abs.(slack)), N_slack=Nlosvd, normalization_row_enforced=enforce_normalization, n_active_bound=last_diag === nothing ? 0 : last_diag.n_active_bound, active_passes=last_diag === nothing ? 0 : last_diag.active_passes)
         return (w, true, diag)
     end
     return (w, true)
 end
 
-
-
 function solve_weights_karl_jl(A::Matrix{Float64}, d::Vector{Float64}, sigma::Vector{Float64}; alpha::Float64=DEFAULT_KARL_ALPHA, alphat::Float64=DEFAULT_KARL_ALPHAT, weight_mode=:entropy, wphase=nothing, maxiter::Int=DEFAULT_KARL_MAXITER, seed::UInt=UInt(0), entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, return_diag::Bool=false)
-
     # Live Karl path.
     # weight_mode is accepted for the existing call contract, but the solver now
     # uses Karl entropy + SPEAR updates as the actual production behavior.
@@ -715,46 +859,36 @@ end
 @inline function chi2_block(A::Matrix{Float64}, w::Vector{Float64}, d::Vector{Float64}, sigma::Vector{Float64})
     p = A * w
     s = 0.0
-
     @inbounds for i in eachindex(d)
         si = max(sigma[i], 1e-12)
         rr = (p[i] - d[i]) / si
         s += rr * rr
     end
-
     return s
 end
 
-
 ##CHI##
 function chi2_block_karl_fracnew(A::Matrix{Float64}, w::Vector{Float64}, d::Vector{Float64}, sigma::Vector{Float64}, Nspatial::Int, Nvbin::Int; valid_mask=nothing, invalid_sigma_sentinel::Float64=-666.0, huge_den::Float64=(1e6)^2)
-
     p = A * w
     length(p) == length(d) == length(sigma) || error("chi2_block_karl_fracnew length mismatch")
     Nspatial * Nvbin <= length(d) || error("Nspatial*Nvbin exceeds target length")
-
     mask = if valid_mask === nothing
         [sigma[i] != invalid_sigma_sentinel for i in eachindex(sigma)]
     else
         collect(Bool, valid_mask)
     end
     length(mask) == length(d) || error("valid_mask length mismatch")
-
     s = 0.0
-
     @inbounds for ib in 1:Nspatial
         rows = ((ib - 1) * Nvbin + 1):(ib * Nvbin)
         sumt = 0.0
         sumt2 = 0.0
-
         for row in rows
             sumt += p[row]
             mask[row] && (sumt2 += p[row])
         end
-
         fracnew = (isfinite(sumt) && abs(sumt) > 1e-300) ? (sumt2 / sumt) : 1.0
         (!isfinite(fracnew) || fracnew <= 0.0) && (fracnew = 1.0)
-
         for row in rows
             if !mask[row] || sigma[row] == invalid_sigma_sentinel
                 res = d[row] * fracnew - p[row]
@@ -766,7 +900,6 @@ function chi2_block_karl_fracnew(A::Matrix{Float64}, w::Vector{Float64}, d::Vect
             end
         end
     end
-
     if Nspatial * Nvbin < length(d)
         @inbounds for row in (Nspatial * Nvbin + 1):length(d)
             si = max(sigma[row], 1e-12)
@@ -774,6 +907,5 @@ function chi2_block_karl_fracnew(A::Matrix{Float64}, w::Vector{Float64}, d::Vect
             s += rr * rr
         end
     end
-
     return s
 end

@@ -55,26 +55,16 @@ end
     return xrho * num / max(den, 1e-30)
 end
 
-@inline function nonsingular_isothermal_density_cylindrical(
-    R::Float64,
-    z::Float64,
-    halo,
-)
+@inline function nonsingular_isothermal_density_cylindrical( R::Float64, z::Float64, halo)
     q = halo_q_axis_ratio(halo)
     v0 = f64(halo[:v0_ms])
     rc = max(f64(halo[:rc_m]), 1e-30)
-
     q2 = q * q
     R2 = R * R
     z2 = z * z
     rc2 = rc * rc
-
-    numerator =
-        (2.0 * q2 + 1.0) * rc2 +
-        R2 +
-        (2.0 - 1.0 / q2) * z2
+    numerator = (2.0 * q2 + 1.0) * rc2 + R2 + (2.0 - 1.0 / q2) * z2
     denominator = (rc2 + R2 + z2 / q2)^2
-
     return (v0 * v0 / (4.0 * pi * G * q2)) *
            numerator / max(denominator, 1e-30)
 end
@@ -593,6 +583,20 @@ end
 function halo_from_theta(rho_s, r_s, MBH, ML; halo_type="nfw", alpha=nothing, stellar_model=nothing, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
     ht = Symbol(lowercase(String(halo_type)))
     qh = max(abs(f64(halo_q_axis_ratio)), 1e-6)
+    if ht === :karl_halo
+        error(
+            "halo_type='karl_halo' is disabled: its density functions use parsec-valued " *
+            "radii, while the current halo-table path supplies radii in meters. Repair and " *
+            "validate that unit contract before enabling this mode."
+        )
+    end
+    if abs(qh - 1.0) > 1e-8
+        error(
+            "Flattened halo forces are disabled: the axisymmetric halo force table is not " *
+            "paired with the same axisymmetric potential used for orbit launch energy. " *
+            "Use halo_q_axis_ratio=1.0 until that force-potential pair is repaired."
+        )
+    end
     rs_pc = f64(r_s)
     if ht === :nonsingular_isothermal
         rc_pc = max(rs_pc, 1e-12)

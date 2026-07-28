@@ -1,0 +1,3 @@
+v0,r_c,MBH,ML,chi2,reward,status,proposal_id,refine_passes,chi2_losvd,chi2_light,chi2_total,chi2_inner,chi2_outer,N_inner,N_outer,N_nonzero_weights,effective_N_orbits,max_weight_fraction,halo_type,weight_mode,weight_solver_mode,losvd_score_mode,alphat,halo_q_axis_ratio,karl_halo_params_active
+100.0,1800.0,900000.0,1.0,,,todo,,,,,,,,,,,,,,,,,,,
+100.0,1800.0,900000.0,1.0,7699.871993818456,-7699.371993818456,pass_full,1.0,0.0,7699.871993818456,1240.599146897402,8072.051737887677,5364.487002794824,2335.3849910236327,20.0,543.0,10000.0,5112.722892604765,0.002539368691116633,nonsingular_isothermal,entropy,expanded_cm,standard,1.0,1.0,0.0

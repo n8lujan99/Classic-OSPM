@@ -7,8 +7,7 @@ import multiprocessing as mp
 from Data.Data_Prep.Data_Paths import build_data_paths
 
 Galaxy = "Draco"
-LOCAL_DEBUG = False
-
+LOCAL_DEBUG = True
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
@@ -20,15 +19,19 @@ def detect_workers():
     return mp.cpu_count()
 
 WORKERS = detect_workers()
-
-NORBIT = 1000 if LOCAL_DEBUG else 10000
+NORBIT = 10000 if LOCAL_DEBUG else 10000
 BATCH_SIZE = 1 if LOCAL_DEBUG else 120
 MIN_BATCH_SIZE = 1 if LOCAL_DEBUG else 120
 MAX_BATCH_SIZE = 1 if LOCAL_DEBUG else 360
 CHUNK_SIZE = 1 if LOCAL_DEBUG else 60
+
+FIXED_THETA = [100.0, 1800.0, 900000.0, 1.0] if LOCAL_DEBUG else None
+EVAL_VARIANTS = ["full"] if LOCAL_DEBUG else None
+KARL_ALPHAT = 1.0
+
 LOG_INTERVAL = 1 if LOCAL_DEBUG else 10
 PROF_EVERY = 1 if LOCAL_DEBUG else 20
-EVAL_TIMEOUT_S = 200.0 if LOCAL_DEBUG else 600.0
+EVAL_TIMEOUT_S = 600.0 if LOCAL_DEBUG else 600.0
 MAX_RUNS = 1 if LOCAL_DEBUG else 300000
 
 if NORBIT % 2 != 0:
@@ -119,7 +122,7 @@ CONFIG = {
         "WEIGHT_MODE": "entropy",
         "WEIGHT_SOLVER": "expanded_cm",
         "LOSVD_SCORE_MODE": "standard",
-        "KARL_ALPHAT": 1.0,
+        "KARL_ALPHAT": KARL_ALPHAT,
         "KARL_MAXITER": 60,
         "ENTROPY_FLOOR": 1e-12,
 
@@ -136,7 +139,7 @@ CONFIG = {
     "THETA_BOUNDS": [
         (0.0, 200.0),       # v0, km/s or v_circ for nfw
         (100.0, 1000000.0),  # r_c, pc or r_s for nfw
-        (0.0, 4e6),         # MBH, Msun
+        (0.0, 5e6),         # MBH, Msun
         (0.2, 20.0)],       # ML
     
     # =========================================================
@@ -181,6 +184,8 @@ CONFIG = {
     "MIN_BATCH_SIZE":      MIN_BATCH_SIZE,
     "MAX_BATCH_SIZE":      MAX_BATCH_SIZE,
     "CHUNK_SIZE":          CHUNK_SIZE,
+    "FIXED_THETA":         FIXED_THETA,
+    "EVAL_VARIANTS":       ["full"],
     "_PRINT_EVERY":        10,
     "_print_counter":      0,
     
@@ -224,7 +229,7 @@ CONFIG = {
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),
     "COMPARISON_TAG": "nonsingular_isothermal_full_light",
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_nonsingular_isothermal_full_light.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_multi_full_iso_chi.csv"),
 }
 
 print("[CONFIG] CSV_PATH =", CONFIG["CSV_PATH"])
@@ -257,4 +262,9 @@ comparable to this setup. This run switches both the stellar light grid and the
 surface-brightness constraints to the full Odenkirchen profile while keeping the
 Walker kinematic bins. The daemon run settings now match Segue 1. The remaining
 configuration differences are intended to be galaxy-specific.
+
+draco_nonsingular_isothermal_full_light
+
+draco_multi_full_iso_chi.csv 28 July 2026
+
 """
