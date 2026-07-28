@@ -7,7 +7,7 @@ import multiprocessing as mp
 from Data.Data_Prep.Data_Paths import build_data_paths
 
 Galaxy = "Draco"
-LOCAL_DEBUG = True
+LOCAL_DEBUG = False
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
