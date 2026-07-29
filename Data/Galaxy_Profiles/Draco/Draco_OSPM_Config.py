@@ -23,15 +23,18 @@ NORBIT = 10000 if LOCAL_DEBUG else 10000
 BATCH_SIZE = 1 if LOCAL_DEBUG else 120
 MIN_BATCH_SIZE = 1 if LOCAL_DEBUG else 120
 MAX_BATCH_SIZE = 1 if LOCAL_DEBUG else 360
-CHUNK_SIZE = 1 if LOCAL_DEBUG else 60
+# Keep one parameter-model owner per Julia thread during the main body of a
+# local/40-core run.  Larger allocations are capped to keep the simultaneous
+# 627×NORBIT matrices bounded; surplus threads remain orbit helpers.
+CHUNK_SIZE = 1 if LOCAL_DEBUG else min(WORKERS, 40)
 
 FIXED_THETA = [100.0, 1800.0, 900000.0, 1.0] if LOCAL_DEBUG else None
 EVAL_VARIANTS = ["full"] if LOCAL_DEBUG else None
 KARL_ALPHAT = 1.0
-
+CSV_FLUSH_INTERVAL = 10
 LOG_INTERVAL = 1 if LOCAL_DEBUG else 10
 PROF_EVERY = 1 if LOCAL_DEBUG else 20
-EVAL_TIMEOUT_S = 600.0 if LOCAL_DEBUG else 600.0
+EVAL_TIMEOUT_S = 600.0 if LOCAL_DEBUG else 1200.0 #was 600 but keeps timing out going to raise it to 1200
 MAX_RUNS = 1 if LOCAL_DEBUG else 300000
 
 if NORBIT % 2 != 0:
@@ -42,15 +45,15 @@ CONFIG = {
     # Parallelization
     # =========================================================
     "N_WORKERS": WORKERS,
-    
+
     # =========================================================
     # Identity
     # =========================================================
     "MODE":        "karl",
     "GALAXY":      Galaxy,
     "HALO_TYPE":   "nonsingular_isothermal", #  a few options "nonsingular_isothermal" and "NFW"
-    "HALO_PARAMETERIZATION": "v0_rc", # two options: "v0_rc" or "vcirc_rs" which are cored and nfw respectively 
-    
+    "HALO_PARAMETERIZATION": "v0_rc", # two options: "v0_rc" or "vcirc_rs" which are cored and nfw respectively
+
     # =========================================================
     # Galaxy geometry
     # =========================================================
@@ -62,8 +65,8 @@ CONFIG = {
     "R_HALF_LIGHT_PC":  221.0,
     "R_MAX_STARS_PC":   1500.0,
     "VLOS_COL":        "vlos",
-    "V_SYS_KMS":       -291.68214888089926, 
-    
+    "V_SYS_KMS":       -291.68214888089926,
+
     # =========================================================
     # Stellar tracer/light model
     # =========================================================
@@ -91,7 +94,7 @@ CONFIG = {
     "RADIUS_DEG":   0.6,
     "RUWE_MAX":     1.4,
     "PAR_SNR_MIN":  5.0,
-    
+
     # =========================================================
     # Column authority
     # =========================================================
@@ -100,13 +103,13 @@ CONFIG = {
     "STAR_VERR_COL":   "vlos_err",
     "RA_COL":          "ra",
     "DEC_COL":         "dec",
-    
+
     # =========================================================
     # Draco-style observed products
     # =========================================================
     "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "draco_oden_kirchen2001_surface_brightness_profile.csv"),
     "KINEMATIC_BINS_CSV":     str(PROFILE_ROOT / "draco_walker2023_kinematic_bins_20.csv"),
-    
+
     # =========================================================
     # OSPM numerical setup
     # =========================================================
@@ -117,6 +120,21 @@ CONFIG = {
         "MIN_STARS_PER_BIN": 20,
         "LAMBDA_LIGHT": 0.3,
         "NTHETA_LAUNCH": 9,
+        # Orbit-library coverage and scheduler
+        "ORBIT_FILL_PCT": 0.85,
+        "ORBIT_REGIONAL_FLOOR": 0.80,
+        "ORBIT_MAX_REGIONAL_GAP": 0.10,
+        "ORBIT_SHELL_BANDS": 8,
+        "ORBIT_COVERAGE_CHECK_EVERY": 50,
+
+        # Warning classification; warned libraries still reach weights
+        "ORBIT_WARN_FILL_PCT": 0.95,
+        "ORBIT_WARN_SUCCESS_PCT": 0.99,
+        "ORBIT_WARN_REGIONAL_FLOOR": 0.80,
+        "ORBIT_WARN_MAX_REGIONAL_GAP": 0.15,
+
+        # 0 automatically reserves about one-third of Julia threads as helpers
+        "MODEL_OWNER_LIMIT": 0,
 
         # Live Karl weight/scoring path.
         "WEIGHT_MODE": "entropy",
@@ -130,7 +148,7 @@ CONFIG = {
         # Stellar flattening stays in STELLAR_MODEL["q_axis_ratio"].
         "HALO_Q_AXIS_RATIO": 1.0,
     },
-    
+
     # =========================================================
     # Parameter space
     # =========================================================
@@ -141,14 +159,14 @@ CONFIG = {
         (100.0, 1000000.0),  # r_c, pc or r_s for nfw
         (0.0, 5e6),         # MBH, Msun
         (0.2, 20.0)],       # ML
-    
+
     # =========================================================
     # Penalties
     # =========================================================
     "PEN_SPHERE_STRENGTH": 200,
     "PEN_SPHERE_POWER":    2.0,
     "PEN_SLOPE_STRENGTH":  5000,
-    
+
     # =========================================================
     # Physical domain
     # =========================================================
@@ -161,10 +179,30 @@ CONFIG = {
     # =========================================================
     # Deck semantics
     # =========================================================
-    "REQUIRE_COLUMNS": [ "v0", "r_c", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light", 
+    "REQUIRE_COLUMNS": [ "v0", "r_c", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light",
         "chi2_total", "chi2_inner", "chi2_outer", "N_inner", "N_outer", "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction", "halo_type",
         # Runtime contract diagnostics:
         "weight_mode", "weight_solver_mode", "losvd_score_mode", "alphat", "halo_q_axis_ratio", "karl_halo_params_active",
+        # Orbit-library coverage diagnostics:
+        "coverage_status",
+        "coverage_strict",
+        "coverage_issue_region",
+        "coverage_issue_axis",
+        "coverage_issue_shell_bands",
+        "coverage_reasons",
+        "coverage_fraction",
+        "coverage_attempted_fraction",
+        "coverage_success_fraction",
+        "coverage_shell_min",
+        "coverage_lfrac_min",
+        "coverage_theta_min",
+        "coverage_shell_gap",
+        "coverage_lfrac_gap",
+        "coverage_theta_gap",
+        "coverage_joint_holes",
+        "coverage_deadline_hit",
+        "successful_base_orbits",
+        "planned_base_orbits",
     ],
 
     "ALLOWED_STATUSES": [
@@ -176,7 +214,7 @@ CONFIG = {
         "numeric_fail_ml_up", "numeric_fail_ml_down", "orbit_fail_bh_up", "orbit_fail_bh_down", "orbit_fail_halo_up", "orbit_fail_halo_down", "orbit_fail_ml_up", "orbit_fail_ml_down",
     ],
     "FILL_DEFAULT_STATUS": "todo",
-    
+
     # =========================================================
     # Sampling and control
     # =========================================================
@@ -184,11 +222,12 @@ CONFIG = {
     "MIN_BATCH_SIZE":      MIN_BATCH_SIZE,
     "MAX_BATCH_SIZE":      MAX_BATCH_SIZE,
     "CHUNK_SIZE":          CHUNK_SIZE,
+    "CSV_FLUSH_INTERVAL":  CSV_FLUSH_INTERVAL,
     "FIXED_THETA":         FIXED_THETA,
     "EVAL_VARIANTS":       EVAL_VARIANTS,
     "_PRINT_EVERY":        10,
     "_print_counter":      0,
-    
+
     # =========================================================
     # AI / learning
     # =========================================================
@@ -206,7 +245,7 @@ CONFIG = {
     "FLAT_THRESHOLD":        1e-6,
     "FLAT_PATIENCE":         10,
     "AI_RESET_ON_FLAT":      True,
-    
+
     # =========================================================
     # Termination
     # =========================================================
@@ -216,19 +255,17 @@ CONFIG = {
     "LOG_INTERVAL":          LOG_INTERVAL,
     "PROF_EVERY":            PROF_EVERY,
     "EVAL_TIMEOUT_S":        EVAL_TIMEOUT_S,
-    
+
     # =========================================================
     # Physical constants
     # =========================================================
     "G":    6.67430e-11,
     "Msun": 1.98847e30,
-    
+
     # =========================================================
     # Paths
     # =========================================================
-    **build_data_paths(PROFILE_ROOT),
-    "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),
-    "COMPARISON_TAG": "nonsingular_isothermal_full_light",
+    **build_data_paths(PROFILE_ROOT), "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),  "COMPARISON_TAG": "nonsingular_isothermal_full_light",
     "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_multi_full_iso_chi.csv"),
 }
 

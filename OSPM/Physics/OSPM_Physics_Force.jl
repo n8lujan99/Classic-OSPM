@@ -198,9 +198,9 @@ end
     if stype === :plummer
         return hash((stype, geom, get(sm, :Ltot, nothing), get(sm, :a_pc, nothing)))
     elseif stype === :karl_light_grid
-        return hash((stype, geom, get(sm, :grid_csv, nothing), get(sm, :Ltot, nothing), get(sm, :radius_col, nothing), 
-        get(sm, :theta_col, nothing), get(sm, :nu_col, nothing), get(sm, :lenc_frac_col, nothing), get(sm, :R_cyl_col, nothing), 
-        get(sm, :z_col, nothing), get(sm, :volume_col, nothing), get(sm, :luminosity_col, nothing), get(sm, :q_axis_ratio, nothing), 
+        return hash((stype, geom, get(sm, :grid_csv, nothing), get(sm, :Ltot, nothing), get(sm, :radius_col, nothing),
+        get(sm, :theta_col, nothing), get(sm, :nu_col, nothing), get(sm, :lenc_frac_col, nothing), get(sm, :R_cyl_col, nothing),
+        get(sm, :z_col, nothing), get(sm, :volume_col, nothing), get(sm, :luminosity_col, nothing), get(sm, :q_axis_ratio, nothing),
         get(sm, :force_softening_pc, nothing), get(sm, :force_nR, nothing), get(sm, :force_nZ, nothing), get(sm, :force_nphi, nothing)))
     end
     return hash((stype, geom, get(sm, :Ltot, nothing)))
@@ -390,9 +390,11 @@ function build_axisymmetric_force_table( grid, ML::Float64; nR::Int=96, nZ::Int=
     FZ = zeros(Float64, nR, nZ)
     Phi = zeros(Float64, nR, nZ)
     M_cells = Float64.( ML .* grid.L_cell .* Msun)
-    @inbounds for i in 1:nR
+    # Every table cell is independent.  This table is now built only once for
+    # a given stellar model, so use the full Julia pool for that one-time cost.
+    Threads.@threads :dynamic for i in 1:nR
         Rf = R_axis[i]
-        for j in 1:nZ
+        @inbounds for j in 1:nZ
             zf = z_axis[j]
             fr, fz, phi =
                 _axisym_force_from_mass_cells( Rf, zf, grid.R_m, grid.z_m, M_cells, grid.soft_m; nphi=nphi, return_potential=true)
@@ -727,6 +729,71 @@ function build_karl_light_grid_model(stellar_model)
     return ( R_m = Float64.(rs) .* pc, Lenc_frac = Float64.(fs), Ltot = f64(sm[:Ltot]) )
 end
 
+# The stellar geometry is fixed throughout a daemon run.  Its force and
+# potential are exactly linear in M/L, so cache a unit-M/L component instead
+# of rebuilding the same 96×96×32 table for every proposed parameter point.
+const _STELLAR_COMPONENT_CACHE = Dict{UInt64,Any}()
+const _STELLAR_COMPONENT_LOCK = ReentrantLock()
+
+function _build_unit_stellar_component(stellar_model)
+    sm = normalize_stellar_model(stellar_model)
+    stype = stellar_model_type(sm)
+    geom = stellar_model_geometry(sm)
+
+    stype === :karl_light_grid ||
+        error("Unit stellar-component caching is only used for karl_light_grid models")
+
+    if geom === :axisymmetric_density_grid
+        grid = build_axisymmetric_light_grid_model(sm)
+        nR = haskey(sm, :force_nR) ? Int(f64(sm[:force_nR])) : 96
+        nZ = haskey(sm, :force_nZ) ? Int(f64(sm[:force_nZ])) : 96
+        nphi = haskey(sm, :force_nphi) ? Int(f64(sm[:force_nphi])) : 32
+        table = build_axisymmetric_force_table(grid, 1.0; nR=nR, nZ=nZ, nphi=nphi)
+        return (grid=grid, axis_table=table, geometry=geom)
+    end
+
+    grid = build_karl_light_grid_model(sm)
+    return (grid=grid, axis_table=nothing, geometry=geom)
+end
+
+function _get_unit_stellar_component(stellar_model)
+    sig = stellar_model_sig(stellar_model)
+
+    lock(_STELLAR_COMPONENT_LOCK)
+    try
+        cached = get(_STELLAR_COMPONENT_CACHE, sig, nothing)
+        cached !== nothing && return cached
+
+        started_ns = time_ns()
+        println(
+            "[STELLAR FORCE CACHE] building unit-ML component",
+            " geometry=", stellar_model_geometry(stellar_model),
+            " julia_threads=", Threads.nthreads(),
+        )
+        flush(stdout)
+
+        component = _build_unit_stellar_component(stellar_model)
+        _STELLAR_COMPONENT_CACHE[sig] = component
+
+        println(
+            "[STELLAR FORCE CACHE] ready",
+            " elapsed_s=", round((time_ns() - started_ns) / 1e9; digits=2),
+        )
+        flush(stdout)
+        return component
+    finally
+        unlock(_STELLAR_COMPONENT_LOCK)
+    end
+end
+
+function prewarm_stellar_force_cache(stellar_model)
+    stellar_model === nothing && return nothing
+    sm = normalize_stellar_model(stellar_model)
+    stellar_model_type(sm) === :karl_light_grid || return nothing
+    _get_unit_stellar_component(sm)
+    return nothing
+end
+
 function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
     halo = normalize_halo(halo)
     MBH  = f64(halo[:MBH])
@@ -743,16 +810,9 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
     if has_stars
         stype0 = stellar_model_type(stellar_model)
         if stype0 === :karl_light_grid
-            if stellar_geom === :axisymmetric_density_grid
-                sm = normalize_stellar_model(stellar_model)
-                stellar_grid = build_axisymmetric_light_grid_model(sm)
-                nR = haskey(sm, :force_nR) ? Int(f64(sm[:force_nR])) : 96
-                nZ = haskey(sm, :force_nZ) ? Int(f64(sm[:force_nZ])) : 96
-                nphi = haskey(sm, :force_nphi) ? Int(f64(sm[:force_nphi])) : 32
-                stellar_axis_table = build_axisymmetric_force_table( stellar_grid, ML; nR=nR, nZ=nZ, nphi=nphi )
-            else
-                stellar_grid = build_karl_light_grid_model(stellar_model)
-            end
+            component = _get_unit_stellar_component(stellar_model)
+            stellar_grid = component.grid
+            stellar_axis_table = component.axis_table
         elseif stype0 === :plummer
             stellar_grid = nothing
         else
@@ -814,7 +874,7 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
                 st, ct = _sincos_safe(theta)
                 Rf = rr * st
                 zf = rr * ct
-                return _interp_axisym_potential(stellar_axis_table, Rf, zf)
+                return ML * _interp_axisym_potential(stellar_axis_table, Rf, zf)
             end
             return stellar_Phi_karl_light_grid(rr, ML, stellar_grid)
         else
@@ -852,7 +912,10 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
                 frst = -G * Mst / (rr * rr)
             elseif stype === :karl_light_grid
                 if stellar_geom === :axisymmetric_density_grid
-                    frst, fth_st = stellar_force_axisymmetric_spherical(rr, f64(theta), stellar_axis_table)
+                    fr_unit, fth_unit =
+                        stellar_force_axisymmetric_spherical(rr, f64(theta), stellar_axis_table)
+                    frst = ML * fr_unit
+                    fth_st = ML * fth_unit
                 else
                     Mst = stellar_Menc_karl_light_grid(rr, ML, stellar_grid)
                     frst = -G * Mst / (rr * rr)
@@ -890,6 +953,13 @@ function get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing,
     lock(_HALO_LOCK)
     ctx = get(_HALO_CTX_CACHE, key, nothing)
     if ctx === nothing
+        # Continuous parameter searches rarely revisit an exact four-parameter
+        # context.  Bound this cache so old closures do not accumulate for the
+        # lifetime of a long daemon run.  The expensive reusable stellar table
+        # lives in _STELLAR_COMPONENT_CACHE and is not evicted here.
+        if length(_HALO_CTX_CACHE) >= 256
+            delete!(_HALO_CTX_CACHE, first(keys(_HALO_CTX_CACHE)))
+        end
         _HALO_CTX_CACHE[key] = newctx
         ctx = newctx
     end
