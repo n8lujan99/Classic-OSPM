@@ -16,14 +16,12 @@ def _load_surface_brightness_profile(path):
     missing = required - set(sb.columns)
     if missing:
         raise KeyError(f"Surface brightness profile missing columns: {sorted(missing)}")
-    out = {
-        "R_pc": sb["R_pc"].to_numpy(float),
+    out = { "R_pc": sb["R_pc"].to_numpy(float),
         "R_inner_pc": sb["R_inner_pc"].to_numpy(float),
         "R_outer_pc": sb["R_outer_pc"].to_numpy(float),
         "light_frac": sb["light_frac"].to_numpy(float),
         "Sigma": sb["Sigma"].to_numpy(float) if "Sigma" in sb.columns else None,
-        "Sigma_err": sb["Sigma_err"].to_numpy(float) if "Sigma_err" in sb.columns else None,
-    }
+        "Sigma_err": sb["Sigma_err"].to_numpy(float) if "Sigma_err" in sb.columns else None}
     return out
 
 def _load_kinematic_bins(path):
@@ -33,14 +31,12 @@ def _load_kinematic_bins(path):
     if missing:
         raise KeyError(f"Kinematic bin file missing columns: {sorted(missing)}")
     edges = np.r_[kb["R_inner_pc"].to_numpy(float)[0], kb["R_outer_pc"].to_numpy(float)]
-    return {
-        "bin_id": kb["bin_id"].to_numpy(int),
+    return { "bin_id": kb["bin_id"].to_numpy(int),
         "R_inner_pc": kb["R_inner_pc"].to_numpy(float),
         "R_outer_pc": kb["R_outer_pc"].to_numpy(float),
         "R_mid_pc": kb["R_mid_pc"].to_numpy(float),
         "N_vlos": kb["N_vlos"].to_numpy(int),
-        "edges_pc": edges,
-    }
+        "edges_pc": edges}
 
 def _validate_surface_brightness_profile(surface_brightness_profile):
     if surface_brightness_profile is None:
@@ -219,8 +215,6 @@ class OSPMObservablesStellar:
         self.Norbit = int(Norbit)
         self.Nstar = len(self.R_star_m)
         self.Nstar_vlos = int(self.valid_vlos.sum())
-        self.Nocc = 0
-        self.lambda_occ = 1.0
 
     @classmethod
     def from_star_table(cls, csv_path, *, r_col="r_pc", v_col="vlos", verr_col="vlos_err", has_vlos_col="has_vlos", inclination_deg, Norbit, stellar_model=None, surface_brightness_path=None, kinematic_bins_path=None, config=None):

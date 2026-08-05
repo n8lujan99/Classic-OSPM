@@ -29,9 +29,6 @@
 #   .is_forbidden(theta)   point → bool                          — was this point marked forbidden?
 #   .nearest_distance(…)   point,tol → float                     — closest existing point
 #
-# Corpo(engine)            physics_engine → wrapper              — calls Julia physics, returns status+chi²
-#   .eval(theta)           [float] → (status_str, chi2)
-#
 # Fixer(cfg)               config → AI gatekeeper               — unlocks AI after enough passes
 #   .unlock(deck,runner)   deck,runner → (side-effect)           — flips runner.ai=True when ready
 #   .reward(status,chi2)   str,float → float                     — maps eval outcome to scalar reward
@@ -50,7 +47,7 @@
 # run_daemon(config,engine)  config,engine → None                — outer loop: propose→eval→record→train
 # ──────────────────────────────────────────────────────────────────────────────
 
-import os, time, sys, traceback, json
+import os, time, traceback, json
 import numpy as np, pandas as pd
 import torch, torch.nn as nn
 from collections import deque
@@ -68,11 +65,7 @@ def min_dist(theta, arr):
 def is_real_pass(status):
     return str(status) == "pass_full"
 
-def is_diagnostic_pass(status):
-    status = str(status)
-    return status.startswith("pass") and status != "pass_full"
-
-def batch_result_status(code, chi2, weight_solver_mode):
+def batch_result_status(code, chi2):
     valid_pass = (int(code) == 0) and np.isfinite(chi2) and (float(chi2) > 1e-12)
     if valid_pass:
         return "pass", float(chi2)
@@ -319,7 +312,7 @@ class Agent(nn.Module):
     @torch.no_grad()
     def act(self, x, noise):
         return torch.clamp(self.forward(x) + noise * torch.randn_like(x), -1.0, 1.0)
-    
+
 class Deck:
     def __init__(self, config):
         self.config, self.path, self.cols = config, config["CSV_PATH"], config["REQUIRE_COLUMNS"]
@@ -371,9 +364,9 @@ class Deck:
         A = self._all_params(); m = np.all(np.abs(A - theta) < tol, axis=1)
         return np.linalg.norm(A[m] - theta, axis=1).min() if m.any() else np.inf
 
-    def add(self, theta, chi2, reward, pid, status, refine_passes=None, diag=None):
+    def add(self, theta, chi2, reward, pid, status, diag=None):
         row_dict = {k: theta[i] for i, k in enumerate(self.params)}
-        row_dict |= dict( chi2=chi2, reward=reward, status=status, proposal_id=pid, refine_passes=refine_passes)
+        row_dict |= dict(chi2=chi2, reward=reward, status=status, proposal_id=pid)
         if diag is not None:
             row_dict.update(diag)
         self._buf.append([row_dict.get(k) for k in self.cols])
@@ -384,17 +377,6 @@ class Deck:
             self._flush_buf()
             self.save()
             self._dirty = 0
-   
-class Corpo:
-    def __init__(self, engine): self.engine = engine
-    def eval(self, theta):
-        try:
-            chi2 = float(self.engine(theta))
-            return ("pass", chi2) if np.isfinite(chi2) else ("numeric_fail", np.inf)
-        except FloatingPointError: return "numeric_fail", np.inf
-        except RuntimeError as e:
-            import traceback; print("[Corpo] RuntimeError:", repr(e)); traceback.print_exc(); raise
-        except Exception: raise
 
 class Fixer:
     def __init__(self, cfg): self.warmup = int(cfg.get("AI_START_AFTER", 500)); self.unlocked = False
@@ -466,7 +448,7 @@ class Runner:
         top = good.nsmallest(min(len(good), 200), "chi2")
         chi_std = top["chi2"].std(); spread = np.std(top[self.cols].values, axis=0)
         span = np.array([hi - lo for lo, hi in self.bounds]); rel_spread = np.mean(spread / span)
-        return (chi_std < 1.0) and (rel_spread < 0.15) and ("refine_passes" in good.columns and good["refine_passes"].fillna(0).median() >= self.cfg.get("MAX_REFINE", 0))
+        return (chi_std < 1.0) and (rel_spread < 0.15)
 
     def step_scale(self, deck):
         if not self.ai or not self.fill_mode: return 0.2
@@ -519,10 +501,10 @@ class Runner:
         yt = torch.tensor(y, dtype=torch.float32)
         loss = ((self.model(Xt) - yt) ** 2).mean()
         self.opt_m.zero_grad(); loss.backward(); self.opt_m.step()
-        
+
 def run_daemon(config, physics_engine):
     from collections import defaultdict
-    deck, runner, corpo, fixer = Deck(config), Runner(config), Corpo(physics_engine), Fixer(config)
+    deck, runner, fixer = Deck(config), Runner(config), Fixer(config)
     halo_parameterization = normalize_halo_parameterization(config.get("HALO_PARAMETERIZATION", "rho_rs"))
     fixed_theta = _fixed_theta_from_config(config)
     if len(config["PARAMETER_NAMES"]) < 4: raise ValueError("PARAMETER_NAMES must cover four theta entries")
@@ -545,157 +527,146 @@ def run_daemon(config, physics_engine):
     runs, best = 0, np.inf
     t_acc, t_cnt = defaultdict(float), defaultdict(int); PROF_EVERY = int(config.get("PROF_EVERY", 25))
     obs = getattr(physics_engine, "__wrapped_obs__", None)
+    if obs is None:
+        raise RuntimeError("The Karl daemon requires a wrapped spherical observable engine")
+
     base_halo_type = str(getattr(physics_engine, "__halo_type__", config.get("HALO_TYPE", "nfw"))).strip().lower()
-    halo_type = base_halo_type
-    use_batch = obs is not None
+    from juliacall import Main; import juliacall
+    surface_brightness_profile = _get_surface_brightness_profile(config, physics_engine, obs)
+    obs_cfg = _observable_config(config)
+    engine_cfg = getattr(physics_engine, "__karl_config__", {}) or {}
+    if not isinstance(engine_cfg, dict):
+        raise TypeError("physics_engine.__karl_config__ must be a dict when provided")
 
-    if use_batch:
-        from juliacall import Main; import juliacall
-        jl_nothing = Main.seval("nothing")
-        Main.seval("setindex_b(A, x, i) = (A[i] = x; A)")
-        surface_brightness_profile = _get_surface_brightness_profile(config, physics_engine, obs)
-        surface_brightness_profile_jl = _jl_surface_brightness_profile(surface_brightness_profile, Main)
-        obs_cfg = _observable_config(config)
-        engine_cfg = getattr(physics_engine, "__karl_config__", {}) or {}
-        if not isinstance(engine_cfg, dict):
-            raise TypeError("physics_engine.__karl_config__ must be a dict when provided")
-        def opt(*names, default=None):
-            for name in names:
-                if name in obs_cfg and obs_cfg[name] is not None:
-                    return obs_cfg[name]
-                if name in engine_cfg and engine_cfg[name] is not None:
-                    return engine_cfg[name]
-                if name in config and config[name] is not None:
-                    return config[name]
-            for name in names:
-                if hasattr(obs, name):
-                    value = getattr(obs, name)
-                    if value is not None:
-                        return value
-            return default
+    def opt(*names, default=None):
+        for name in names:
+            if name in obs_cfg and obs_cfg[name] is not None:
+                return obs_cfg[name]
+            if name in engine_cfg and engine_cfg[name] is not None:
+                return engine_cfg[name]
+            if name in config and config[name] is not None:
+                return config[name]
+        for name in names:
+            if hasattr(obs, name):
+                value = getattr(obs, name)
+                if value is not None:
+                    return value
+        return default
 
-        stellar_model = _clean_stellar_model(opt("STELLAR_MODEL", "stellar_model", default=getattr(obs, "stellar_model", None)))
-        if stellar_model is None:
-            raise RuntimeError("stellar_model is required for the Karl daemon path; M/L cannot enter the force without it")
-        lambda_light = float(opt("LAMBDA_LIGHT", "LAMBDA_OCC", "lambda_light", "lambda_occ", default=1.0))
-        min_stars_per_bin = int(opt("MIN_STARS_PER_BIN", "min_stars_per_bin", default=20))
-        nvbin = int(opt("NVBIN", "Nvbin", "nvbin", default=21))
-        ntheta_launch = int(opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9))
-        velocity_edges = opt("VELOCITY_EDGES", "velocity_edges", default=None)
-        alpha = float(opt("KARL_ALPHA", "alpha", default=config.get("ALPHA", 1e-4)))
-        alphat = float(opt("KARL_ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
-        maxiter = int(opt("KARL_MAXITER", "maxiter", default=config.get("MAXITER", 60)))
-        weight_mode = str(opt("WEIGHT_MODE", "weight_mode", default="entropy")).strip().lower()
-        weight_solver_mode = str(opt("WEIGHT_SOLVER", "weight_solver_mode", default="orbit_only")).strip().lower()
-        losvd_score_mode = str(opt("LOSVD_SCORE_MODE", "losvd_score_mode", default="karl_fracnew")).strip().lower()
-        entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=config.get("ENTROPY_FLOOR", 1e-12)))
-        halo_q_axis_ratio = float(opt("HALO_Q_AXIS_RATIO", "halo_q_axis_ratio", default=config.get("HALO_Q_AXIS_RATIO", 1.0)))
-        karl_halo_params = _clean_karl_halo_params(opt("KARL_HALO_PARAMS", "karl_halo_params", default=config.get("KARL_HALO_PARAMS", None)))
-        orbit_fill_pct = float(opt("ORBIT_FILL_PCT", default=0.85))
-        orbit_regional_floor = float(opt("ORBIT_REGIONAL_FLOOR", default=0.80))
-        orbit_max_regional_gap = float(opt("ORBIT_MAX_REGIONAL_GAP", default=0.10))
-        orbit_shell_bands = int(opt("ORBIT_SHELL_BANDS", default=8))
-        orbit_coverage_check_every = int(opt("ORBIT_COVERAGE_CHECK_EVERY", default=50))
-        orbit_warn_fill_pct = float(opt("ORBIT_WARN_FILL_PCT", default=0.95))
-        orbit_warn_success_pct = float(opt("ORBIT_WARN_SUCCESS_PCT", default=0.99))
-        orbit_warn_regional_floor = float(opt("ORBIT_WARN_REGIONAL_FLOOR", default=0.80))
-        orbit_warn_max_regional_gap = float(opt("ORBIT_WARN_MAX_REGIONAL_GAP", default=0.15))
-        model_owner_limit = int(opt("MODEL_OWNER_LIMIT", default=0))
-        
-        
-        if base_halo_type == "karl_halo":
-            raise RuntimeError(
-                "HALO_TYPE='karl_halo' is disabled: its density functions use parsec-valued "
-                "radii, while the current halo-table path supplies radii in meters"
-            )
-        if abs(halo_q_axis_ratio - 1.0) > 1e-8:
-            raise RuntimeError(
-                "Flattened halo forces are disabled because their axisymmetric force table "
-                "does not share the potential used for orbit launch energy; set "
-                "HALO_Q_AXIS_RATIO=1.0"
-            )
-        R_star_m = getattr(physics_engine, "__R_star_m__", getattr(obs, "R_star_m", None))
-        valid_vlos = getattr(physics_engine, "__valid_vlos__", getattr(obs, "valid_vlos", None))
-        v_star_mps = getattr(physics_engine, "__v_star_mps__", getattr(obs, "v_star_mps", None))
-        verr_star_mps = getattr(physics_engine, "__verr_star_mps__", getattr(obs, "verr_star_mps", None))
-        if R_star_m is None or valid_vlos is None or v_star_mps is None or verr_star_mps is None:
-            raise RuntimeError("wrapped physics engine must expose R_star_m, valid_vlos, v_star_mps, and verr_star_mps")
-        R_star_m = np.asarray(R_star_m, float).ravel()
-        valid_vlos = np.asarray(valid_vlos, bool).ravel()
-        v_star_mps = np.asarray(v_star_mps, float).ravel()
-        verr_star_mps = np.asarray(verr_star_mps, float).ravel()
-        if not (R_star_m.size == valid_vlos.size == v_star_mps.size == verr_star_mps.size):
-            raise RuntimeError( "wrapped physics arrays must match lengths: " f"R={R_star_m.size}, valid={valid_vlos.size}, v={v_star_mps.size}, verr={verr_star_mps.size}" )
-        kinematic_bin_edges = getattr(physics_engine, "__kinematic_bin_edges_pc__", None)
-        if kinematic_bin_edges is None:
-            kinematic_bin_edges = engine_cfg.get("kinematic_bin_edges_pc", None)
-        if kinematic_bin_edges is None:
-            kinematic_bin_edges = getattr(obs, "kinematic_bin_edges_pc", None)
-        if kinematic_bin_edges is None:
-            raise RuntimeError("kinematic_bin_edges_pc is required; no adaptive radial-bin fallback is allowed")
-        light_bin_edges = getattr(physics_engine, "__light_bin_edges_pc__", None)
-        if light_bin_edges is None:
-            light_bin_edges = engine_cfg.get("light_bin_edges_pc", None)
-        if light_bin_edges is None:
-            light_bin_edges = getattr(obs, "light_bin_edges_pc", None)
-        if light_bin_edges is None:
-            raise RuntimeError("light_bin_edges_pc is required for Karl-style light constraints")
-        kinematic_bin_edges = np.asarray(kinematic_bin_edges, float).ravel() * 3.0856775814913673e16
-        light_bin_edges = np.asarray(light_bin_edges, float).ravel() * 3.0856775814913673e16
-        n_light = max(0, len(light_bin_edges) - 1)
-        n_kin = max(0, len(kinematic_bin_edges) - 1)
-        r_light_max_pc = float(light_bin_edges[-1] / 3.0856775814913673e16) if len(light_bin_edges) else float("nan")
-        r_kin_max_pc = float(kinematic_bin_edges[-1] / 3.0856775814913673e16) if len(kinematic_bin_edges) else float("nan")
-        nocc_compat = int(opt("NBINS_OCC", "nbins_occ", default=0))
-        Main._stellar_model_jl = _jl_primitive_dict(stellar_model, Main, "stellar_model")
-        Main._karl_halo_params_jl = _jl_primitive_dict(karl_halo_params, Main, "karl_halo_params")
-        if velocity_edges is None:
-            Main._velocity_edges_jl = Main.seval("nothing")
-        else:
-            Main._velocity_edges_jl = _jl_vector_f64(velocity_edges, Main, name="velocity_edges")
-        Main.seval("""
-            _stellar_model_jl isa AbstractDict ||
-                error("stellar_model handoff must be a Julia dictionary")
-            (_karl_halo_params_jl === nothing || _karl_halo_params_jl isa AbstractDict) ||
-                error("karl_halo_params handoff must be nothing or a Julia dictionary")
-            (_velocity_edges_jl === nothing || _velocity_edges_jl isa AbstractVector{<:Real}) ||
-                error("velocity_edges handoff must be nothing or a real Julia vector")
-            println(
-                "[Daemon] Julia handoff — stellar_model=", typeof(_stellar_model_jl),
-                ", karl_halo_params=", typeof(_karl_halo_params_jl),
-                ", velocity_edges=", typeof(_velocity_edges_jl),
-            )
-        """)
-        
-        jl_batch = Main.OSPMPhysicsSpherical.evaluate_batch_theta
-        sini = float(obs.sini)
-        Norbit = int(obs.Norbit)
-        if Norbit % 2 != 0:
-            raise RuntimeError( f"Karl paired-orbit Spherical path requires even Norbit because Norbit is the final column count; got Norbit={Norbit}")
-        nstar_vlos = int(np.count_nonzero(valid_vlos))
-        print(
-            f"[Daemon] Karl batch mode ON — Norbit={Norbit}, Nbase_orbit={Norbit // 2}, Nstar_vlos={nstar_vlos}, "
-            f"min_stars_per_bin={min_stars_per_bin}, Nvbin={nvbin}, Ntheta_launch={ntheta_launch}, "
-            f"weight_mode={weight_mode}, weight_solver_mode={weight_solver_mode}, "
-            f"losvd_score_mode={losvd_score_mode}, halo_q={halo_q_axis_ratio}, "
-            f"karl_halo_params_active={karl_halo_params is not None}",
-            flush=True,
+    stellar_model = _clean_stellar_model(opt("STELLAR_MODEL", "stellar_model", default=getattr(obs, "stellar_model", None)))
+    if stellar_model is None:
+        raise RuntimeError("stellar_model is required for the Karl daemon path; M/L cannot enter the force without it")
+    nvbin = int(opt("NVBIN", "Nvbin", "nvbin", default=21))
+    ntheta_launch = int(opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9))
+    velocity_edges = opt("VELOCITY_EDGES", "velocity_edges", default=None)
+    alphat = float(opt("KARL_ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
+    light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
+    delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
+    maxiter = int(opt("KARL_MAXITER", "maxiter", default=config.get("MAXITER", 60)))
+    entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=config.get("ENTROPY_FLOOR", 1e-12)))
+    halo_q_axis_ratio = float(opt("HALO_Q_AXIS_RATIO", "halo_q_axis_ratio", default=config.get("HALO_Q_AXIS_RATIO", 1.0)))
+    karl_halo_params = _clean_karl_halo_params(opt("KARL_HALO_PARAMS", "karl_halo_params", default=config.get("KARL_HALO_PARAMS", None)))
+    orbit_fill_pct = float(opt("ORBIT_FILL_PCT", default=0.85))
+    orbit_regional_floor = float(opt("ORBIT_REGIONAL_FLOOR", default=0.80))
+    orbit_max_regional_gap = float(opt("ORBIT_MAX_REGIONAL_GAP", default=0.10))
+    orbit_shell_bands = int(opt("ORBIT_SHELL_BANDS", default=8))
+    orbit_coverage_check_every = int(opt("ORBIT_COVERAGE_CHECK_EVERY", default=50))
+    orbit_warn_fill_pct = float(opt("ORBIT_WARN_FILL_PCT", default=0.95))
+    orbit_warn_success_pct = float(opt("ORBIT_WARN_SUCCESS_PCT", default=0.99))
+    orbit_warn_regional_floor = float(opt("ORBIT_WARN_REGIONAL_FLOOR", default=0.80))
+    orbit_warn_max_regional_gap = float(opt("ORBIT_WARN_MAX_REGIONAL_GAP", default=0.15))
+    model_owner_limit = int(opt("MODEL_OWNER_LIMIT", default=0))
+
+    if base_halo_type == "karl_halo":
+        raise RuntimeError(
+            "HALO_TYPE='karl_halo' is disabled: its density functions use parsec-valued "
+            "radii, while the current halo-table path supplies radii in meters"
         )
-        print(
-            f"[Daemon] Karl bin contract — N_light={n_light}, N_kin={n_kin}, "
-            f"R_light_max_pc={r_light_max_pc:.6g}, R_kin_max_pc={r_kin_max_pc:.6g}, "
-            f"N_constraints={n_light + n_kin * nvbin}",
-            flush=True,
+    if abs(halo_q_axis_ratio - 1.0) > 1e-8:
+        raise RuntimeError(
+            "Flattened halo forces are disabled because their axisymmetric force table "
+            "does not share the potential used for orbit launch energy; set "
+            "HALO_Q_AXIS_RATIO=1.0"
         )
-        print(
-            f"[Daemon] Orbit coverage — strict={orbit_fill_pct:.3f}/{orbit_regional_floor:.3f}/{orbit_max_regional_gap:.3f}, "
-            f"warning={orbit_warn_fill_pct:.3f}/{orbit_warn_success_pct:.3f}/"
-            f"{orbit_warn_regional_floor:.3f}/{orbit_warn_max_regional_gap:.3f}, "
-            f"shell_bands={orbit_shell_bands}, check_every={orbit_coverage_check_every}, "
-            f"model_owner_limit={model_owner_limit or 'auto'}",
-            flush=True,
+    R_star_m = getattr(physics_engine, "__R_star_m__", getattr(obs, "R_star_m", None))
+    valid_vlos = getattr(physics_engine, "__valid_vlos__", getattr(obs, "valid_vlos", None))
+    v_star_mps = getattr(physics_engine, "__v_star_mps__", getattr(obs, "v_star_mps", None))
+    verr_star_mps = getattr(physics_engine, "__verr_star_mps__", getattr(obs, "verr_star_mps", None))
+    if R_star_m is None or valid_vlos is None or v_star_mps is None or verr_star_mps is None:
+        raise RuntimeError("wrapped physics engine must expose R_star_m, valid_vlos, v_star_mps, and verr_star_mps")
+    R_star_m = np.asarray(R_star_m, float).ravel()
+    valid_vlos = np.asarray(valid_vlos, bool).ravel()
+    v_star_mps = np.asarray(v_star_mps, float).ravel()
+    verr_star_mps = np.asarray(verr_star_mps, float).ravel()
+    if not (R_star_m.size == valid_vlos.size == v_star_mps.size == verr_star_mps.size):
+        raise RuntimeError("wrapped physics arrays must match lengths: " f"R={R_star_m.size}, valid={valid_vlos.size}, v={v_star_mps.size}, verr={verr_star_mps.size}")
+    kinematic_bin_edges = getattr(physics_engine, "__kinematic_bin_edges_pc__", None)
+    if kinematic_bin_edges is None:
+        kinematic_bin_edges = engine_cfg.get("kinematic_bin_edges_pc", None)
+    if kinematic_bin_edges is None:
+        kinematic_bin_edges = getattr(obs, "kinematic_bin_edges_pc", None)
+    if kinematic_bin_edges is None:
+        raise RuntimeError("kinematic_bin_edges_pc is required; no adaptive radial-bin fallback is allowed")
+    light_bin_edges = getattr(physics_engine, "__light_bin_edges_pc__", None)
+    if light_bin_edges is None:
+        light_bin_edges = engine_cfg.get("light_bin_edges_pc", None)
+    if light_bin_edges is None:
+        light_bin_edges = getattr(obs, "light_bin_edges_pc", None)
+    if light_bin_edges is None:
+        raise RuntimeError("light_bin_edges_pc is required for Karl-style light constraints")
+    kinematic_bin_edges = np.asarray(kinematic_bin_edges, float).ravel() * 3.0856775814913673e16
+    light_bin_edges = np.asarray(light_bin_edges, float).ravel() * 3.0856775814913673e16
+    n_light = max(0, len(light_bin_edges) - 1)
+    n_kin = max(0, len(kinematic_bin_edges) - 1)
+    r_light_max_pc = float(light_bin_edges[-1] / 3.0856775814913673e16) if len(light_bin_edges) else float("nan")
+    r_kin_max_pc = float(kinematic_bin_edges[-1] / 3.0856775814913673e16) if len(kinematic_bin_edges) else float("nan")
+    Main._stellar_model_jl = _jl_primitive_dict(stellar_model, Main, "stellar_model")
+    Main._karl_halo_params_jl = _jl_primitive_dict(karl_halo_params, Main, "karl_halo_params")
+    _jl_surface_brightness_profile(surface_brightness_profile, Main)
+    if velocity_edges is None:
+        Main._velocity_edges_jl = Main.seval("nothing")
+    else:
+        Main._velocity_edges_jl = _jl_vector_f64(velocity_edges, Main, name="velocity_edges")
+    Main.seval("""
+        _stellar_model_jl isa AbstractDict ||
+            error("stellar_model handoff must be a Julia dictionary")
+        (_karl_halo_params_jl === nothing || _karl_halo_params_jl isa AbstractDict) ||
+            error("karl_halo_params handoff must be nothing or a Julia dictionary")
+        (_velocity_edges_jl === nothing || _velocity_edges_jl isa AbstractVector{<:Real}) ||
+            error("velocity_edges handoff must be nothing or a real Julia vector")
+        println(
+            "[Daemon] Julia handoff — stellar_model=", typeof(_stellar_model_jl),
+            ", karl_halo_params=", typeof(_karl_halo_params_jl),
+            ", velocity_edges=", typeof(_velocity_edges_jl),
         )
-    else: print("[Daemon] batch mode OFF — falling back to serial corpo.eval", flush=True)
+    """)
+
+    sini = float(obs.sini)
+    Norbit = int(obs.Norbit)
+    if Norbit % 2 != 0:
+        raise RuntimeError(f"Karl paired-orbit Spherical path requires even Norbit because Norbit is the final column count; got Norbit={Norbit}")
+    nstar_vlos = int(np.count_nonzero(valid_vlos))
+    print(
+        f"[Daemon] Karl batch mode ON — Norbit={Norbit}, Nbase_orbit={Norbit // 2}, Nstar_vlos={nstar_vlos}, "
+        f"Nvbin={nvbin}, Ntheta_launch={ntheta_launch}, alphat={alphat}, "
+        f"light_rel_tol={light_rel_tol}, delta_chi2_iter_tol={delta_chi2_iter_tol}, "
+        f"halo_q={halo_q_axis_ratio}, karl_halo_params_active={karl_halo_params is not None}",
+        flush=True,
+    )
+    print(
+        f"[Daemon] Karl bin contract — N_light={n_light}, N_kin={n_kin}, "
+        f"R_light_max_pc={r_light_max_pc:.6g}, R_kin_max_pc={r_kin_max_pc:.6g}, "
+        f"N_constraints={n_light + n_kin * nvbin}",
+        flush=True,
+    )
+    print(
+        f"[Daemon] Orbit coverage — strict={orbit_fill_pct:.3f}/{orbit_regional_floor:.3f}/{orbit_max_regional_gap:.3f}, "
+        f"warning={orbit_warn_fill_pct:.3f}/{orbit_warn_success_pct:.3f}/"
+        f"{orbit_warn_regional_floor:.3f}/{orbit_warn_max_regional_gap:.3f}, "
+        f"shell_bands={orbit_shell_bands}, check_every={orbit_coverage_check_every}, "
+        f"model_owner_limit={model_owner_limit or 'auto'}",
+        flush=True,
+    )
     while runs < config["MAX_RUNS"]:
         print(f"[Daemon] loop iter runs={runs}", flush=True); t0 = time.perf_counter()
         deck._flush_buf()
@@ -739,7 +710,7 @@ def run_daemon(config, physics_engine):
         _jnt = os.environ.get("JULIA_NUM_THREADS", "1")
         _nthreads = (os.cpu_count() or 1) if _jnt == "auto" else int(_jnt)
         CHUNK = int(config.get("CHUNK_SIZE", max(3 * _nthreads, len(props))))
-        def _record(theta, pid, label, status, chi2, refine_passes, diag=None):
+        def _record(theta, pid, label, status, chi2, diag=None):
             nonlocal best, runs
             if status != "pass" or not np.isfinite(chi2) or chi2 <= 1e-12:
                 status = status if status != "pass" else "numeric_fail"
@@ -747,17 +718,14 @@ def run_daemon(config, physics_engine):
                 if diag is not None:
                     diag = dict(diag)
                     diag["chi2_losvd"] = np.inf
-                    diag["chi2_light"] = np.inf
-                    diag["chi2_total"] = np.inf
-            base_reward = fixer.reward(status, chi2)
-            reward = base_reward + 0.5 * (1.0 - refine_passes / max(1, config.get("MAX_REFINE", 1))) if status == "pass" else base_reward
+            reward = fixer.reward(status, chi2)
             final_status = f"{status}_{label}"
             t_add = time.perf_counter()
-            deck.add(theta, chi2, reward, pid, final_status, refine_passes=refine_passes, diag=diag)
+            deck.add(theta, chi2, reward, pid, final_status, diag=diag)
             t_acc["add"] += time.perf_counter() - t_add; t_cnt["add"] += 1
             valid_real_pass = is_real_pass(final_status) and np.isfinite(chi2) and (chi2 > 1e-12)
             if valid_real_pass:
-                flat.push(chi2 if refine_passes >= config.get("MAX_REFINE", 0) else np.inf)
+                flat.push(chi2)
                 fixer.unlock(deck, runner)
                 if chi2 < best: best = chi2
             else: flat.push(np.inf)
@@ -778,182 +746,210 @@ def run_daemon(config, physics_engine):
             if converge.check(deck, runner, runs): deck.save(); return True
             return False
         stop = False
-        if use_batch:
-            grouped_props = defaultdict(list)
-            for theta, pid, label, halo_type_variant in props:
-                grouped_props[str(halo_type_variant).strip().lower()].append((theta, pid, label, halo_type_variant))
-            for halo_type_chunk, props_for_halo in grouped_props.items():
-                thetas = [theta for theta, pid, label, halo_type_variant in props_for_halo]
-                for i in range(0, len(thetas), CHUNK):
-                    chunk_props, chunk_thetas = props_for_halo[i:i+CHUNK], thetas[i:i+CHUNK]
-                    theta_mat_external = np.array(chunk_thetas, dtype=float).T
-                    theta_mat = canonicalize_theta_matrix( theta_mat_external, halo_type=halo_type_chunk, halo_parameterization=halo_parameterization, bounds=config["THETA_BOUNDS"] )
-                    chunk_t0 = time.perf_counter()
-                    try:
-                        print("[JL KWARG DEBUG]", flush=True)
-                        print("stellar_model type:", type(stellar_model), flush=True)
-                        print("stellar_model value:", stellar_model, flush=True)
-                        print("surface_brightness_profile type:", type(surface_brightness_profile), flush=True)
-                        print("surface_brightness_profile value:", surface_brightness_profile, flush=True)
-                        print("karl_halo_params type:", type(karl_halo_params), flush=True)
-                        print("karl_halo_params value:", karl_halo_params, flush=True)
-                        print("velocity_edges type:", type(velocity_edges), flush=True)
-                        print("velocity_edges value:", velocity_edges, flush=True)
-                        Main._theta_mat_jl = _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat")
-                        Main._R_star_jl = _jl_vector_f64(R_star_m, Main, name="R_star_m")
-                        Main._valid_vlos_jl = _jl_vector_bool(valid_vlos, Main, name="valid_vlos")
-                        Main._v_star_jl = _jl_vector_f64(v_star_mps, Main, name="v_star_mps")
-                        Main._verr_star_jl = _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps")
-                        Main._light_bins_jl = _jl_vector_f64(light_bin_edges, Main, name="light_bin_edges")
-                        Main._kin_bins_jl = _jl_vector_f64(kinematic_bin_edges, Main, name="kinematic_bin_edges")
-                        # PythonCall direct Julia function invocation is broken on the cluster.
-                        # Put scalars/strings into Julia globals through seval, then call the
-                        # batch evaluator entirely from Julia.
-                        Main.seval(f"_sini_jl = {float(sini)!r}")
-                        Main.seval(f"_Norbit_jl = {int(Norbit)}")
-                        Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
-                        Main.seval(f"_Nocc_jl = {int(nocc_compat)}")
-                        Main.seval(f"_lambda_occ_jl = {float(lambda_light)!r}")
-                        Main.seval(f"_alpha_jl = {float(alpha)!r}")
-                        Main.seval(f"_alphat_jl = {float(alphat)!r}")
-                        Main.seval("_weight_mode_jl = " + json.dumps(str(weight_mode)))
-                        Main.seval("_weight_solver_mode_jl = " + json.dumps(str(weight_solver_mode)))
-                        Main.seval(f"_entropy_floor_jl = {float(entropy_floor)!r}")
-                        Main.seval("_losvd_score_mode_jl = " + json.dumps(str(losvd_score_mode)))
-                        Main.seval(f"_maxiter_jl = {int(maxiter)}")
-                        Main.seval(f"_max_refine_jl = {int(config.get('MAX_REFINE', 0))}")
-                        Main.seval(f"_timeout_s_jl = {float(config.get('EVAL_TIMEOUT_S', 120.0))!r}")
-                        Main.seval(f"_R_inner_pc_jl = {float(config.get('R_INNER_DIAG_PC', 30.0))!r}")
-                        Main.seval(f"_min_stars_per_bin_jl = {int(min_stars_per_bin)}")
-                        Main.seval(f"_Nvbin_jl = {int(nvbin)}")
-                        Main.seval(f"_Ntheta_launch_jl = {int(ntheta_launch)}")
-                        Main.seval(f"_halo_q_axis_ratio_jl = {float(halo_q_axis_ratio)!r}")
-                        Main.seval(f"_orbit_fill_pct_jl = {float(orbit_fill_pct)!r}")
-                        Main.seval(f"_orbit_regional_floor_jl = {float(orbit_regional_floor)!r}")
-                        Main.seval(f"_orbit_max_regional_gap_jl = {float(orbit_max_regional_gap)!r}")
-                        Main.seval(f"_orbit_shell_bands_jl = {int(orbit_shell_bands)}")
-                        Main.seval(f"_orbit_coverage_check_every_jl = {int(orbit_coverage_check_every)}")
-                        Main.seval(f"_orbit_warn_fill_pct_jl = {float(orbit_warn_fill_pct)!r}")
-                        Main.seval(f"_orbit_warn_success_pct_jl = {float(orbit_warn_success_pct)!r}")
-                        Main.seval(f"_orbit_warn_regional_floor_jl = {float(orbit_warn_regional_floor)!r}")
-                        Main.seval(f"_orbit_warn_max_regional_gap_jl = {float(orbit_warn_max_regional_gap)!r}")
-                        Main.seval(f"_model_owner_limit_jl = {int(model_owner_limit)}")
-                        batch_result = Main.seval("""
+        grouped_props = defaultdict(list)
+        for theta, pid, label, halo_type_variant in props:
+            grouped_props[str(halo_type_variant).strip().lower()].append((theta, pid, label, halo_type_variant))
+        for halo_type_chunk, props_for_halo in grouped_props.items():
+            thetas = [theta for theta, pid, label, halo_type_variant in props_for_halo]
+            for i in range(0, len(thetas), CHUNK):
+                chunk_props, chunk_thetas = props_for_halo[i:i+CHUNK], thetas[i:i+CHUNK]
+                theta_mat_external = np.array(chunk_thetas, dtype=float).T
+                theta_mat = canonicalize_theta_matrix( theta_mat_external, halo_type=halo_type_chunk, halo_parameterization=halo_parameterization, bounds=config["THETA_BOUNDS"] )
+                chunk_t0 = time.perf_counter()
+                try:
+                    print("[JL KWARG DEBUG]", flush=True)
+                    print("stellar_model type:", type(stellar_model), flush=True)
+                    print("stellar_model value:", stellar_model, flush=True)
+                    print("surface_brightness_profile type:", type(surface_brightness_profile), flush=True)
+                    print("surface_brightness_profile value:", surface_brightness_profile, flush=True)
+                    print("karl_halo_params type:", type(karl_halo_params), flush=True)
+                    print("karl_halo_params value:", karl_halo_params, flush=True)
+                    print("velocity_edges type:", type(velocity_edges), flush=True)
+                    print("velocity_edges value:", velocity_edges, flush=True)
+                    Main._theta_mat_jl = _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat")
+                    Main._R_star_jl = _jl_vector_f64(R_star_m, Main, name="R_star_m")
+                    Main._valid_vlos_jl = _jl_vector_bool(valid_vlos, Main, name="valid_vlos")
+                    Main._v_star_jl = _jl_vector_f64(v_star_mps, Main, name="v_star_mps")
+                    Main._verr_star_jl = _jl_vector_f64(verr_star_mps, Main, name="verr_star_mps")
+                    Main._light_bins_jl = _jl_vector_f64(light_bin_edges, Main, name="light_bin_edges")
+                    Main._kin_bins_jl = _jl_vector_f64(kinematic_bin_edges, Main, name="kinematic_bin_edges")
+                    # PythonCall direct Julia function invocation is broken on the cluster.
+                    # Put scalars/strings into Julia globals through seval, then call the
+                    # batch evaluator entirely from Julia.
+                    Main.seval(f"_sini_jl = {float(sini)!r}")
+                    Main.seval(f"_Norbit_jl = {int(Norbit)}")
+                    Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
+                    Main.seval(f"_alphat_jl = {float(alphat)!r}")
+                    Main.seval(f"_light_rel_tol_jl = {float(light_rel_tol)!r}")
+                    Main.seval(f"_delta_chi2_iter_tol_jl = {float(delta_chi2_iter_tol)!r}")
+                    Main.seval(f"_entropy_floor_jl = {float(entropy_floor)!r}")
+                    Main.seval(f"_maxiter_jl = {int(maxiter)}")
+                    Main.seval(f"_timeout_s_jl = {float(config.get('EVAL_TIMEOUT_S', 120.0))!r}")
+                    Main.seval(f"_R_inner_pc_jl = {float(config.get('R_INNER_DIAG_PC', 30.0))!r}")
+                    Main.seval(f"_Nvbin_jl = {int(nvbin)}")
+                    Main.seval(f"_Ntheta_launch_jl = {int(ntheta_launch)}")
+                    Main.seval(f"_halo_q_axis_ratio_jl = {float(halo_q_axis_ratio)!r}")
+                    Main.seval(f"_orbit_fill_pct_jl = {float(orbit_fill_pct)!r}")
+                    Main.seval(f"_orbit_regional_floor_jl = {float(orbit_regional_floor)!r}")
+                    Main.seval(f"_orbit_max_regional_gap_jl = {float(orbit_max_regional_gap)!r}")
+                    Main.seval(f"_orbit_shell_bands_jl = {int(orbit_shell_bands)}")
+                    Main.seval(f"_orbit_coverage_check_every_jl = {int(orbit_coverage_check_every)}")
+                    Main.seval(f"_orbit_warn_fill_pct_jl = {float(orbit_warn_fill_pct)!r}")
+                    Main.seval(f"_orbit_warn_success_pct_jl = {float(orbit_warn_success_pct)!r}")
+                    Main.seval(f"_orbit_warn_regional_floor_jl = {float(orbit_warn_regional_floor)!r}")
+                    Main.seval(f"_orbit_warn_max_regional_gap_jl = {float(orbit_warn_max_regional_gap)!r}")
+                    Main.seval(f"_model_owner_limit_jl = {int(model_owner_limit)}")
+                    batch_result = Main.seval("""
 OSPMPhysicsSpherical.evaluate_batch_theta(
-    _theta_mat_jl,
-    _R_star_jl,
-    _valid_vlos_jl,
-    _v_star_jl,
-    _verr_star_jl,
-    _sini_jl,
-    _Norbit_jl,
-    _halo_type_jl;
-    stellar_model=_stellar_model_jl,
-    surface_brightness_profile=_sb_profile_jl,
-    Nocc=_Nocc_jl,
-    lambda_occ=_lambda_occ_jl,
-    alpha=_alpha_jl,
-    alphat=_alphat_jl,
-    weight_mode=_weight_mode_jl,
-    weight_solver_mode=_weight_solver_mode_jl,
-    entropy_floor=_entropy_floor_jl,
-    losvd_score_mode=_losvd_score_mode_jl,
-    maxiter=_maxiter_jl,
-    max_refine=_max_refine_jl,
-    timeout_s=_timeout_s_jl,
-    R_inner_pc=_R_inner_pc_jl,
-    min_stars_per_bin=_min_stars_per_bin_jl,
-    Nvbin=_Nvbin_jl,
-    Ntheta_launch=_Ntheta_launch_jl,
-    fill_pct=_orbit_fill_pct_jl,
-    regional_floor=_orbit_regional_floor_jl,
-    max_regional_gap=_orbit_max_regional_gap_jl,
-    shell_band_count=_orbit_shell_bands_jl,
-    coverage_check_every=_orbit_coverage_check_every_jl,
-    warn_fill_pct=_orbit_warn_fill_pct_jl,
-    warn_success_pct=_orbit_warn_success_pct_jl,
-    warn_regional_floor=_orbit_warn_regional_floor_jl,
-    warn_max_regional_gap=_orbit_warn_max_regional_gap_jl,
-    model_owner_limit=_model_owner_limit_jl,
-    halo_q_axis_ratio=_halo_q_axis_ratio_jl,
-    karl_halo_params=_karl_halo_params_jl,
-    velocity_edges=_velocity_edges_jl,
-    light_bin_edges=_light_bins_jl,
-    kinematic_bin_edges=_kin_bins_jl
+_theta_mat_jl,
+_R_star_jl,
+_valid_vlos_jl,
+_v_star_jl,
+_verr_star_jl,
+_sini_jl,
+_Norbit_jl,
+_halo_type_jl;
+stellar_model=_stellar_model_jl,
+surface_brightness_profile=_sb_profile_jl,
+alphat=_alphat_jl,
+light_rel_tol=_light_rel_tol_jl,
+delta_chi2_iter_tol=_delta_chi2_iter_tol_jl,
+entropy_floor=_entropy_floor_jl,
+maxiter=_maxiter_jl,
+timeout_s=_timeout_s_jl,
+R_inner_pc=_R_inner_pc_jl,
+Nvbin=_Nvbin_jl,
+Ntheta_launch=_Ntheta_launch_jl,
+fill_pct=_orbit_fill_pct_jl,
+regional_floor=_orbit_regional_floor_jl,
+max_regional_gap=_orbit_max_regional_gap_jl,
+shell_band_count=_orbit_shell_bands_jl,
+coverage_check_every=_orbit_coverage_check_every_jl,
+warn_fill_pct=_orbit_warn_fill_pct_jl,
+warn_success_pct=_orbit_warn_success_pct_jl,
+warn_regional_floor=_orbit_warn_regional_floor_jl,
+warn_max_regional_gap=_orbit_warn_max_regional_gap_jl,
+model_owner_limit=_model_owner_limit_jl,
+halo_q_axis_ratio=_halo_q_axis_ratio_jl,
+karl_halo_params=_karl_halo_params_jl,
+velocity_edges=_velocity_edges_jl,
+light_bin_edges=_light_bins_jl,
+kinematic_bin_edges=_kin_bins_jl
 )
 """)
 
-                        ( status_code_vec, chi2_vec, refine_vec, chi2_inner_vec, chi2_outer_vec, chi2_light_vec, N_inner_vec, N_outer_vec, N_nonzero_weights_vec,
-                            effective_N_orbits_vec, max_weight_fraction_vec,
-                            coverage_status_vec, coverage_issue_region_vec, coverage_issue_axis_vec,
-                            coverage_issue_shell_bands_vec, coverage_reasons_vec,
-                            coverage_fraction_vec, coverage_attempted_fraction_vec, coverage_success_fraction_vec,
-                            coverage_shell_min_vec, coverage_lfrac_min_vec, coverage_theta_min_vec,
-                            coverage_shell_gap_vec, coverage_lfrac_gap_vec, coverage_theta_gap_vec,
-                            coverage_joint_holes_vec, coverage_deadline_hit_vec,
-                            successful_base_orbits_vec, planned_base_orbits_vec) = batch_result
+                    (
+                        status_code_vec,
+                        chi2_vec,
+                        chi2_inner_vec,
+                        chi2_outer_vec,
+                        delta_chi2_iteration_vec,
+                        max_light_relative_residual_vec,
+                        light_constraint_ok_vec,
+                        solver_converged_vec,
+                        solver_iterations_vec,
+                        solver_failure_reason_vec,
+                        N_inner_vec,
+                        N_outer_vec,
+                        N_nonzero_weights_vec,
+                        effective_N_orbits_vec,
+                        max_weight_fraction_vec,
+                        coverage_status_vec,
+                        coverage_issue_region_vec,
+                        coverage_issue_axis_vec,
+                        coverage_issue_shell_bands_vec,
+                        coverage_reasons_vec,
+                        coverage_fraction_vec,
+                        coverage_attempted_fraction_vec,
+                        coverage_success_fraction_vec,
+                        coverage_shell_min_vec,
+                        coverage_lfrac_min_vec,
+                        coverage_theta_min_vec,
+                        coverage_shell_gap_vec,
+                        coverage_lfrac_gap_vec,
+                        coverage_theta_gap_vec,
+                        coverage_joint_holes_vec,
+                        coverage_deadline_hit_vec,
+                        successful_base_orbits_vec,
+                        planned_base_orbits_vec,
+                    ) = batch_result
 
-                        t_acc["eval"] += time.perf_counter() - chunk_t0
-                        t_cnt["eval"] += len(chunk_thetas)
+                    t_acc["eval"] += time.perf_counter() - chunk_t0
+                    t_cnt["eval"] += len(chunk_thetas)
 
-                        for j, (theta, pid, label, halo_type_variant) in enumerate(chunk_props):
-                            code = int(status_code_vec[j])
-                            refine_passes = int(refine_vec[j])
-                            status, chi2 = batch_result_status(code, float(chi2_vec[j]), weight_solver_mode)
-                            chi2_light = float(chi2_light_vec[j])
-                            if status != "pass":
-                                chi2_light = np.inf
-                            coverage_status = str(coverage_status_vec[j])
-                            coverage_issue_region = str(coverage_issue_region_vec[j])
-                            coverage_issue_axis = str(coverage_issue_axis_vec[j])
-                            diag = dict( chi2_losvd=chi2, chi2_light=chi2_light,
-                                chi2_total=chi2 + lambda_light * chi2_light if np.isfinite(chi2) and np.isfinite(chi2_light) else np.inf, julia_status_code=code,
-                                chi2_inner=float(chi2_inner_vec[j]), chi2_outer=float(chi2_outer_vec[j]), N_inner=int(N_inner_vec[j]), N_outer=int(N_outer_vec[j]),
-                                N_nonzero_weights=int(N_nonzero_weights_vec[j]), effective_N_orbits=float(effective_N_orbits_vec[j]), max_weight_fraction=float(max_weight_fraction_vec[j]),
-                                halo_type=str(halo_type_variant), weight_mode=weight_mode, weight_solver_mode=weight_solver_mode, losvd_score_mode=losvd_score_mode,
-                                alphat=alphat, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params_active=bool(karl_halo_params),
-                                coverage_status=coverage_status, coverage_strict=(coverage_status == "strict_pass"),
-                                coverage_issue_region=coverage_issue_region, coverage_issue_axis=coverage_issue_axis,
-                                coverage_issue_shell_bands=str(coverage_issue_shell_bands_vec[j]), coverage_reasons=str(coverage_reasons_vec[j]),
-                                coverage_fraction=float(coverage_fraction_vec[j]),
-                                coverage_attempted_fraction=float(coverage_attempted_fraction_vec[j]),
-                                coverage_success_fraction=float(coverage_success_fraction_vec[j]),
-                                coverage_shell_min=float(coverage_shell_min_vec[j]), coverage_lfrac_min=float(coverage_lfrac_min_vec[j]),
-                                coverage_theta_min=float(coverage_theta_min_vec[j]), coverage_shell_gap=float(coverage_shell_gap_vec[j]),
-                                coverage_lfrac_gap=float(coverage_lfrac_gap_vec[j]), coverage_theta_gap=float(coverage_theta_gap_vec[j]),
-                                coverage_joint_holes=int(coverage_joint_holes_vec[j]), coverage_deadline_hit=bool(coverage_deadline_hit_vec[j]),
-                                successful_base_orbits=int(successful_base_orbits_vec[j]),
-                                planned_base_orbits=int(planned_base_orbits_vec[j]))
-                            if _record(theta, pid, label, status, chi2, refine_passes, diag=diag):
-                                stop = True
-                                break
-                    except Exception as e:
-                        t_acc["eval"] += time.perf_counter() - chunk_t0
-                        t_cnt["eval"] += len(chunk_thetas)
-                        print("\n===== JULIA EXCEPTION =====", flush=True)
-                        print("type:", type(e), flush=True)
-                        print("repr:", repr(e), flush=True)
+                    for j, (theta, pid, label, halo_type_variant) in enumerate(chunk_props):
+                        code = int(status_code_vec[j])
+                        status, chi2 = batch_result_status(code, float(chi2_vec[j]))
+                        coverage_status = str(coverage_status_vec[j])
+                        coverage_issue_region = str(coverage_issue_region_vec[j])
+                        coverage_issue_axis = str(coverage_issue_axis_vec[j])
+                        diag = dict(
+                            chi2_losvd=chi2,
+                            delta_chi2_iteration=float(delta_chi2_iteration_vec[j]),
+                            max_light_relative_residual=float(max_light_relative_residual_vec[j]),
+                            light_constraint_ok=bool(light_constraint_ok_vec[j]),
+                            solver_converged=bool(solver_converged_vec[j]),
+                            solver_iterations=int(solver_iterations_vec[j]),
+                            solver_failure_reason=str(solver_failure_reason_vec[j]),
+                            julia_status_code=code,
+                            chi2_inner=float(chi2_inner_vec[j]),
+                            chi2_outer=float(chi2_outer_vec[j]),
+                            N_inner=int(N_inner_vec[j]),
+                            N_outer=int(N_outer_vec[j]),
+                            N_nonzero_weights=int(N_nonzero_weights_vec[j]),
+                            effective_N_orbits=float(effective_N_orbits_vec[j]),
+                            max_weight_fraction=float(max_weight_fraction_vec[j]),
+                            halo_type=str(halo_type_variant),
+                            alphat=alphat,
+                            light_rel_tol=light_rel_tol,
+                            delta_chi2_iter_tol=delta_chi2_iter_tol,
+                            halo_q_axis_ratio=halo_q_axis_ratio,
+                            karl_halo_params_active=bool(karl_halo_params),
+                            coverage_status=coverage_status,
+                            coverage_strict=(coverage_status == "strict_pass"),
+                            coverage_issue_region=coverage_issue_region,
+                            coverage_issue_axis=coverage_issue_axis,
+                            coverage_issue_shell_bands=str(coverage_issue_shell_bands_vec[j]),
+                            coverage_reasons=str(coverage_reasons_vec[j]),
+                            coverage_fraction=float(coverage_fraction_vec[j]),
+                            coverage_attempted_fraction=float(coverage_attempted_fraction_vec[j]),
+                            coverage_success_fraction=float(coverage_success_fraction_vec[j]),
+                            coverage_shell_min=float(coverage_shell_min_vec[j]),
+                            coverage_lfrac_min=float(coverage_lfrac_min_vec[j]),
+                            coverage_theta_min=float(coverage_theta_min_vec[j]),
+                            coverage_shell_gap=float(coverage_shell_gap_vec[j]),
+                            coverage_lfrac_gap=float(coverage_lfrac_gap_vec[j]),
+                            coverage_theta_gap=float(coverage_theta_gap_vec[j]),
+                            coverage_joint_holes=int(coverage_joint_holes_vec[j]),
+                            coverage_deadline_hit=bool(coverage_deadline_hit_vec[j]),
+                            successful_base_orbits=int(successful_base_orbits_vec[j]),
+                            planned_base_orbits=int(planned_base_orbits_vec[j]),
+                        )
+                        if _record(theta, pid, label, status, chi2, diag=diag):
+                            stop = True
+                            break
+                except Exception as e:
+                    t_acc["eval"] += time.perf_counter() - chunk_t0
+                    t_cnt["eval"] += len(chunk_thetas)
+                    print("\n===== JULIA EXCEPTION =====", flush=True)
+                    print("type:", type(e), flush=True)
+                    print("repr:", repr(e), flush=True)
+                    try:
+                        print("str:", str(e), flush=True)
+                    except Exception:
+                        print("str(): failed", flush=True)
+                    if hasattr(e, "exception"):
                         try:
-                            print("str:", str(e), flush=True)
+                            print("julia exception:", repr(e.exception), flush=True)
                         except Exception:
-                            print("str(): failed", flush=True)
-                        if hasattr(e, "exception"):
-                            try:
-                                print("julia exception:", repr(e.exception), flush=True)
-                            except Exception:
-                                print("could not print e.exception", flush=True)
-                        print("[Daemon] Python traceback for failed chunk:", flush=True)
-                        traceback.print_exc()
-                        raise
-                    if stop:
-                        break
+                            print("could not print e.exception", flush=True)
+                    print("[Daemon] Python traceback for failed chunk:", flush=True)
+                    traceback.print_exc()
+                    raise
                 if stop:
                     break
-        else:
-            for theta, pid, label, halo_type_variant in props:
-                chunk_t0 = time.perf_counter(); status, chi2 = corpo.eval(theta)
-                t_acc["eval"] += time.perf_counter() - chunk_t0; t_cnt["eval"] += 1
-                if _record(theta, pid, label, status, chi2, 0, diag={"halo_type": str(halo_type_variant)}): stop = True; break
+            if stop:
+                break
         if stop: return
         t0 = time.perf_counter(); deck._flush_buf(); runner.train(deck)
         t_acc["train"] += time.perf_counter() - t0; t_cnt["train"] += 1

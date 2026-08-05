@@ -27,8 +27,14 @@ MAX_BATCH_SIZE = 1 if LOCAL_DEBUG else 360
 # local/40-core run.  Larger allocations are capped to keep the simultaneous
 # 627×NORBIT matrices bounded; surplus threads remain orbit helpers.
 CHUNK_SIZE = 1 if LOCAL_DEBUG else min(WORKERS, 40)
+# Test Thetas to make sure model is working go one by one uncommenting one at a time
+# use bash/start not bash/batch_start
+FIXED_THETA = [100.0, 1800.0, 900000.0, 1.0]     # Baseline
+#FIXED_THETA = [100.0, 1800.0, 0.0, 1.0]          # No black hole
+#FIXED_THETA = [100.0, 1800.0, 3000000.0, 1.0]    # Larger black hole
+#FIXED_THETA = [100.0, 300.0, 900000.0, 1.0]      # Compact core
+#FIXED_THETA = [100.0, 20000.0, 900000.0, 1.0]    # Extended core
 
-FIXED_THETA = [100.0, 1800.0, 900000.0, 1.0] if LOCAL_DEBUG else None
 EVAL_VARIANTS = ["full"] if LOCAL_DEBUG else None
 KARL_ALPHAT = 1.0
 CSV_FLUSH_INTERVAL = 10
@@ -117,8 +123,6 @@ CONFIG = {
 
     "OBSERVABLES": {
         "NVBIN": 21,
-        "MIN_STARS_PER_BIN": 20,
-        "LAMBDA_LIGHT": 0.3,
         "NTHETA_LAUNCH": 9,
         # Orbit-library coverage and scheduler
         "ORBIT_FILL_PCT": 0.85,
@@ -126,28 +130,24 @@ CONFIG = {
         "ORBIT_MAX_REGIONAL_GAP": 0.10,
         "ORBIT_SHELL_BANDS": 8,
         "ORBIT_COVERAGE_CHECK_EVERY": 50,
-
         # Warning classification; warned libraries still reach weights
         "ORBIT_WARN_FILL_PCT": 0.95,
         "ORBIT_WARN_SUCCESS_PCT": 0.99,
         "ORBIT_WARN_REGIONAL_FLOOR": 0.80,
         "ORBIT_WARN_MAX_REGIONAL_GAP": 0.15,
-
         # 0 automatically reserves about one-third of Julia threads as helpers
         "MODEL_OWNER_LIMIT": 0,
-
-        # Live Karl weight/scoring path.
-        "WEIGHT_MODE": "entropy",
-        "WEIGHT_SOLVER": "expanded_cm",
-        "LOSVD_SCORE_MODE": "standard",
+        # Expanded-CM solver and hard light-constraint convergence.
         "KARL_ALPHAT": KARL_ALPHAT,
-        "KARL_MAXITER": 60,
+        "KARL_LIGHT_REL_TOL": 0.01,
+        "KARL_DELTA_CHI2_ITER_TOL": 0.3,
+        "KARL_MAXITER": 4000,
         "ENTROPY_FLOOR": 1e-12,
-
         # Halo flattening used by the halo force path.
         # Stellar flattening stays in STELLAR_MODEL["q_axis_ratio"].
         "HALO_Q_AXIS_RATIO": 1.0,
     },
+
 
     # =========================================================
     # Parameter space
@@ -179,29 +179,19 @@ CONFIG = {
     # =========================================================
     # Deck semantics
     # =========================================================
-    "REQUIRE_COLUMNS": [ "v0", "r_c", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light",
-        "chi2_total", "chi2_inner", "chi2_outer", "N_inner", "N_outer", "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction", "halo_type",
+    "REQUIRE_COLUMNS": [
+        "v0", "r_c", "MBH", "ML", "chi2", "reward", "status", "proposal_id",
+        # Scientific score and direct solver diagnostics:
+        "chi2_losvd", "delta_chi2_iteration", "max_light_relative_residual", "light_constraint_ok",
+        "solver_converged", "solver_iterations", "solver_failure_reason", "julia_status_code",
+        # Radial and orbit-weight diagnostics:
+        "chi2_inner", "chi2_outer", "N_inner", "N_outer", "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction",
         # Runtime contract diagnostics:
-        "weight_mode", "weight_solver_mode", "losvd_score_mode", "alphat", "halo_q_axis_ratio", "karl_halo_params_active",
+        "halo_type", "alphat", "light_rel_tol", "delta_chi2_iter_tol", "halo_q_axis_ratio", "karl_halo_params_active",
         # Orbit-library coverage diagnostics:
-        "coverage_status",
-        "coverage_strict",
-        "coverage_issue_region",
-        "coverage_issue_axis",
-        "coverage_issue_shell_bands",
-        "coverage_reasons",
-        "coverage_fraction",
-        "coverage_attempted_fraction",
-        "coverage_success_fraction",
-        "coverage_shell_min",
-        "coverage_lfrac_min",
-        "coverage_theta_min",
-        "coverage_shell_gap",
-        "coverage_lfrac_gap",
-        "coverage_theta_gap",
-        "coverage_joint_holes",
-        "coverage_deadline_hit",
-        "successful_base_orbits",
+        "coverage_status", "coverage_strict", "coverage_issue_region", "coverage_issue_axis", "coverage_issue_shell_bands", "coverage_reasons",
+        "coverage_fraction", "coverage_attempted_fraction", "coverage_success_fraction", "coverage_shell_min", "coverage_lfrac_min", "coverage_theta_min",
+        "coverage_shell_gap", "coverage_lfrac_gap", "coverage_theta_gap", "coverage_joint_holes", "coverage_deadline_hit", "successful_base_orbits",
         "planned_base_orbits",
     ],
 
@@ -212,6 +202,9 @@ CONFIG = {
         "timeout_halo_up", "timeout_halo_down", "timeout_ml_up", "timeout_ml_down", "unknown_fail_full", "unknown_fail_bh_only", "unknown_fail_halo_only", "unknown_fail_bh_up", "unknown_fail_bh_down",
         "unknown_fail_halo_up", "unknown_fail_halo_down", "unknown_fail_ml_up", "unknown_fail_ml_down", "numeric_fail_bh_up", "numeric_fail_bh_down", "numeric_fail_halo_up", "numeric_fail_halo_down",
         "numeric_fail_ml_up", "numeric_fail_ml_down", "orbit_fail_bh_up", "orbit_fail_bh_down", "orbit_fail_halo_up", "orbit_fail_halo_down", "orbit_fail_ml_up", "orbit_fail_ml_down",
+        "solver_failed_full", "solver_failed_bh_only", "solver_failed_halo_only", "solver_failed_bh_up", "solver_failed_bh_down", "solver_failed_halo_up", "solver_failed_halo_down",
+        "solver_failed_ml_up", "solver_failed_ml_down", "physics_exception_full", "physics_exception_bh_only", "physics_exception_halo_only", "physics_exception_bh_up",
+        "physics_exception_bh_down", "physics_exception_halo_up", "physics_exception_halo_down", "physics_exception_ml_up", "physics_exception_ml_down",
     ],
     "FILL_DEFAULT_STATUS": "todo",
 
@@ -266,7 +259,7 @@ CONFIG = {
     # Paths
     # =========================================================
     **build_data_paths(PROFILE_ROOT), "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),  "COMPARISON_TAG": "nonsingular_isothermal_full_light",
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_multi_full_iso_chi.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-m-f-i-n-chi.csv"),
 }
 
 print("[CONFIG] CSV_PATH =", CONFIG["CSV_PATH"])
@@ -280,9 +273,9 @@ print("[CONFIG] PARAMETER_NAMES =", CONFIG["PARAMETER_NAMES"])
 print("[CONFIG] THETA_BOUNDS =", CONFIG["THETA_BOUNDS"])
 print("[CONFIG] STELLAR_GEOMETRY =", CONFIG["STELLAR_MODEL"]["geometry"])
 print("[CONFIG] NTHETA_LAUNCH =", CONFIG["OBSERVABLES"]["NTHETA_LAUNCH"])
-print("[CONFIG] WEIGHT_MODE =", CONFIG["OBSERVABLES"]["WEIGHT_MODE"])
-print("[CONFIG] WEIGHT_SOLVER =", CONFIG["OBSERVABLES"]["WEIGHT_SOLVER"])
-print("[CONFIG] LOSVD_SCORE_MODE =", CONFIG["OBSERVABLES"]["LOSVD_SCORE_MODE"])
+print("[CONFIG] KARL_ALPHAT =", CONFIG["OBSERVABLES"]["KARL_ALPHAT"])
+print("[CONFIG] KARL_LIGHT_REL_TOL =", CONFIG["OBSERVABLES"]["KARL_LIGHT_REL_TOL"])
+print("[CONFIG] KARL_DELTA_CHI2_ITER_TOL =", CONFIG["OBSERVABLES"]["KARL_DELTA_CHI2_ITER_TOL"])
 
 
 """
