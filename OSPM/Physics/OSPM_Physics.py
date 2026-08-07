@@ -36,12 +36,7 @@ c = 2.99792458e8
 _NFW_VCIRC_DENOM = 4.0 * np.pi * G * (np.log(2.0) - 0.5)
 
 def _available_cpu_count():
-    for name in (
-        "SLURM_CPUS_PER_TASK",
-        "SLURM_CPUS_ON_NODE",
-        "PBS_NCPUS",
-        "NSLOTS",
-    ):
+    for name in ( "SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "PBS_NCPUS", "NSLOTS",):
         raw = os.environ.get(name)
         if raw is None:
             continue
@@ -51,66 +46,50 @@ def _available_cpu_count():
             continue
         if value > 0:
             return value
-
     try:
         affinity_count = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         affinity_count = 0
-
     if affinity_count > 0:
         return affinity_count
-
     return max(1, int(os.cpu_count() or 1))
 
 def _jl_init(*, threads_per_model=8):
     global _JL_READY, _Main
-
     threads_per_model = int(threads_per_model)
     if threads_per_model <= 0:
         raise ValueError("threads_per_model must be positive")
-
     assigned_cpus = _available_cpu_count()
     blas_threads = min(threads_per_model, assigned_cpus)
-
     if _JL_READY:
-        _Main.seval(
-            f"LinearAlgebra.BLAS.set_num_threads({blas_threads})"
-        )
+        _Main.seval( f"LinearAlgebra.BLAS.set_num_threads({blas_threads})" )
         return
-
     if not USE_JULIA:
         raise RuntimeError("OSPM_USE_JULIA is not enabled")
-
     if "torch" in sys.modules:
         print("[WARN] torch imported before juliacall. This can be unstable on some systems.")
-
     os.environ.setdefault("JULIA_PROJECT", _REPO_ROOT)
     os.environ.setdefault("JULIA_NUM_THREADS", str(assigned_cpus))
     os.environ.setdefault("PYTHON_JULIACALL_THREADS", str(assigned_cpus))
     os.environ["OPENBLAS_NUM_THREADS"] = str(blas_threads)
     os.environ["OMP_NUM_THREADS"] = str(blas_threads)
     os.environ["MKL_NUM_THREADS"] = str(blas_threads)
-
     from juliacall import Main as _Main
     _Main.seval("using LinearAlgebra")
     _Main.seval( f"LinearAlgebra.BLAS.set_num_threads({blas_threads})")
     here = os.path.dirname(os.path.abspath(__file__))
     jl_path = os.path.join(here, "OSPM_Physics_Spherical.jl")
-
     if not os.path.exists(jl_path):
         raise FileNotFoundError(f"Julia backend file not found: {jl_path}")
-
     # Ask Julia whether the binding exists. PythonCall's hasattr() can return a
     # stale false result immediately after Base.include creates a new binding.
     module_defined = bool( _Main.seval("isdefined(Main, :OSPMPhysicsSpherical)"))
-
     if not module_defined:
         # Safer HPC bridge include:
         # pass the path as a plain Julia string inside seval instead of
         # routing the Python string through _Main.include(jl_path).
         import json
         jl_path_literal = json.dumps(str(jl_path))
-
         _Main.seval(f"""
         try
             jl_path = {jl_path_literal}
@@ -144,9 +123,7 @@ def _jl_init(*, threads_per_model=8):
         f" blas_threads={active_blas_threads}"
         f" threads_per_model_target={threads_per_model}"
     )
-
     _JL_READY = True
-
 def _normalize_halo_parameterization(halo_parameterization=None):
     hp = "rho_rs" if halo_parameterization is None else str(halo_parameterization).strip().lower()
     if hp in ("", "default"):
@@ -216,13 +193,7 @@ def canonicalize_theta(theta, *, halo_type, halo_parameterization=None, bounds=N
             lo, hi = float(b[i, 0]), float(b[i, 1])
             if not (lo <= x <= hi):
                 raise ValueError(f"theta out of bounds at i={i}: {x} not in [{lo}, {hi}]")
-
-    halo_param = (
-        nfw_vcirc_rs_to_rho_s(first, halo_scale)
-        if hp == "vcirc_rs"
-        else first
-    )
-
+    halo_param = ( nfw_vcirc_rs_to_rho_s(first, halo_scale) if hp == "vcirc_rs" else first )
     return (halo_param, halo_scale, MBH, ML, ht)
 
 def assert_theta_contract(theta, *, halo_type, bounds=None, require_mbh=True, require_ml=True, halo_parameterization=None):
@@ -396,19 +367,8 @@ def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps
     validj = PC.pyconvert(VecB, valid_py)
     vj = PC.pyconvert(VecF, v_py)
     vej = PC.pyconvert(VecF, ve_py)
-    kwargs = dict(
-        stellar_model=stellar_model,
-        surface_brightness_profile=surface_brightness_profile,
-        diag=bool(diag),
-        Nvbin=int(Nvbin),
-        Ntheta_launch=int(Ntheta_launch),
-        halo_q_axis_ratio=float(halo_q_axis_ratio),
-        karl_halo_params=karl_halo_params,
-        fill_pct=float(fill_pct),
-        regional_floor=float(regional_floor),
-        max_regional_gap=float(max_regional_gap),
-        shell_band_count=int(shell_band_count),
-    )
+    kwargs = dict( stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, diag=bool(diag), Nvbin=int(Nvbin), Ntheta_launch=int(Ntheta_launch), halo_q_axis_ratio=float(halo_q_axis_ratio), 
+        karl_halo_params=karl_halo_params, fill_pct=float(fill_pct), regional_floor=float(regional_floor), max_regional_gap=float(max_regional_gap), shell_band_count=int(shell_band_count))
     if velocity_edges is not None:
         kwargs["velocity_edges"] = PC.pyconvert(VecF, np.asarray(velocity_edges, dtype=float).ravel())
     if light_bin_edges_pc is not None:
@@ -420,7 +380,6 @@ def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps
         A, meta = out
         return np.asarray(A, float), dict(meta)
     return np.asarray(out, float)
-
 def build_A_matrix(obs, ctx, *, diag=False, config=None):
     mode = str(getattr(obs, "mode", "stellar")).strip().lower()
     if mode not in ("stellar", "karl", "losvd"):
@@ -493,13 +452,11 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
             for name in names:
                 if name in source and source[name] is not None:
                     return source[name]
-
         for name in names:
             if hasattr(obs, name):
                 value = getattr(obs, name)
                 if value is not None:
                     return value
-
         return default
 
     if stellar_model is None:
@@ -523,6 +480,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     Ntheta_launch = int( opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9))
     alphat = float(opt("KARL_ALPHAT", "alphat", default=cfg.get("ALPHAT", 1.0)))
     light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
+    light_sigma_tol = float(opt("KARL_LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
     delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
     maxiter = int( opt("KARL_MAXITER", "MAXITER", "maxiter", default=60))
     entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=1e-12))
@@ -647,6 +605,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     _Main.seval("_ospm_halo_type = " + json.dumps(str(halo_type)))
     _Main.seval(f"_ospm_alphat = {alphat!r}")
     _Main.seval(f"_ospm_light_rel_tol = {light_rel_tol!r}")
+    _Main.seval(f"_ospm_light_sigma_tol = {light_sigma_tol!r}")
     _Main.seval(f"_ospm_delta_chi2_iter_tol = {delta_chi2_iter_tol!r}")
     _Main.seval(f"_ospm_entropy_floor = {entropy_floor!r}")
     _Main.seval(f"_ospm_maxiter = {maxiter}")
@@ -681,6 +640,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
             surface_brightness_profile=_ospm_sb_profile,
             alphat=_ospm_alphat,
             light_rel_tol=_ospm_light_rel_tol,
+            light_sigma_tol=_ospm_light_sigma_tol,
             delta_chi2_iter_tol=_ospm_delta_chi2_iter_tol,
             entropy_floor=_ospm_entropy_floor,
             maxiter=_ospm_maxiter,

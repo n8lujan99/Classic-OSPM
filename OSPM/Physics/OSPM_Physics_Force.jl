@@ -7,11 +7,9 @@
 # closures, halo-context caching, and direct force/mass diagnostics.
 # Function names and public contracts are preserved.
 # ============================================================
-
 # ============================================================
 # §4  HALO PHYSICS
 # ============================================================
-
 
 @inline function karl_m_ellipsoidal(r::Float64, theta::Float64, qdm::Float64)
     q = max(abs(qdm), 1e-6)
@@ -72,7 +70,6 @@ end
 function karl_halo_from_params(; ihalo::Int=4, qdm::Float64=1.0, dis::Float64=1.0, v0::Float64=0.0, rc_pc::Float64=1.0, xmgamma::Float64=0.0, rsgamma_pc::Float64=1.0, gamma::Float64=1.0, cnfw::Float64=1.0, rsnfw_pc::Float64=1.0, gdennorm::Float64=1.0)
     return Dict{Symbol,Any}( :type => :karl_halo, :ihalo => ihalo, :qdm => qdm, :dis => dis, :v0 => v0, :rc_pc => rc_pc, :xmgamma => xmgamma, :rsgamma_pc => rsgamma_pc, :gamma => gamma, :cnfw => cnfw, :rsnfw_pc => rsnfw_pc, :gdennorm => gdennorm)
 end
-
 
 @inline function karl_halo_sig(halo)
     h = normalize_halo(halo)
@@ -479,8 +476,6 @@ end
     Phi22 = table.Phi[i + 1, j + 1]
     return (1.0 - t) * (1.0 - u) * Phi11 + t * (1.0 - u) * Phi21 + (1.0 - t) * u * Phi12 + t * u * Phi22
 end
-
-
 
 @inline function _interp_axisym_force(table, Rf::Float64, zf::Float64)
     R = max(abs(Rf), table.R_axis[1])

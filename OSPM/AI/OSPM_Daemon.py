@@ -56,6 +56,28 @@ torch.backends.cudnn.benchmark = False
 try: from sklearn.preprocessing import StandardScaler
 except Exception: StandardScaler = None
 
+PHASE_VOLUME_DIAG_COLUMNS = [
+    "phase_volume_valid",
+    "phase_volume_convention",
+    "phase_volume_normalization",
+    "phase_volume_launches_recorded",
+    "phase_volume_sos_recorded",
+    "phase_volume_valid_base_orbits",
+    "phase_volume_invalid_recorded_orbits",
+    "phase_volume_nested_groups",
+    "phase_volume_duplicate_area_clusters",
+    "phase_volume_duplicate_area_orbits",
+    "raw_phase_volume_min",
+    "raw_phase_volume_max",
+    "raw_phase_volume_dynamic_range",
+    "normalized_phase_volume_min",
+    "normalized_phase_volume_max",
+    "wphase_min",
+    "wphase_max",
+    "wphase_dynamic_range",
+    "wphase_pair_max_relative_mismatch",
+]
+
 def clamp(x, lo, hi): return max(lo, min(hi, x))
 def random_theta(bounds): return [np.random.uniform(lo, hi) for lo, hi in bounds]
 def min_dist(theta, arr):
@@ -315,11 +337,13 @@ class Agent(nn.Module):
 
 class Deck:
     def __init__(self, config):
-        self.config, self.path, self.cols = config, config["CSV_PATH"], config["REQUIRE_COLUMNS"]
+        required_columns = list(config["REQUIRE_COLUMNS"])
+        self.config = config
+        self.path = config["CSV_PATH"]
+        self.cols = list(dict.fromkeys(required_columns + PHASE_VOLUME_DIAG_COLUMNS))
         self.params, self.flush = config["PARAMETER_NAMES"], int(config.get("CSV_FLUSH_INTERVAL", 50))
         self._dirty = 0; self._buf = []; self._pbuf = []; self._sbuf = []
         self._load()
-
     def _load(self):
         d = os.path.dirname(self.path)
         if d: os.makedirs(d, exist_ok=True)
@@ -340,30 +364,24 @@ class Deck:
         print(self.df.head().to_string())
         self._params_arr = self.df[self.params].values.astype(float)
         self._status_arr = self.df["status"].values.astype(str)
-
     def _flush_buf(self):
         if not self._buf: return
         self.df = pd.concat([self.df, pd.DataFrame(self._buf, columns=self.cols)], ignore_index=True)
         self._params_arr = self.df[self.params].values.astype(float)
         self._status_arr = self.df["status"].values.astype(str)
         self._buf.clear(); self._pbuf.clear(); self._sbuf.clear()
-
     def save(self):
         self._flush_buf(); self.df.to_csv(self.path, index=False)
         print(f"[Deck] saved {len(self.df)} rows → {self.path}", flush=True)
-
     def _all_params(self):  return np.vstack([self._params_arr, np.array(self._pbuf)]) if self._pbuf else self._params_arr
     def _all_status(self):  return np.concatenate([self._status_arr, np.array(self._sbuf)]) if self._sbuf else self._status_arr
-
     def is_forbidden(self, theta, ndp=12):
         A, t = np.round(self._all_params(), ndp), np.round(theta, ndp)
         m = (A == t).all(axis=1)
         return (self._all_status()[m] == "forbidden").any() if m.any() else False
-
     def nearest_distance(self, theta, tol):
         A = self._all_params(); m = np.all(np.abs(A - theta) < tol, axis=1)
         return np.linalg.norm(A[m] - theta, axis=1).min() if m.any() else np.inf
-
     def add(self, theta, chi2, reward, pid, status, diag=None):
         row_dict = {k: theta[i] for i, k in enumerate(self.params)}
         row_dict |= dict(chi2=chi2, reward=reward, status=status, proposal_id=pid)
@@ -475,7 +493,6 @@ class Runner:
                          for i, (lo, hi) in enumerate(self.bounds)]
             else:
                 theta = random_theta(self.bounds)
-
             if deck.is_forbidden(theta):
                 continue
             if not self.fill_mode:
@@ -483,7 +500,6 @@ class Runner:
                     continue
                 if deck.nearest_distance(theta, self.min_d) < self.min_d:
                     continue
-
             self.recent.append(theta)
             self.step += 1
             out.append((theta, self.step))
@@ -561,6 +577,7 @@ def run_daemon(config, physics_engine):
     velocity_edges = opt("VELOCITY_EDGES", "velocity_edges", default=None)
     alphat = float(opt("KARL_ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
     light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
+    light_sigma_tol = float(opt("KARL_LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
     delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
     maxiter = int(opt("KARL_MAXITER", "maxiter", default=config.get("MAXITER", 60)))
     entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=config.get("ENTROPY_FLOOR", 1e-12)))
@@ -649,7 +666,7 @@ def run_daemon(config, physics_engine):
     print(
         f"[Daemon] Karl batch mode ON — Norbit={Norbit}, Nbase_orbit={Norbit // 2}, Nstar_vlos={nstar_vlos}, "
         f"Nvbin={nvbin}, Ntheta_launch={ntheta_launch}, alphat={alphat}, "
-        f"light_rel_tol={light_rel_tol}, delta_chi2_iter_tol={delta_chi2_iter_tol}, "
+        f"light_rel_tol={light_rel_tol}, light_sigma_tol={light_sigma_tol}, delta_chi2_iter_tol={delta_chi2_iter_tol}, "
         f"halo_q={halo_q_axis_ratio}, karl_halo_params_active={karl_halo_params is not None}",
         flush=True,
     )
@@ -781,6 +798,7 @@ def run_daemon(config, physics_engine):
                     Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
                     Main.seval(f"_alphat_jl = {float(alphat)!r}")
                     Main.seval(f"_light_rel_tol_jl = {float(light_rel_tol)!r}")
+                    Main.seval(f"_light_sigma_tol_jl = {float(light_sigma_tol)!r}")
                     Main.seval(f"_delta_chi2_iter_tol_jl = {float(delta_chi2_iter_tol)!r}")
                     Main.seval(f"_entropy_floor_jl = {float(entropy_floor)!r}")
                     Main.seval(f"_maxiter_jl = {int(maxiter)}")
@@ -813,6 +831,7 @@ stellar_model=_stellar_model_jl,
 surface_brightness_profile=_sb_profile_jl,
 alphat=_alphat_jl,
 light_rel_tol=_light_rel_tol_jl,
+light_sigma_tol=_light_sigma_tol_jl,
 delta_chi2_iter_tol=_delta_chi2_iter_tol_jl,
 entropy_floor=_entropy_floor_jl,
 maxiter=_maxiter_jl,
@@ -845,6 +864,7 @@ kinematic_bin_edges=_kin_bins_jl
                         chi2_outer_vec,
                         delta_chi2_iteration_vec,
                         max_light_relative_residual_vec,
+                        max_light_sigma_residual_vec,
                         light_constraint_ok_vec,
                         solver_converged_vec,
                         solver_iterations_vec,
@@ -872,6 +892,25 @@ kinematic_bin_edges=_kin_bins_jl
                         coverage_deadline_hit_vec,
                         successful_base_orbits_vec,
                         planned_base_orbits_vec,
+                        phase_volume_valid_vec,
+                        phase_volume_convention_vec,
+                        phase_volume_normalization_vec,
+                        phase_volume_launches_recorded_vec,
+                        phase_volume_sos_recorded_vec,
+                        phase_volume_valid_base_orbits_vec,
+                        phase_volume_invalid_recorded_orbits_vec,
+                        phase_volume_nested_groups_vec,
+                        phase_volume_duplicate_area_clusters_vec,
+                        phase_volume_duplicate_area_orbits_vec,
+                        raw_phase_volume_min_vec,
+                        raw_phase_volume_max_vec,
+                        raw_phase_volume_dynamic_range_vec,
+                        normalized_phase_volume_min_vec,
+                        normalized_phase_volume_max_vec,
+                        wphase_min_vec,
+                        wphase_max_vec,
+                        wphase_dynamic_range_vec,
+                        wphase_pair_max_relative_mismatch_vec,
                     ) = batch_result
 
                     t_acc["eval"] += time.perf_counter() - chunk_t0
@@ -887,6 +926,7 @@ kinematic_bin_edges=_kin_bins_jl
                             chi2_losvd=chi2,
                             delta_chi2_iteration=float(delta_chi2_iteration_vec[j]),
                             max_light_relative_residual=float(max_light_relative_residual_vec[j]),
+                            max_light_sigma_residual=float(max_light_sigma_residual_vec[j]),
                             light_constraint_ok=bool(light_constraint_ok_vec[j]),
                             solver_converged=bool(solver_converged_vec[j]),
                             solver_iterations=int(solver_iterations_vec[j]),
@@ -902,6 +942,7 @@ kinematic_bin_edges=_kin_bins_jl
                             halo_type=str(halo_type_variant),
                             alphat=alphat,
                             light_rel_tol=light_rel_tol,
+                            light_sigma_tol=light_sigma_tol,
                             delta_chi2_iter_tol=delta_chi2_iter_tol,
                             halo_q_axis_ratio=halo_q_axis_ratio,
                             karl_halo_params_active=bool(karl_halo_params),
@@ -924,6 +965,25 @@ kinematic_bin_edges=_kin_bins_jl
                             coverage_deadline_hit=bool(coverage_deadline_hit_vec[j]),
                             successful_base_orbits=int(successful_base_orbits_vec[j]),
                             planned_base_orbits=int(planned_base_orbits_vec[j]),
+                            phase_volume_valid=bool(phase_volume_valid_vec[j]),
+                            phase_volume_convention=str(phase_volume_convention_vec[j]),
+                            phase_volume_normalization=str(phase_volume_normalization_vec[j]),
+                            phase_volume_launches_recorded=int(phase_volume_launches_recorded_vec[j]),
+                            phase_volume_sos_recorded=int(phase_volume_sos_recorded_vec[j]),
+                            phase_volume_valid_base_orbits=int(phase_volume_valid_base_orbits_vec[j]),
+                            phase_volume_invalid_recorded_orbits=int(phase_volume_invalid_recorded_orbits_vec[j]),
+                            phase_volume_nested_groups=int(phase_volume_nested_groups_vec[j]),
+                            phase_volume_duplicate_area_clusters=int(phase_volume_duplicate_area_clusters_vec[j]),
+                            phase_volume_duplicate_area_orbits=int(phase_volume_duplicate_area_orbits_vec[j]),
+                            raw_phase_volume_min=float(raw_phase_volume_min_vec[j]),
+                            raw_phase_volume_max=float(raw_phase_volume_max_vec[j]),
+                            raw_phase_volume_dynamic_range=float(raw_phase_volume_dynamic_range_vec[j]),
+                            normalized_phase_volume_min=float(normalized_phase_volume_min_vec[j]),
+                            normalized_phase_volume_max=float(normalized_phase_volume_max_vec[j]),
+                            wphase_min=float(wphase_min_vec[j]),
+                            wphase_max=float(wphase_max_vec[j]),
+                            wphase_dynamic_range=float(wphase_dynamic_range_vec[j]),
+                            wphase_pair_max_relative_mismatch=float(wphase_pair_max_relative_mismatch_vec[j]),
                         )
                         if _record(theta, pid, label, status, chi2, diag=diag):
                             stop = True
