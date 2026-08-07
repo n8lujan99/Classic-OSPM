@@ -160,7 +160,7 @@ def _build_general_defaults(local_debug):
         "IMPROVEMENT_EPSILON": 1e-6,
         "LOG_INTERVAL": 1 if local_debug else 10,
         "PROF_EVERY": 1 if local_debug else 20,
-        "EVAL_TIMEOUT_S": 200.0 if local_debug else 600.0,
+        "EVAL_TIMEOUT_S": 200.0 if local_debug else 1800.0,
         # Debug evaluation policy
         "EVAL_VARIANTS": ["full"] if local_debug else None,
         # Physical constants
