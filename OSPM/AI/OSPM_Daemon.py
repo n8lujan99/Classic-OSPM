@@ -593,7 +593,9 @@ def run_daemon(config, physics_engine):
     orbit_warn_regional_floor = float(opt("ORBIT_WARN_REGIONAL_FLOOR", default=0.80))
     orbit_warn_max_regional_gap = float(opt("ORBIT_WARN_MAX_REGIONAL_GAP", default=0.15))
     model_owner_limit = int(opt("MODEL_OWNER_LIMIT", default=0))
+    threads_per_model = int(opt("THREADS_PER_MODEL", "threads_per_model", default=8))
 
+    
     if base_halo_type == "karl_halo":
         raise RuntimeError(
             "HALO_TYPE='karl_halo' is disabled: its density functions use parsec-valued "
@@ -817,6 +819,7 @@ def run_daemon(config, physics_engine):
                     Main.seval(f"_orbit_warn_regional_floor_jl = {float(orbit_warn_regional_floor)!r}")
                     Main.seval(f"_orbit_warn_max_regional_gap_jl = {float(orbit_warn_max_regional_gap)!r}")
                     Main.seval(f"_model_owner_limit_jl = {int(model_owner_limit)}")
+                    Main.seval(f"_threads_per_model_jl = {int(threads_per_model)}")
                     batch_result = Main.seval("""
 OSPMPhysicsSpherical.evaluate_batch_theta(
 _theta_mat_jl,
@@ -849,6 +852,7 @@ warn_success_pct=_orbit_warn_success_pct_jl,
 warn_regional_floor=_orbit_warn_regional_floor_jl,
 warn_max_regional_gap=_orbit_warn_max_regional_gap_jl,
 model_owner_limit=_model_owner_limit_jl,
+threads_per_model=_threads_per_model_jl,
 halo_q_axis_ratio=_halo_q_axis_ratio_jl,
 karl_halo_params=_karl_halo_params_jl,
 velocity_edges=_velocity_edges_jl,
