@@ -1432,7 +1432,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     light_sigma_tol > 0.0 || error("light_sigma_tol must be positive")
     delta_chi2_iter_tol >= 0.0 || error("delta_chi2_iter_tol must be nonnegative")
     threads_per_model > 0 || error("threads_per_model must be positive")
-    BLAS.set_num_threads(30) # set to highest for a single model test change for multi-model runs
+    BLAS.set_num_threads(nbatch == 1 ? Threads.nthreads() : 1) # set to highest for a single model test change for multi-model runs
     allocated_threads = tryparse(Int, get(ENV, "SLURM_CPUS_PER_TASK", ""))
     if allocated_threads !== nothing &&
     Threads.nthreads() != allocated_threads
