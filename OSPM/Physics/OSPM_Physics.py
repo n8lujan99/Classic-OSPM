@@ -483,7 +483,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     light_sigma_tol = float(opt("KARL_LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
     delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
     maxiter = int( opt("KARL_MAXITER", "MAXITER", "maxiter", default=60))
-    entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=1e-12))
+    entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=1e-30))
     timeout_s = float(opt( "EVAL_TIMEOUT_S", "EVAL_TIMEOUT", "timeout_s", default=120.0, ))
     R_inner_pc = float(opt("R_INNER_DIAG_PC", "R_inner_pc", default=30.0))
     halo_q_axis_ratio = float( opt( "HALO_Q_AXIS_RATIO", "halo_q_axis_ratio", default=1.0, ))

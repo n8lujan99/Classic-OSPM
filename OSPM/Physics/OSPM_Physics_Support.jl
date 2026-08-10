@@ -1,4 +1,4 @@
-# ============================================================
+# ========================================================================================================================
 # OSPM_Physics_Support.jl — Karl-style support layer.
 # Included by OSPM_Physics_Spherical.jl — do NOT load directly.
 # Contains only the shared support shell and Karl-style observable machinery:
@@ -7,7 +7,7 @@
 # weight/SPEAR and force machinery.
 # Applied new karl fixes on 04/06/26 @1600
 # Legacy star-level likelihood code and old back-compat sigma2 paths removed.
-# ============================================================
+# ========================================================================================================================
 # §1  CONSTANTS
 const NTHREADS = Threads.nthreads()
 const G    = 6.67430e-11
@@ -43,17 +43,22 @@ const DEFAULT_DR_FLOOR_PC     = 0.0       # floor on dR (parsecs)
 # -- Karl-style binned LOSVD / projected-light fit --
 const DEFAULT_MIN_STARS_PER_BIN = 20       # minimum stars per projected radial bin
 const DEFAULT_NVBIN             = 21       # LOSVD velocity bins per radial aperture
+
 const DEFAULT_KARL_ALPHA        = 1e-4     # legacy value retained only for call compatibility
 const DEFAULT_KARL_ALPHAT       = 1.0      # Karl-style data-mismatch multiplier in entropy mode
 const DEFAULT_KARL_MAXITER      = 60       # Karl SPEAR/Newton iteration cap
-const DEFAULT_KARL_ENTROPY_FLOOR = 1e-12   # floor for log(w_i*wphase_i) entropy
+const DEFAULT_KARL_ENTROPY_FLOOR = 1e-30   # floor for log(w_i*wphase_i) entropy
+
 const DEFAULT_KARL_APFAC         = 1.0      # Karl SPEAR step factor
+
 const DEFAULT_KARL_LIGHT_REL_TOL = 0.01
 const DEFAULT_KARL_DELTA_CHI2_ITER_TOL = 0.3
+const DEFAULT_KARL_INVALID_SIGMA_SENTINEL = -666.0
+const DEFAULT_KARL_STEP_SAFETY = 0.90
 
-# ============================================================
+# ========================================================================================================================
 # §2  TYPES, CACHES, INLINE HELPERS
-# ============================================================
+# ========================================================================================================================
 @inline f64(x)=Float64(x)
 @inline safe_sign(x)=x>0 ? 1.0 : (x<0 ? -1.0 : 0.0)
 @inline _ssin(theta::Float64)=begin s=sin(theta); abs(s)>1e-12 ? s : safe_sign(s)*1e-12 end
@@ -73,9 +78,9 @@ end
 const _HALO_CTX_CACHE = Dict{Tuple{Float64,Float64,Float64,Float64,UInt64,Symbol,Float64,Int,Float64},HaloContext}()
 const _HALO_LOCK = ReentrantLock()
 
-# ============================================================
+# ========================================================================================================================
 # §3  SMALL UTILITIES
-# ============================================================
+# ========================================================================================================================
 @inline function normalize_halo(halo)
     h=Dict{Symbol,Any}()
     for (k,v) in halo
@@ -92,9 +97,9 @@ build_R_halo_physical(n; rmin=1e-3, rmax=300.0)=logspace10(log10(rmin), log10(rm
     return round(x, digits=digits)
 end
 
-# ============================================================
+# ========================================================================================================================
 # §3b  KARL-STYLE OBSERVABLE HELPERS
-# ============================================================
+# ========================================================================================================================
 # These helpers support the copied Karl-style OSPM branch.
 # They build projected radial bins, LOSVD velocity bins, observed target vectors,
 # surface-brightness light targets, and WLS/NNLS-style orbit weights.
@@ -399,40 +404,27 @@ function light_sigma_from_surface_brightness(profile, spatial_edges_m::Vector{Fl
     end
 
     # Fallback matching the existing unbinned R_pc + Sigma target path.
-    haskey(p, :R_pc) ||
-        error("surface_brightness_profile must include light_frac or R_pc + Sigma")
-
+    haskey(p, :R_pc) || error("surface_brightness_profile must include light_frac or R_pc + Sigma")
     R_m = Float64.(p[:R_pc]) .* pc
-
-    length(R_m) == length(Sigma) ||
-        error("surface_brightness_profile R_pc and Sigma lengths do not match")
-
+    length(R_m) == length(Sigma) || error("surface_brightness_profile R_pc and Sigma lengths do not match")
     raw_light = zeros(Float64, Nspatial)
     raw_var = zeros(Float64, Nspatial)
-
     @inbounds for k in eachindex(R_m)
         ib = _bin_index(spatial_edges_m, R_m[k])
-
         if ib > 0 && isfinite(Sigma[k]) && Sigma[k] >= 0.0
             raw_light[ib] += Sigma[k]
             raw_var[ib] += Sigma_err[k]^2
         end
     end
-
     out_sigma = sqrt.(raw_var)
-
     if normalize
         light_sum = sum(raw_light)
-        isfinite(light_sum) && light_sum > 0.0 ||
-            error("surface_brightness_profile produced zero light while normalizing uncertainties")
-
+        isfinite(light_sum) && light_sum > 0.0 || error("surface_brightness_profile produced zero light while normalizing uncertainties")
         out_sigma ./= light_sum
     end
-
     @inbounds for ib in eachindex(out_sigma)
         out_sigma[ib] = max(out_sigma[ib], sigma_floor)
     end
-
     return out_sigma
 end
 
@@ -441,17 +433,14 @@ function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVe
     light_edges_use = light_edges === nothing ? kinematic_edges : resolve_karl_light_edges(light_edges)
     velocity_edges = Float64.(velocity_edges)
     vlos_idx = Int[]
-
     @inbounds for i in eachindex(valid_vlos)
         valid_vlos[i] && isfinite(R_star_m[i]) && isfinite(v_star_mps[i]) && isfinite(verr_star_mps[i]) && verr_star_mps[i] > 0.0 && push!(vlos_idx, i)
     end
-
     Nspatial = length(kinematic_edges) - 1
     Nvbin = length(velocity_edges) - 1
     Nlosvd = Nspatial * Nvbin
     counts_losvd = zeros(Float64, Nlosvd)
     counts_by_spatial = zeros(Float64, Nspatial)
-
     @inbounds for idx in vlos_idx
         ib = _bin_index(kinematic_edges, R_star_m[idx])
         ib == 0 && continue
@@ -459,11 +448,9 @@ function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVe
         v0 = f64(v_star_mps[idx])
         sig = f64(verr_star_mps[idx])
         psum = 0.0
-
         for jb in 1:Nvbin
             psum += _gaussian_bin_probability(velocity_edges[jb], velocity_edges[jb + 1], v0, sig)
         end
-
         if psum > 0.0
             for jb in 1:Nvbin
                 row = (ib - 1) * Nvbin + jb
@@ -479,16 +466,11 @@ function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVe
             end
         end
     end
-
     light_target = light_target_from_surface_brightness(surface_brightness_profile, light_edges_use; normalize=true)
     light_sigma = light_sigma_from_surface_brightness(surface_brightness_profile, light_edges_use; normalize=true, sigma_floor=sigma_floor)
-
-    length(light_sigma) == length(light_target) ||
-        error("light_sigma length does not match light_target")
-
+    length(light_sigma) == length(light_target) || error("light_sigma length does not match light_target")
     losvd_light_target = light_target_from_surface_brightness(surface_brightness_profile, kinematic_edges; normalize=false)
     losvd_target = zeros(Float64, Nlosvd)
-
     @inbounds for ib in 1:Nspatial
         nbin = counts_by_spatial[ib]
         nbin <= 0.0 && continue
@@ -521,17 +503,17 @@ function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVe
     return losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial
 end
 
-# ============================================================
+# ========================================================================================================================
 # §4  KARL WEIGHT / SPEAR SOLVER
-# ============================================================
+# ========================================================================================================================
 # The entropy, wphase, expanded Cm, LOSVD slack-variable SPEAR solve,
 # xmu helpers, and χ² scoring live in OSPM_Physics_Weights.jl.
 include("OSPM_Physics_Weights.jl")
 include("OSPM_Physics_Force.jl")
 
-# ============================================================
+# ========================================================================================================================
 # §5  ORBIT INTEGRATION (THIS IS THE CURRENT PLACE FOR EDITS)
-# ============================================================
+# ========================================================================================================================
 @inline function derivs(s::SVector{4,Float64}, Lz::Float64, frc, R)
     invalid = SVector(NaN, NaN, NaN, NaN)
     Rcyl, z, vR, vz = s

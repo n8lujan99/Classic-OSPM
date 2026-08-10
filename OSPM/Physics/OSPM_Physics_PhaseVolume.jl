@@ -1,4 +1,4 @@
-# ============================================================
+# ========================================================================================================================
 # OSPM_Physics_PhaseVolume.jl — Karl-style orbit phase-volume machinery.
 # Included by OSPM_Physics_Support.jl — do NOT load directly.
 # Reproduces the Karl area.f / phasvol.f calculation in the form used by
@@ -6,25 +6,20 @@
 #
 #   1. Record one equatorial surface-of-section (SOS) using (r, |v_r|).
 #   2. Integrate the enclosed SOS area for every base orbit.
-#   3. At fixed launch-grid (E, |L_z|), difference nested SOS areas to
-#      obtain the third-integral cell area.
-#   4. Multiply by the local energy and angular-momentum cell widths:
-#          phase_volume_i = ΔA_SOS,i * ΔE_i * Δ|L_z|_i
-#   5. Return wphase_i = 1 / phase_volume_i because Karl entropy type 2 is
-#          S = -Σ w_i log(w_i * wphase_i).
-
+#   3. At fixed launch-grid (E, |L_z|), difference nested SOS areas to obtain the third-integral cell area.
+#   4. Multiply by the local energy and angular-momentum cell widths: phase_volume_i = ΔA_SOS,i * ΔE_i * Δ|L_z|_i
+#   5. Return wphase_i = 1 / phase_volume_i because Karl entropy type 2 is S = -Σ w_i log(w_i * wphase_i).
 # A common normalization of every phase volume does not change the fitted
 # weights.  The raw Karl-comparable values are retained in the result.
-# ============================================================
-
+# ========================================================================================================================
 const DEFAULT_KARL_PHASE_MIN_SOS_POINTS = 8
 const DEFAULT_KARL_PHASE_DUPLICATE_RTOL = 1.0e-10
 const DEFAULT_KARL_PHASE_RADIUS_RTOL = 1.0e-10
 const DEFAULT_KARL_PHASE_SECTION_THETA = pi / 2
 
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 # Per-library phase-volume state
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 
 mutable struct KarlPhaseVolumeState
     Nbase_orbit::Int
@@ -62,7 +57,6 @@ end
 #Record the physical launch coordinates and their discrete Karl-grid labels.
 #Call this after `launch_orbit_apocenter` succeeds.  It may be called again for
 #a retry; the final successful launch should be the one left in the state.
-
 function register_karl_phase_launch!( st::KarlPhaseVolumeState, base_index::Int; energy::Real, lz::Real, energy_index::Int, lz_index::Int, third_index::Int)
     _karl_phase_check_index(st, base_index)
     E = Float64(energy)
@@ -81,9 +75,9 @@ function register_karl_phase_launch!( st::KarlPhaseVolumeState, base_index::Int;
     return nothing
 end
 
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 # Karl equatorial surface of section
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 #collect_karl_equatorial_sos(...)
 #Extract Karl's surface of section from an integrated Julia orbit.
 #The original Fortran orbit code stores a point when the latitude crosses from
@@ -93,7 +87,6 @@ end
 #crossing_mode=:karl_step` reproduces the Fortran sampling.  The optional
 #:linear` mode interpolates to the crossing and is intended only as a numerical
 #diagnostic.
-
 function collect_karl_equatorial_sos( r::AbstractVector{<:Real}, vr::AbstractVector{<:Real}, theta::AbstractVector{<:Real}; section_theta::Float64=DEFAULT_KARL_PHASE_SECTION_THETA, crossing_mode::Symbol=:karl_step,
     direction::Symbol=:up, skip_first::Bool=true)
     n = length(r)
@@ -174,7 +167,6 @@ end
 #record_karl_phase_orbit!(st, base_index, r, vr, theta; ...)
 #Convenience hook for the orbit worker.  The launch must already have been
 #registered with `register_karl_phase_launch!`.
-
 function record_karl_phase_orbit!(st::KarlPhaseVolumeState, base_index::Int, r::AbstractVector{<:Real}, vr::AbstractVector{<:Real}, theta::AbstractVector{<:Real};
     section_theta::Float64=DEFAULT_KARL_PHASE_SECTION_THETA, crossing_mode::Symbol=:karl_step, direction::Symbol=:up, skip_first::Bool=true)
     _karl_phase_check_index(st, base_index)
@@ -185,9 +177,9 @@ function record_karl_phase_orbit!(st::KarlPhaseVolumeState, base_index::Int, r::
     return length(rsos)
 end
 
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 # area.f equivalent: enclosed area in the (r, v_r) surface of section
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 
 function _karl_phase_upper_envelope(sos_r::AbstractVector{<:Real}, sos_vr_abs::AbstractVector{<:Real}; radius_rtol::Float64=DEFAULT_KARL_PHASE_RADIUS_RTOL)
     length(sos_r) == length(sos_vr_abs) ||
@@ -230,7 +222,6 @@ end
 #Trapezoidally integrate the positive-|v_r| SOS branch and reflect it across
 #`v_r=0`.  This is the Julia equivalent of Karl's `area.f` calculation for the
 #stored `(r, abs(vr))` section.
-
 @inline function _karl_phase_is_circular_boundary(st::KarlPhaseVolumeState, base_index::Int)
     _karl_phase_check_index(st, base_index)
     st.launch_recorded[base_index] || return false
@@ -260,9 +251,9 @@ function karl_sos_enclosed_area(sos_r::AbstractVector{<:Real}, sos_vr_abs::Abstr
     return isfinite(area) && area > 0.0 ? area : NaN
 end
 
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 # phasvol.f helpers: launch-grid widths and nested-area differences
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 
 @inline function _karl_phase_median(values::Vector{Float64})
     isempty(values) && return NaN
@@ -402,9 +393,9 @@ function _karl_phase_nested_area_differences!( delta_area::Vector{Float64}, sos_
     return duplicate_clusters, duplicate_orbits, length(groups)
 end
 
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 # Complete Karl phase-volume calculation
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 
 function _karl_phase_repeat_pairs(values::Vector{Float64})
     paired = Vector{Float64}(undef, 2 * length(values))
@@ -563,7 +554,6 @@ end
 #build_karl_wphase(st; kwargs...)
 #Return only the planned prograde/retrograde inverse phase-volume vector and its
 #diagnostics.  This is the direct handoff to `solve_weights_karl_expanded_cm`.
-
 function build_karl_wphase(st::KarlPhaseVolumeState; kwargs...)
     result = compute_karl_phase_volumes(st; kwargs...)
     return result.wphase_paired, result.diagnostics
@@ -571,7 +561,6 @@ end
 
 #compact_karl_wphase(wphase_paired, successful_columns, planned_norbit)
 #Apply the exact successful-column mask used for `A_losvd` and `A_light`.
-
 function compact_karl_wphase( wphase_paired::AbstractVector{<:Real}, successful_columns::AbstractVector{<:Integer}, planned_norbit::Int)
     length(wphase_paired) == planned_norbit ||
         error("wphase length $(length(wphase_paired)) does not match planned Norbit=$planned_norbit")
@@ -581,9 +570,9 @@ function compact_karl_wphase( wphase_paired::AbstractVector{<:Real}, successful_
     return compacted
 end
 
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 # Deterministic numerical self-check
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 
 function karl_phase_volume_selftest(; rtol::Float64=2.0e-2)
     npoint = 2048
@@ -601,7 +590,6 @@ function karl_phase_volume_selftest(; rtol::Float64=2.0e-2)
     area2 = karl_sos_enclosed_area(r2, v2; min_points=8)
     expected1 = pi * a1 * b1
     expected2 = pi * a2 * b2
-
     isapprox(area1, expected1; rtol=rtol) ||
         error("Karl SOS area selftest failed for orbit 1: got $area1 expected $expected1")
     isapprox(area2, expected2; rtol=rtol) ||

@@ -1,3 +1,7 @@
+# ========================================================================================================================
+
+# ========================================================================================================================
+
 module OSPMPhysicsSpherical
 # This file is becoming very large and may need to be split into support and weights
 @info "OSPMPhysicsSpherical Karl-style loaded from" @__FILE__
@@ -6,9 +10,7 @@ export build_R_halo_physical, halo_from_theta, tables_spherical, make_potential_
 include("OSPM_Physics_Support.jl")
 include("OSPM_Physics_PhaseVolume.jl")
 @info "OSPMPhysicsSpherical supports spherical frc(r,theta)->(fr,0) and axisymmetric frc(r,theta)->(fr,ftheta)"
-# HOT PATH — Karl-style OSPM A-matrix builder & batch evaluator.
-# Applied new karl fixes on 04/06/26 @1600
-
+# ========================================================================================================================
 const DEFAULT_ORBIT_FILL_PCT = 0.85
 const DEFAULT_ORBIT_REGIONAL_FLOOR = 0.80
 const DEFAULT_ORBIT_MAX_REGIONAL_GAP = 0.10 
@@ -19,9 +21,9 @@ const DEFAULT_ORBIT_WARN_SUCCESS_PCT = 0.99
 const DEFAULT_ORBIT_WARN_REGIONAL_FLOOR = 0.80
 const DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP = 0.15
 
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 # Work state
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
 mutable struct OrbitWorkState
     Norbit::Int
     Nbase_orbit::Int
@@ -823,14 +825,7 @@ end
     return "middle"
 end
 
-function _coverage_metadata( coverage;
-    fill_pct::Float64,
-    regional_floor::Float64,
-    max_regional_gap::Float64,
-    warn_fill_pct::Float64,
-    warn_success_pct::Float64,
-    warn_regional_floor::Float64,
-    warn_max_regional_gap::Float64)
+function _coverage_metadata( coverage; fill_pct::Float64, regional_floor::Float64, max_regional_gap::Float64, warn_fill_pct::Float64, warn_success_pct::Float64, warn_regional_floor::Float64, warn_max_regional_gap::Float64)
     strict_pass = coverage.accepted
     soft_pass =
         coverage.coverage_fraction >= warn_fill_pct &&
@@ -841,31 +836,25 @@ function _coverage_metadata( coverage;
         coverage.shell_coverage_gap <= warn_max_regional_gap &&
         coverage.lfrac_coverage_gap <= warn_max_regional_gap &&
         coverage.theta_coverage_gap <= warn_max_regional_gap
-
     coverage_status = strict_pass ? "strict_pass" :
         (soft_pass ? "coverage_warn" : "severe_coverage_warn")
-
     issue_axes = String[]
     coverage.coverage_fraction < fill_pct && push!(issue_axes, "total")
     for (axis_name, axis_min, axis_gap) in (
         ("shell", coverage.shell_minimum_coverage, coverage.shell_coverage_gap),
         ("lfrac", coverage.lfrac_minimum_coverage, coverage.lfrac_coverage_gap),
-        ("theta", coverage.theta_minimum_coverage, coverage.theta_coverage_gap),
-    )
-        (axis_min < regional_floor || axis_gap > max_regional_gap) &&
-            push!(issue_axes, axis_name)
+        ("theta", coverage.theta_minimum_coverage, coverage.theta_coverage_gap))
+        (axis_min < regional_floor || axis_gap > max_regional_gap) && push!(issue_axes, axis_name)
     end
     !isempty(coverage.joint_holes) && push!(issue_axes, "joint")
     unique!(issue_axes)
     issue_axis = isempty(issue_axes) ? "none" :
         (length(issue_axes) == 1 ? only(issue_axes) : "multiple")
-
     shell_coverages = [Float64(stat.coverage_fraction) for stat in coverage.shell_bands]
     max_shell_coverage = isempty(shell_coverages) ? 0.0 : maximum(shell_coverages)
     issue_shell_bands = Int[]
     for stat in coverage.shell_bands
-        if stat.coverage_fraction < regional_floor ||
-           max_shell_coverage - stat.coverage_fraction > max_regional_gap
+        if stat.coverage_fraction < regional_floor || max_shell_coverage - stat.coverage_fraction > max_regional_gap
             push!(issue_shell_bands, Int(stat.label))
         end
     end
@@ -874,7 +863,6 @@ function _coverage_metadata( coverage;
     end
     sort!(issue_shell_bands)
     unique!(issue_shell_bands)
-
     issue_region = "none"
     if !isempty(issue_shell_bands)
         n_shell_bands = length(coverage.shell_bands)
@@ -883,14 +871,7 @@ function _coverage_metadata( coverage;
     elseif coverage.coverage_fraction < fill_pct
         issue_region = "all"
     end
-
-    return (
-        status=coverage_status,
-        issue_axis=issue_axis,
-        issue_region=issue_region,
-        issue_shell_bands=join(issue_shell_bands, ";"),
-        reasons=join(coverage.rejection_reasons, " | "),
-    )
+    return (status=coverage_status, issue_axis=issue_axis, issue_region=issue_region, issue_shell_bands=join(issue_shell_bands, ";"), reasons=join(coverage.rejection_reasons, " | "))
 end
 
 function _maybe_stop_orbit_phase_for_coverage!(st::OrbitWorkState)
@@ -948,10 +929,9 @@ function _build_compact_karl_wphase(st::OrbitWorkState, successful_columns::Vect
         error("compacted Karl wphase length does not match successful orbit columns")
     return wphase_use, phase_diag
 end
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
+# ========================================================================================================================
 # This is the main worker function that runs in a thread to compute orbits and fill the A-matrix.
-
 function _orbit_worker!(st::OrbitWorkState)
 
     col_losvd_pro = zeros(Float64, st.Nlosvd)
@@ -961,9 +941,11 @@ function _orbit_worker!(st::OrbitWorkState)
     vlos_pro_buf = Vector{Float64}(undef, st.nsteps)
     vlos_ret_buf = Vector{Float64}(undef, st.nsteps)
     energy_drift_tolerance = 1.0e-2
-    dt_scales = (1.0, 0.5, 0.25, 0.125, 0.0625)
+    dt_scales = (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125)
+    continuation_step_safeties = (0.10, 0.075, 0.05, 0.025, 0.0125)
     sos_chunk_base_steps = 4_000
-    max_sos_base_steps = 40_000
+    max_sos_base_steps = max(st.nsteps, 40_000)
+    max_plunging_sos_base_steps = max(st.nsteps, 120_000)
 
     function integrate_stably(ic_use, Lz_use, base_steps::Int; start_scale::Float64=1.0)
         last_result = nothing
@@ -990,21 +972,17 @@ function _orbit_worker!(st::OrbitWorkState)
         scaled_steps = ceil(Int, base_steps / dt_scale)
         scaled_energy_check_every = max(1, round(Int, 100 / dt_scale))
         last_result = nothing
-
-        for local_step_safety in (0.10, 0.075, 0.05)
+        for local_step_safety in continuation_step_safeties
             time_ns() > st.t_deadline && return nothing
-
-            last_result = integrate_orbit_rk4(ic=ic_use, xLz=Lz_use, orbit_ctx=st.orbit_ctx, nsteps=scaled_steps, pot=st.pot, return_diag=true, dt_scale=dt_scale,
-                energy_check_every=scaled_energy_check_every, max_relative_energy_drift_allowed=energy_drift_tolerance, local_step_safety=local_step_safety,
-                continuation_state=(previous_diag.final_R, previous_diag.final_z, previous_diag.final_vR, previous_diag.final_vz), reference_energy=reference_energy)
-
+            st.phase[] == 1 || return nothing
+            last_result = integrate_orbit_rk4( ic=ic_use, xLz=Lz_use, orbit_ctx=st.orbit_ctx, nsteps=scaled_steps, pot=st.pot, return_diag=true, dt_scale=dt_scale,
+                energy_check_every=scaled_energy_check_every, max_relative_energy_drift_allowed=energy_drift_tolerance, local_step_safety=local_step_safety, max_substeps_per_step=1024,
+                continuation_state=( previous_diag.final_R, previous_diag.final_z, previous_diag.final_vR, previous_diag.final_vz), reference_energy=reference_energy)
             diag = last_result[5]
-
             if diag.termination_reason === :completed && diag.energy_valid
                 return last_result
             end
         end
-
         return last_result
     end
 
@@ -1058,9 +1036,7 @@ function _orbit_worker!(st::OrbitWorkState)
         end
 
         st.attempts_used[c_claim] = 1
-
-        ic, Lz0, E0, vc, launch_state = launch_orbit_apocenter(rapo=rapo, theta0=theta0, Lz_frac=lf, pot=st.pot, frc=st.frc, dt_frac=st.dt_frac_orbit,
-            fixed_energy=E_family, fixed_lz=Lz_family, fixed_rturn=rturn)
+        ic, Lz0, E0, vc, launch_state = launch_orbit_apocenter(rapo=rapo, theta0=theta0, Lz_frac=lf, pot=st.pot, frc=st.frc, dt_frac=st.dt_frac_orbit, fixed_energy=E_family, fixed_lz=Lz_family, fixed_rturn=rturn)
 
         if launch_state != :ok
             st.failure_stage[c_claim] = :launch_failed
@@ -1117,62 +1093,47 @@ function _orbit_worker!(st::OrbitWorkState)
         else
             collect_karl_equatorial_sos(r, vr, theta; section_theta=DEFAULT_KARL_PHASE_SECTION_THETA, crossing_mode=:karl_step, direction=:up, skip_first=true)
         end
-
         if !circular_boundary && !equatorial_planar && st.force_geometry === :axisymmetric_density_grid &&
            length(sos_r) < DEFAULT_KARL_PHASE_MIN_SOS_POINTS
-
             base_steps_used = st.nsteps
+            sos_base_step_limit = lfrac_id == 1 ? max_plunging_sos_base_steps : max_sos_base_steps
             extension_failure = nothing
-
-            while length(sos_r) < DEFAULT_KARL_PHASE_MIN_SOS_POINTS && base_steps_used < max_sos_base_steps
+            while length(sos_r) < DEFAULT_KARL_PHASE_MIN_SOS_POINTS && base_steps_used < sos_base_step_limit
                 if time_ns() > st.t_deadline
                     st.failure_stage[c_claim] = :deadline_during_extended_integration
                     return nothing
                 end
-
-                chunk_base_steps = min(sos_chunk_base_steps, max_sos_base_steps - base_steps_used)
+                chunk_base_steps = min(sos_chunk_base_steps, sos_base_step_limit - base_steps_used)
                 continuation_result = continue_orbit_chunk(ic, Lz0, chunk_base_steps, integration_diag, reference_energy)
-
                 if continuation_result === nothing
                     st.failure_stage[c_claim] = :deadline_during_extended_integration
                     return nothing
                 end
-
                 r_chunk, vr_chunk, theta_chunk, vtheta_chunk, chunk_diag = continuation_result
-
                 orbit_max_abs_drift = max(orbit_max_abs_drift, chunk_diag.max_absolute_energy_drift)
                 orbit_max_rel_drift = max(orbit_max_rel_drift, chunk_diag.max_relative_energy_drift)
-
                 if !chunk_diag.energy_valid
                     store_integration_diag!(c_claim, chunk_diag, length(r) + length(r_chunk), reference_energy, orbit_max_abs_drift, orbit_max_rel_drift)
                     extension_failure = :extended_energy_drift_exceeded
                     break
-
                 elseif chunk_diag.termination_reason !== :completed
                     store_integration_diag!(c_claim, chunk_diag, length(r) + length(r_chunk), reference_energy, orbit_max_abs_drift, orbit_max_rel_drift)
                     extension_failure = :extended_integration_terminated
                     break
-
                 elseif isempty(r_chunk)
                     store_integration_diag!(c_claim, chunk_diag, length(r), reference_energy, orbit_max_abs_drift, orbit_max_rel_drift)
                     extension_failure = :empty_extended_integration
                     break
                 end
-
                 append!(r, r_chunk)
                 append!(vr, vr_chunk)
                 append!(theta, theta_chunk)
                 append!(vtheta, vtheta_chunk)
-
                 integration_diag = chunk_diag
                 base_steps_used += chunk_base_steps
-
                 store_integration_diag!(c_claim, integration_diag, length(r), reference_energy, orbit_max_abs_drift, orbit_max_rel_drift)
-
-                sos_r, sos_vr_abs = collect_karl_equatorial_sos(r, vr, theta; section_theta=DEFAULT_KARL_PHASE_SECTION_THETA,
-                    crossing_mode=:karl_step, direction=:up, skip_first=true)
+                sos_r, sos_vr_abs = collect_karl_equatorial_sos(r, vr, theta; section_theta=DEFAULT_KARL_PHASE_SECTION_THETA, crossing_mode=:karl_step, direction=:up, skip_first=true)
             end
-
             if extension_failure !== nothing
                 st.failure_stage[c_claim] = extension_failure
                 continue
@@ -1212,19 +1173,14 @@ function _orbit_worker!(st::OrbitWorkState)
         @inbounds for k in 1:Nhits
             il = _bin_index(st.light_edges, s_arr[k])
             ik = _bin_index(st.spatial_edges, s_arr[k])
-
             il > 0 && (col_light[il] += 1.0)
             ik == 0 && continue
-
             jb_pro = _bin_index(st.velocity_edges, vlos_pro_buf[k])
-
             if jb_pro > 0
                 row_pro = (ik - 1) * st.Nvbin + jb_pro
                 col_losvd_pro[row_pro] += 1.0
             end
-
             jb_ret = _bin_index(st.velocity_edges, vlos_ret_buf[k])
-
             if jb_ret > 0
                 row_ret = (ik - 1) * st.Nvbin + jb_ret
                 col_losvd_ret[row_ret] += 1.0
@@ -1234,38 +1190,31 @@ function _orbit_worker!(st::OrbitWorkState)
         col_light ./= Nhits
         col_losvd_pro ./= Nhits
         col_losvd_ret ./= Nhits
-
         pro_activity = sum(abs, col_losvd_pro) + sum(abs, col_light)
         ret_activity = sum(abs, col_losvd_ret) + sum(abs, col_light)
-
         if !(isfinite(pro_activity) && pro_activity > 0.0 && isfinite(ret_activity) && ret_activity > 0.0)
             st.failure_stage[c_claim] = :zero_observable_support
             continue
         end
-
         register_karl_phase_launch!(st.phase_volume_state, c_claim; energy=E0, lz=Lz0, energy_index=shell_id, lz_index=lfrac_id, third_index=third_id)
         record_karl_phase_sos!(st.phase_volume_state, c_claim, sos_r, sos_vr_abs)
-
         col_pro = 2 * c_claim - 1
         col_ret = 2 * c_claim
-
         @inbounds st.A_losvd[:, col_pro] .= col_losvd_pro
         @inbounds st.A_losvd[:, col_ret] .= col_losvd_ret
         @inbounds st.A_light[:, col_pro] .= col_light
         @inbounds st.A_light[:, col_ret] .= col_light
-
         st.failure_stage[c_claim] = :success
         st.success_flags[c_claim] = true
-
         Threads.atomic_add!(st.filled_atomic, 1)
         _maybe_stop_orbit_phase_for_coverage!(st)
     end
 
     return nothing
 end
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
 
+# ========================================================================================================================
+# ========================================================================================================================
 function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, helper::Bool=false)
     # Admit a worker and close the orbit phase through the same gate.  This
     # prevents a helper that observed phase=1 from entering after the owner has
@@ -1281,7 +1230,6 @@ function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, help
         unlock(st.worker_gate)
     end
     admitted || return false
-
     if scheduler_counters !== nothing
         Threads.atomic_add!(scheduler_counters.orbit_workers, 1)
         helper && Threads.atomic_add!(scheduler_counters.helper_workers, 1)
@@ -1311,10 +1259,9 @@ function _close_orbit_phase!(st::OrbitWorkState; next_phase::Int=2)
     return nothing
 end
 
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
+# ========================================================================================================================
+# ========================================================================================================================
 # Main A-matrix builder: maps orbital weights → Karl observables.
-
 function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
     Nstar = length(R_star_m)
     @assert length(has_vlos) == Nstar
@@ -1787,7 +1734,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     ok = false
                     wdiag = nothing
                     try
-                        w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i), entropy_floor=entropy_floor, apfac=DEFAULT_KARL_APFAC, return_diag=true)
+                        w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin, alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i), entropy_floor=entropy_floor, apfac=DEFAULT_KARL_APFAC, return_diag=true)
                     finally
                         Threads.atomic_add!(scheduler_counters.weight_models, -1)
                     end
@@ -1823,28 +1770,40 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
-                    cl = chi2_block(A_losvd, w, losvd_target, losvd_sigma)
+                    cl, chi_by_spatial, fracnew_by_spatial = chi2_block_karl_fracnew(A_losvd, w, losvd_target, losvd_sigma, ws.Nspatial, ws.Nvbin)
                     chi2_losvd[i] = cl
+
+                    if i == 1
+                        println("[KARL FRACNEW DIAG] Nspatial=", ws.Nspatial, " Nvbin=", ws.Nvbin, " fracnew_min=", minimum(fracnew_by_spatial), " fracnew_max=", maximum(fracnew_by_spatial), " fracnew=", join(fracnew_by_spatial, ","), " chi_by_spatial=", join(chi_by_spatial, ","))
+                    end
+
                     R_inner_m = R_inner_pc * pc
                     ninner = 0
                     nouter = 0
-                    inner_rows = Int[]
-                    outer_rows = Int[]
+                    chi_inner_accum = 0.0
+                    chi_outer_accum = 0.0
+                    have_inner = false
+                    have_outer = false
+
                     @inbounds for ib in 1:ws.Nspatial
                         rmid = 0.5 * (ws.spatial_edges[ib] + ws.spatial_edges[ib + 1])
-                        rows = ((ib - 1) * ws.Nvbin + 1):(ib * ws.Nvbin)
+
                         if rmid < R_inner_m
-                            append!(inner_rows, rows)
                             ninner += Int(round(counts_by_spatial[ib]))
+                            chi_inner_accum += chi_by_spatial[ib]
+                            have_inner = true
                         else
-                            append!(outer_rows, rows)
                             nouter += Int(round(counts_by_spatial[ib]))
+                            chi_outer_accum += chi_by_spatial[ib]
+                            have_outer = true
                         end
                     end
+
                     N_inner[i] = ninner
                     N_outer[i] = nouter
-                    !isempty(inner_rows) && (chi2_inner[i] = chi2_block(A_losvd[inner_rows, :], w, losvd_target[inner_rows], losvd_sigma[inner_rows]))
-                    !isempty(outer_rows) && (chi2_outer[i] = chi2_block(A_losvd[outer_rows, :], w, losvd_target[outer_rows], losvd_sigma[outer_rows]))
+                    have_inner && (chi2_inner[i] = chi_inner_accum)
+                    have_outer && (chi2_outer[i] = chi_outer_accum)
+                    
                     _store_weight_diagnostics!(i, w)
                     _print_karl_diagnostics!(i, tid, wdiag, cl)
                     status[i] = 0
@@ -1913,6 +1872,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     phase_volume_invalid_recorded_orbits, phase_volume_nested_groups, phase_volume_duplicate_area_clusters, phase_volume_duplicate_area_orbits, raw_phase_volume_min, 
     raw_phase_volume_max, raw_phase_volume_dynamic_range, normalized_phase_volume_min, normalized_phase_volume_max, wphase_min, wphase_max, wphase_dynamic_range, wphase_pair_max_relative_mismatch)
 end
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
+
+# ========================================================================================================================
+# ========================================================================================================================
 end # module
