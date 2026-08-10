@@ -450,7 +450,6 @@ end
 # ========================================================================================================================
 # Working AREA 
 # ====================================================================================================================================================================================
-
 function karl_safe_step_factor(w::AbstractVector{Float64}, dw::AbstractVector{Float64}; requested_step::Float64=DEFAULT_KARL_APFAC, floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, safety::Float64=DEFAULT_KARL_STEP_SAFETY)
     length(w) == length(dw) || error("w and dw lengths must match")
     isfinite(requested_step) && requested_step > 0.0 || error("requested_step must be finite and positive")
@@ -475,7 +474,7 @@ function karl_safe_step_factor(w::AbstractVector{Float64}, dw::AbstractVector{Fl
     end
 
     if isfinite(boundary) && boundary <= 0.0
-        error("Karl Newton direction cannot move without crossing the entropy floor; limiting orbit=$limiting_idx boundary=$boundary")
+        return 0.0, limiting_idx, boundary
     end
 
     stepfac = isfinite(boundary) ? min(requested_step, safety * boundary) : requested_step

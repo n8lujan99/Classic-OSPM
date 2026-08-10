@@ -1738,74 +1738,76 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     finally
                         Threads.atomic_add!(scheduler_counters.weight_models, -1)
                     end
-                    _store_solver_diagnostics!(i, wdiag)
-                    if !ok
-                        if length(w) == size(A_light_fit, 2)
-                            light_model_fit = A_light_fit * w
-                            light_relative_fit = abs.(light_model_fit .- light_target_fit) ./ max.(abs.(light_target_fit), 1e-12)
-                            light_sigma_residual_fit = abs.(light_model_fit .- light_target_fit) ./ max.(light_sigma_fit, 1e-12)
-                            jfit = argmax(light_sigma_residual_fit)
-                            fitted_indices = findall(light_fit_mask)
-                            jfull = fitted_indices[jfit]
-                            println(
-                                "[KARL LIGHT FAIL BIN]",
-                                " fit_idx=", jfit,
-                                " full_idx=", jfull,
-                                " R_inner_pc=", ws.light_edges[jfull] / pc,
-                                " R_outer_pc=", ws.light_edges[jfull + 1] / pc,
-                                " target=", light_target_fit[jfit],
-                                " model=", light_model_fit[jfit],
-                                " relative_error=", light_relative_fit[jfit],
-                                " normalization_error=", _wdiag_value(wdiag, :normalization_error, NaN),
-                                " N_active_bound=", _wdiag_value(wdiag, :n_active_bound, 0),
-                                " active_passes=", _wdiag_value(wdiag, :active_passes, 0),
-                                " sigma=", light_sigma_fit[jfit],
-                                " sigma_residual=", light_sigma_residual_fit[jfit],
-                            )
-                        else
-                            println("[KARL LIGHT FAIL BIN] unavailable=true", " weight_count=", length(w),  " expected_weight_count=", size(A_light_fit, 2))
-                        end
-                        _print_karl_failure!(i, tid, wdiag)
-                        status[i] = 2
-                        Threads.atomic_xchg!(ws.phase, 3)
-                        continue
-                    end
-                    cl, chi_by_spatial, fracnew_by_spatial = chi2_block_karl_fracnew(A_losvd, w, losvd_target, losvd_sigma, ws.Nspatial, ws.Nvbin)
+
+
+                _store_solver_diagnostics!(i, wdiag)
+                finite_weight_solution = length(w) == size(A_losvd, 2) && all(isfinite, w)
+                cl = Inf
+
+                if finite_weight_solution
+                    cl = chi2_block(A_losvd, w, losvd_target, losvd_sigma)
                     chi2_losvd[i] = cl
-
-                    if i == 1
-                        println("[KARL FRACNEW DIAG] Nspatial=", ws.Nspatial, " Nvbin=", ws.Nvbin, " fracnew_min=", minimum(fracnew_by_spatial), " fracnew_max=", maximum(fracnew_by_spatial), " fracnew=", join(fracnew_by_spatial, ","), " chi_by_spatial=", join(chi_by_spatial, ","))
-                    end
-
                     R_inner_m = R_inner_pc * pc
                     ninner = 0
                     nouter = 0
-                    chi_inner_accum = 0.0
-                    chi_outer_accum = 0.0
-                    have_inner = false
-                    have_outer = false
-
+                    inner_rows = Int[]
+                    outer_rows = Int[]
                     @inbounds for ib in 1:ws.Nspatial
                         rmid = 0.5 * (ws.spatial_edges[ib] + ws.spatial_edges[ib + 1])
-
+                        rows = ((ib - 1) * ws.Nvbin + 1):(ib * ws.Nvbin)
                         if rmid < R_inner_m
+                            append!(inner_rows, rows)
                             ninner += Int(round(counts_by_spatial[ib]))
-                            chi_inner_accum += chi_by_spatial[ib]
-                            have_inner = true
                         else
+                            append!(outer_rows, rows)
                             nouter += Int(round(counts_by_spatial[ib]))
-                            chi_outer_accum += chi_by_spatial[ib]
-                            have_outer = true
                         end
                     end
-
                     N_inner[i] = ninner
                     N_outer[i] = nouter
-                    have_inner && (chi2_inner[i] = chi_inner_accum)
-                    have_outer && (chi2_outer[i] = chi_outer_accum)
-                    
+                    !isempty(inner_rows) && (chi2_inner[i] = chi2_block(A_losvd[inner_rows, :], w, losvd_target[inner_rows], losvd_sigma[inner_rows]))
+                    !isempty(outer_rows) && (chi2_outer[i] = chi2_block(A_losvd[outer_rows, :], w, losvd_target[outer_rows], losvd_sigma[outer_rows]))
                     _store_weight_diagnostics!(i, w)
-                    _print_karl_diagnostics!(i, tid, wdiag, cl)
+                end
+                if !ok
+                    if length(w) == size(A_light_fit, 2) && all(isfinite, w)
+                        light_model_fit = A_light_fit * w
+                        light_relative_fit = abs.(light_model_fit .- light_target_fit) ./ max.(abs.(light_target_fit), 1e-12)
+                        light_sigma_residual_fit = abs.(light_model_fit .- light_target_fit) ./ max.(light_sigma_fit, 1e-12)
+                        jfit = argmax(light_sigma_residual_fit)
+                        fitted_indices = findall(light_fit_mask)
+                        jfull = fitted_indices[jfit]
+                        println(
+                            "[KARL LIGHT FAIL BIN]",
+                            " fit_idx=", jfit,
+                            " full_idx=", jfull,
+                            " R_inner_pc=", ws.light_edges[jfull] / pc,
+                            " R_outer_pc=", ws.light_edges[jfull + 1] / pc,
+                            " target=", light_target_fit[jfit],
+                            " model=", light_model_fit[jfit],
+                            " relative_error=", light_relative_fit[jfit],
+                            " normalization_error=", _wdiag_value(wdiag, :normalization_error, NaN),
+                            " N_active_bound=", _wdiag_value(wdiag, :n_active_bound, 0),
+                            " active_passes=", _wdiag_value(wdiag, :active_passes, 0),
+                            " sigma=", light_sigma_fit[jfit],
+                            " sigma_residual=", light_sigma_residual_fit[jfit],
+                            " chi2_losvd=", chi2_losvd[i],
+                        )
+                    else
+                        println(
+                            "[KARL LIGHT FAIL BIN] unavailable=true",
+                            " weight_count=", length(w),
+                            " expected_weight_count=", size(A_light_fit, 2),
+                            " chi2_losvd=", chi2_losvd[i],
+                        )
+                    end
+                    _print_karl_failure!(i, tid, wdiag)
+                    status[i] = 2
+                    Threads.atomic_xchg!(ws.phase, 3)
+                    continue
+                end
+                _print_karl_diagnostics!(i, tid, wdiag, cl)
+
                     status[i] = 0
                     Threads.atomic_xchg!(ws.phase, 3)
                 catch e
