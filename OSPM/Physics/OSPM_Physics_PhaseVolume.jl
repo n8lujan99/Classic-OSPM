@@ -321,71 +321,69 @@ function _karl_phase_lz_widths( st::KarlPhaseVolumeState; singleton_width::Float
     return dLz, centers_by_energy, widths_by_energy
 end
 
-function _karl_phase_nested_area_differences!(delta_area::Vector{Float64}, sos_area::Vector{Float64}, valid_mask::AbstractVector{Bool}, energy_index::Vector{Int}, lz_index::Vector{Int}, third_index::Vector{Int}; duplicate_rtol::Float64=DEFAULT_KARL_PHASE_DUPLICATE_RTOL)
+function _karl_phase_nested_area_differences!(delta_area::Vector{Float64}, sos_area::Vector{Float64}, valid_mask::AbstractVector{Bool}, energy_index::Vector{Int}, lz_index::Vector{Int}; duplicate_rtol::Float64=DEFAULT_KARL_PHASE_DUPLICATE_RTOL)
     n = length(sos_area)
     length(delta_area) == n || error("delta_area and sos_area lengths do not match")
     length(valid_mask) == n || error("valid_mask length does not match sos_area")
     length(energy_index) == n || error("energy_index length does not match sos_area")
     length(lz_index) == n || error("lz_index length does not match sos_area")
-    length(third_index) == n || error("third_index length does not match sos_area")
 
     groups = Dict{Tuple{Int,Int},Vector{Int}}()
 
     @inbounds for i in 1:n
         valid_mask[i] || continue
         key = (energy_index[i], lz_index[i])
-        key[1] > 0 && key[2] > 0 && third_index[i] > 0 || continue
+        key[1] > 0 && key[2] > 0 || continue
         push!(get!(groups, key, Int[]), i)
     end
 
     duplicate_clusters = 0
     duplicate_orbits = 0
-    nonmonotonic_orbits = 0
-    third_index_gaps = 0
 
     for members in values(groups)
-        sort!(members; by=i -> (third_index[i], i))
+        sort!(members; by=i -> (sos_area[i], i))
 
         previous_area = 0.0
-        previous_third = 0
+        k = 1
 
-        @inbounds for i in members
-            area = sos_area[i]
-            third = third_index[i]
+        while k <= length(members)
+            first_member = members[k]
+            cluster_area = sos_area[first_member]
+            j = k + 1
 
-            if previous_third > 0 && third > previous_third + 1
-                third_index_gaps += third - previous_third - 1
+            while j <= length(members)
+                next_area = sos_area[members[j]]
+                tol = duplicate_rtol * max(abs(cluster_area), abs(next_area), 1.0)
+                abs(next_area - cluster_area) <= tol || break
+                cluster_area = max(cluster_area, next_area)
+                j += 1
             end
 
-            scale = max(abs(area), abs(previous_area), 1.0)
-            tol = duplicate_rtol * scale
-            annular_area = area - previous_area
+            cluster_count = j - k
+            annular_area = cluster_area - previous_area
 
-            if annular_area > tol
-                delta_area[i] = annular_area
-                previous_area = area
-                previous_third = third
-                continue
+            if !(isfinite(annular_area) && annular_area > 0.0)
+                scale = max(abs(cluster_area), abs(previous_area), 1.0)
+                annular_area = max(duplicate_rtol * scale, eps(Float64) * scale)
             end
 
-            if abs(annular_area) <= tol
-                valid_mask[i] = false
-                delta_area[i] = NaN
+            per_orbit_area = annular_area / cluster_count
+
+            @inbounds for q in k:(j - 1)
+                delta_area[members[q]] = per_orbit_area
+            end
+
+            if cluster_count > 1
                 duplicate_clusters += 1
-                duplicate_orbits += 1
-                previous_area = max(previous_area, area)
-                previous_third = third
-                continue
+                duplicate_orbits += cluster_count
             end
 
-            valid_mask[i] = false
-            delta_area[i] = NaN
-            nonmonotonic_orbits += 1
-            previous_third = third
+            previous_area = max(previous_area, cluster_area)
+            k = j
         end
     end
 
-    return duplicate_clusters, duplicate_orbits, nonmonotonic_orbits, third_index_gaps, length(groups)
+    return duplicate_clusters, duplicate_orbits, length(groups)
 end
 
 # ========================================================================================================================
@@ -471,55 +469,47 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
     n = st.Nbase_orbit
     sos_area = fill(NaN, n)
     circular_boundary_mask = fill(false, n)
-
     @inbounds for i in 1:n
         st.sos_recorded[i] || continue
         circular_boundary_mask[i] = _karl_phase_is_circular_boundary(st, i)
         sos_area[i] = karl_sos_enclosed_area(st.sos_r[i], st.sos_vr_abs[i]; min_points=min_sos_points, radius_rtol=radius_rtol)
     end
-
     dE, energy_centers, energy_widths = _karl_phase_energy_widths(st; singleton_width=singleton_energy_width)
     dLz, lz_centers, lz_widths = _karl_phase_lz_widths(st; singleton_width=singleton_lz_width)
-
     required_mask = copy(st.sos_recorded)
     valid_mask = fill(false, n)
-
     @inbounds for i in 1:n
-        valid_mask[i] = required_mask[i] && st.launch_recorded[i] && st.energy_index[i] > 0 && st.lz_index[i] > 0 && st.third_index[i] > 0 && isfinite(st.energy[i]) && isfinite(st.lz_abs[i]) && isfinite(sos_area[i]) && sos_area[i] >= 0.0 && isfinite(dE[i]) && dE[i] > 0.0 && isfinite(dLz[i]) && dLz[i] > 0.0
+        valid_mask[i] =
+            required_mask[i] &&
+            st.launch_recorded[i] &&
+            isfinite(st.energy[i]) &&
+            isfinite(st.lz_abs[i]) &&
+            isfinite(sos_area[i]) && sos_area[i] >= 0.0 &&
+            isfinite(dE[i]) && dE[i] > 0.0 &&
+            isfinite(dLz[i]) && dLz[i] > 0.0
     end
 
-    invalid_before_nested = findall(required_mask .& .!valid_mask)
+    invalid_required = findall(required_mask .& .!valid_mask)
 
-    if strict && !isempty(invalid_before_nested)
-        preview = join(first(invalid_before_nested, min(length(invalid_before_nested), 20)), ",")
-        suffix = length(invalid_before_nested) > 20 ? ",..." : ""
-        error("Karl phase-volume inputs are invalid for $(length(invalid_before_nested)) recorded base orbit(s): [$preview$suffix]")
+    if strict && !isempty(invalid_required)
+        preview = join(first(invalid_required, min(length(invalid_required), 20)), ",")
+        suffix = length(invalid_required) > 20 ? ",..." : ""
+        error("Karl phase-volume calculation failed for $(length(invalid_required)) recorded base orbit(s): [$preview$suffix]")
     end
 
     delta_sos_area = fill(NaN, n)
     interior_mask = valid_mask .& .!circular_boundary_mask
 
-    duplicate_clusters, duplicate_orbits, nonmonotonic_orbits, third_index_gaps, nested_groups = _karl_phase_nested_area_differences!(delta_sos_area, sos_area, interior_mask, st.energy_index, st.lz_index, st.third_index; duplicate_rtol=duplicate_rtol)
-
-    @inbounds for i in 1:n
-        if !circular_boundary_mask[i] && valid_mask[i] && !interior_mask[i]
-            valid_mask[i] = false
-        end
-    end
+    duplicate_clusters, duplicate_orbits, nested_groups = _karl_phase_nested_area_differences!(delta_sos_area, sos_area, interior_mask, st.energy_index, st.lz_index; duplicate_rtol=duplicate_rtol)
 
     circular_boundary_widths_assigned = _karl_phase_assign_circular_boundary_widths!(delta_sos_area, sos_area, circular_boundary_mask, valid_mask, st.energy_index, st.lz_index)
-
-    @inbounds for i in 1:n
-        if circular_boundary_mask[i] && valid_mask[i] && !(isfinite(delta_sos_area[i]) && delta_sos_area[i] > 0.0)
-            valid_mask[i] = false
-        end
-    end
 
     raw_phase_volume = fill(NaN, n)
 
     @inbounds for i in 1:n
         valid_mask[i] || continue
-        volume = delta_sos_area[i] * dE[i] * dLz[i]
+
+        volume = abs(delta_sos_area[i] * dE[i] * dLz[i])
 
         if isfinite(volume) && volume > 0.0
             raw_phase_volume[i] = volume
@@ -533,7 +523,7 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
     if strict && !isempty(invalid_after_product)
         preview = join(first(invalid_after_product, min(length(invalid_after_product), 20)), ",")
         suffix = length(invalid_after_product) > 20 ? ",..." : ""
-        error("Karl phase-volume calculation rejected $(length(invalid_after_product)) recorded base orbit(s): [$preview$suffix]")
+        error("Karl phase-volume product is invalid for $(length(invalid_after_product)) recorded base orbit(s): [$preview$suffix]")
     end
 
     phase_volume, mean_log_normalization = _karl_phase_normalize(raw_phase_volume, valid_mask, normalization)
@@ -541,7 +531,9 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
     wphase = fill(NaN, n)
 
     @inbounds for i in 1:n
-        valid_mask[i] && (wphase[i] = 1.0 / phase_volume[i])
+        if valid_mask[i]
+            wphase[i] = 1.0 / phase_volume[i]
+        end
     end
 
     raw_phase_volume_paired = _karl_phase_repeat_pairs(raw_phase_volume)
@@ -572,8 +564,6 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
         nested_groups=nested_groups,
         duplicate_area_clusters=duplicate_clusters,
         duplicate_area_orbits=duplicate_orbits,
-        nonmonotonic_nested_orbits=nonmonotonic_orbits,
-        third_index_gaps=third_index_gaps,
         circular_boundary_orbits=count(identity, circular_boundary_mask),
         circular_boundary_widths_assigned=circular_boundary_widths_assigned,
         raw_phase_volume_min=raw_min,
@@ -605,7 +595,6 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
         diagnostics=diagnostics,
     )
 end
-
 
 function build_karl_wphase(st::KarlPhaseVolumeState; kwargs...)
     result = compute_karl_phase_volumes(st; kwargs...)
