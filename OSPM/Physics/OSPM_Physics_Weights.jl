@@ -610,6 +610,7 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     initial_losvd = karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, Nspatial, Nvbin)
     previous_chi2_losvd = initial_losvd.chi_total
     delta_chi2_iteration = Inf
+    delta_chi2_iteration_step_normalized = Inf
     max_light_relative_residual_value = max_light_relative_residual(A_light, w, light_target)
     max_light_sigma_residual_value = light_sigma_residual(w)
     light_constraint_ok = max_light_sigma_residual_value <= light_sigma_tol
@@ -661,6 +662,9 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
         chi2_losvd_current = losvd_state.chi_total
         delta_chi2_iteration = abs(chi2_losvd_current - previous_chi2_losvd)
 
+        step_scale = isfinite(sdiag.stepfac) && sdiag.stepfac > 0.0 ? sdiag.stepfac : apfac
+        delta_chi2_iteration_step_normalized = delta_chi2_iteration / step_scale
+
         max_light_relative_residual_value = max_light_relative_residual(A_light, w_current, light_target)
         max_light_sigma_residual_value = light_sigma_residual(w_current)
         light_constraint_ok = max_light_sigma_residual_value <= light_sigma_tol
@@ -685,9 +689,10 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
             " chi_losvd=", chi2_losvd_current,
             " max_light_sigma_residual=", light_sigma_progress[worst_light_bin],
             " worst_light_bin=", worst_light_bin,
-            " delta_chi2=", delta_chi2_iteration)
+            " delta_chi2=", delta_chi2_iteration,
+            " delta_chi2_step_normalized=", delta_chi2_iteration_step_normalized)
 
-        if light_constraint_ok && slack_consistent && normalized && delta_chi2_iteration <= delta_chi2_iter_tol
+        if light_constraint_ok && slack_consistent && normalized && delta_chi2_iteration_step_normalized <= delta_chi2_iter_tol
             converged = true
             break
         end
@@ -741,7 +746,11 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
 
     constraint_l2 = finite_state ? norm(final_target .- Cm * w_all) : Inf
     constraint_ok = light_constraint_ok && slack_consistent && normalized
-    delta_chi2_ok = isfinite(delta_chi2_iteration) && delta_chi2_iteration <= delta_chi2_iter_tol
+
+    delta_chi2_ok =
+        isfinite(delta_chi2_iteration_step_normalized) &&
+        delta_chi2_iteration_step_normalized <= delta_chi2_iter_tol
+
     solver_converged = ok && converged && constraint_ok && delta_chi2_ok
 
     if ok && !light_constraint_ok
@@ -768,6 +777,7 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
             fracnew_min=final_losvd === nothing ? NaN : minimum(final_losvd.fracnew),
             fracnew_max=final_losvd === nothing ? NaN : maximum(final_losvd.fracnew),
             delta_chi2_iteration=delta_chi2_iteration,
+            delta_chi2_iteration_step_normalized=delta_chi2_iteration_step_normalized,
             delta_chi2_iteration_ok=delta_chi2_ok,
             delta_chi2_iteration_tol=delta_chi2_iter_tol,
             max_light_relative_residual=max_light_relative_residual_value,
