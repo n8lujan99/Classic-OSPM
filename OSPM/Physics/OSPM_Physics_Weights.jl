@@ -575,7 +575,14 @@ function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Mat
     ))
 end
 
-function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, light_sigma::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}; Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, wphase=nothing, maxiter::Int=DEFAULT_KARL_MAXITER, seed::UInt=UInt(0), entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, apfac::Float64=DEFAULT_KARL_APFAC, return_diag::Bool=false, rcond_every::Int=250, max_active_passes::Int=64, bound_kkt_tol::Float64=1.0e-10)    Nlight, Norbit = size(A_light)
+function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, light_sigma::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64};
+    Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL,
+    light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, wphase=nothing,
+    maxiter::Int=DEFAULT_KARL_MAXITER, seed::UInt=UInt(0), entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR,
+    apfac::Float64=DEFAULT_KARL_APFAC, return_diag::Bool=false, rcond_every::Int=250,
+    rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, max_active_passes::Int=64, bound_kkt_tol::Float64=1.0e-10)
+
+    Nlight, Norbit = size(A_light)
     Nlosvd, Norbit2 = size(A_losvd)
     fail_w = zeros(Float64, Norbit)
 
@@ -622,15 +629,23 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     for iter in 1:maxiter
         iterations = iter
         compute_rcond = iter == 1 || iter == maxiter || iter % rcond_every == 0
-        w_all_new, step_ok, sdiag = karl_spear_step_light_losvd_all(w_all, Norbit, Cm, target_base, A_losvd, losvd_target, losvd_sigma, wp; Nlight=Nlight, Nspatial=Nspatial, Nvbin=Nvbin, alphat=alphat, apfac=apfac, entropy_floor=entropy_floor, compute_rcond=compute_rcond, print_consistency=(iter == 1))
+
+        w_all_new, step_ok, sdiag = karl_spear_step_light_losvd_all(
+            w_all, Norbit, Cm, target_base, A_losvd, losvd_target, losvd_sigma, wp;
+            Nlight=Nlight, Nspatial=Nspatial, Nvbin=Nvbin, alphat=alphat, apfac=apfac,
+            entropy_floor=entropy_floor, compute_rcond=compute_rcond, rcond_warn=rcond_warn,
+            print_consistency=(iter == 1), max_active_passes=max_active_passes, bound_kkt_tol=bound_kkt_tol)
+
         last_diag = sdiag
         iter == 1 && (raw_spear_diag = sdiag.raw_spear_diag)
         isfinite(sdiag.rcond_est) && (last_rcond_est = sdiag.rcond_est)
+
         if !step_ok
             failure_reason = sdiag.failure_reason
             ok = false
             break
         end
+
         w_all .= w_all_new
         w_current = Vector{Float64}(@view w_all[1:Norbit])
         slack_current = Vector{Float64}(@view w_all[(Norbit + 1):end])
@@ -640,18 +655,27 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
         max_light_relative_residual_value = max_light_relative_residual(A_light, w_current, light_target)
         max_light_sigma_residual_value = light_sigma_residual(w_current)
         light_constraint_ok = max_light_sigma_residual_value <= light_sigma_tol
+
         slack_residual_l2 = norm(slack_current .- losvd_state.residual)
         slack_scale = max(1.0, norm(slack_current), norm(losvd_state.residual))
         slack_consistent = slack_residual_l2 <= light_rel_tol * slack_scale
         normalized = abs(sum(w_current) - 1.0) <= light_rel_tol
+
         light_model = A_light * w_current
         light_sigma_progress = abs.(light_model .- light_target) ./ light_sigma_use
         worst_light_bin = argmax(light_sigma_progress)
-        println("[WEIGHT PROGRESS] iteration=", iter, " active_passes=", sdiag.active_passes, " N_active_bound=", sdiag.n_active_bound, " stepfac=", sdiag.stepfac, " fracnew_min=", minimum(losvd_state.fracnew), " fracnew_max=", maximum(losvd_state.fracnew), " chi_losvd=", chi2_losvd_current, " max_light_sigma_residual=", light_sigma_progress[worst_light_bin], " worst_light_bin=", worst_light_bin, " delta_chi2=", delta_chi2_iteration)
+
+        println("[WEIGHT PROGRESS] iteration=", iter, " active_passes=", sdiag.active_passes,
+            " N_active_bound=", sdiag.n_active_bound, " stepfac=", sdiag.stepfac,
+            " fracnew_min=", minimum(losvd_state.fracnew), " fracnew_max=", maximum(losvd_state.fracnew),
+            " chi_losvd=", chi2_losvd_current, " max_light_sigma_residual=", light_sigma_progress[worst_light_bin],
+            " worst_light_bin=", worst_light_bin, " delta_chi2=", delta_chi2_iteration)
+
         if light_constraint_ok && slack_consistent && normalized && delta_chi2_iteration <= delta_chi2_iter_tol
             converged = true
             break
         end
+
         previous_chi2_losvd = chi2_losvd_current
     end
 
@@ -659,6 +683,7 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     slack = Vector{Float64}(@view w_all[(Norbit + 1):end])
     finite_state = all(isfinite, w) && all(isfinite, slack)
     !finite_state && (failure_reason = :nonfinite_final_state; ok = false)
+
     final_losvd = finite_state ? karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, Nspatial, Nvbin) : nothing
     chi2_losvd = final_losvd === nothing ? Inf : final_losvd.chi_total
     slack_residual_l2 = final_losvd === nothing ? Inf : norm(slack .- final_losvd.residual)
@@ -670,6 +695,7 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     max_light_relative_residual_value = finite_state ? max_light_relative_residual(A_light, w, light_target) : Inf
     max_light_sigma_residual_value = finite_state ? light_sigma_residual(w) : Inf
     light_constraint_ok = max_light_sigma_residual_value <= light_sigma_tol
+
     final_target = copy(target_base)
     final_losvd !== nothing && (final_target[(Nlight + 1):(Nlight + Nlosvd)] .= final_losvd.effective_target)
     constraint_l2 = finite_state ? norm(final_target .- Cm * w_all) : Inf
@@ -692,13 +718,26 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     if return_diag
         ent = finite_state ? karl_entropy_value(w, wp; entropy_floor=entropy_floor) : -Inf
         losvd_penalty = alphat * chi2_losvd
-        diag = (entropy=ent, chi=chi2_losvd, chi_losvd=chi2_losvd, profit=ent - losvd_penalty, alphat=alphat, losvd_penalty=losvd_penalty, chi_slack=losvd_penalty,
-            slack_to_losvd=chi2_losvd > 0.0 ? losvd_penalty / chi2_losvd : NaN, fracnew=final_losvd === nothing ? Float64[] : final_losvd.fracnew,
-            fracnew_min=final_losvd === nothing ? NaN : minimum(final_losvd.fracnew), fracnew_max=final_losvd === nothing ? NaN : maximum(final_losvd.fracnew),
-            delta_chi2_iteration=delta_chi2_iteration, delta_chi2_iteration_ok=delta_chi2_ok, delta_chi2_iteration_tol=delta_chi2_iter_tol,
-            max_light_relative_residual=max_light_relative_residual_value, max_light_sigma_residual=max_light_sigma_residual_value,
-            light_constraint_ok=light_constraint_ok, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol,
-            solver_converged=solver_converged, failure_reason=failure_reason, rcond_est=last_rcond_est, max_abs_dw=last_diag === nothing ? NaN : last_diag.max_abs_dw,
+
+        diag = (
+            entropy=ent, chi=chi2_losvd, chi_losvd=chi2_losvd, profit=ent - losvd_penalty,
+            alphat=alphat, losvd_penalty=losvd_penalty, chi_slack=losvd_penalty,
+            slack_to_losvd=chi2_losvd > 0.0 ? losvd_penalty / chi2_losvd : NaN,
+            fracnew=final_losvd === nothing ? Float64[] : final_losvd.fracnew,
+            fracnew_min=final_losvd === nothing ? NaN : minimum(final_losvd.fracnew),
+            fracnew_max=final_losvd === nothing ? NaN : maximum(final_losvd.fracnew),
+            delta_chi2_iteration=delta_chi2_iteration,
+            delta_chi2_iteration_ok=delta_chi2_ok,
+            delta_chi2_iteration_tol=delta_chi2_iter_tol,
+            max_light_relative_residual=max_light_relative_residual_value,
+            max_light_sigma_residual=max_light_sigma_residual_value,
+            light_constraint_ok=light_constraint_ok,
+            light_rel_tol=light_rel_tol,
+            light_sigma_tol=light_sigma_tol,
+            solver_converged=solver_converged,
+            failure_reason=failure_reason,
+            rcond_est=last_rcond_est,
+            max_abs_dw=last_diag === nothing ? NaN : last_diag.max_abs_dw,
             stepfac=last_diag === nothing ? NaN : last_diag.stepfac,
             iterations=iterations,
             constraint_ok=constraint_ok,

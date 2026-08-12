@@ -1,5 +1,5 @@
 # OSPM_Daemon.py — STAYS IN PYTHON FOREVER.  Parallelism lives in Julia, not here.
-#
+# ========================================================================================================================
 # WHAT THIS DOES
 # Drives an RL-guided search over dark-matter halo parameters θ.  The first
 # halo parameters are config-dependent: (rho_s,r_s), (vcirc,r_s), or (v0,r_c).
@@ -13,7 +13,7 @@
 # and learning.
 #
 # LAYOUT
-# ──────────────────────────────────────────────────────────────────────────────
+# ========================================================================================================================
 # clamp(x,lo,hi)          scalar,scalar,scalar → scalar          — bound a number
 # random_theta(bounds)     bounds → [float]                      — uniform random point in box
 # min_dist(theta,arr)      point,points → float                  — nearest-neighbor distance
@@ -45,7 +45,7 @@
 #   .detect_basin(deck)    deck → bool                           — is the posterior concentrated?
 #
 # run_daemon(config,engine)  config,engine → None                — outer loop: propose→eval→record→train
-# ──────────────────────────────────────────────────────────────────────────────
+# ========================================================================================================================
 
 import os, time, traceback, json
 import numpy as np, pandas as pd
@@ -56,27 +56,12 @@ torch.backends.cudnn.benchmark = False
 try: from sklearn.preprocessing import StandardScaler
 except Exception: StandardScaler = None
 
-PHASE_VOLUME_DIAG_COLUMNS = [
-    "phase_volume_valid",
-    "phase_volume_convention",
-    "phase_volume_normalization",
-    "phase_volume_launches_recorded",
-    "phase_volume_sos_recorded",
-    "phase_volume_valid_base_orbits",
-    "phase_volume_invalid_recorded_orbits",
-    "phase_volume_nested_groups",
-    "phase_volume_duplicate_area_clusters",
-    "phase_volume_duplicate_area_orbits",
-    "raw_phase_volume_min",
-    "raw_phase_volume_max",
-    "raw_phase_volume_dynamic_range",
-    "normalized_phase_volume_min",
-    "normalized_phase_volume_max",
-    "wphase_min",
-    "wphase_max",
-    "wphase_dynamic_range",
-    "wphase_pair_max_relative_mismatch",
-]
+PHASE_VOLUME_DIAG_COLUMNS = ["phase_volume_valid", "phase_volume_convention", "phase_volume_normalization", "phase_volume_launches_recorded", "phase_volume_sos_recorded",
+    "phase_volume_valid_base_orbits", "phase_volume_invalid_recorded_orbits", "phase_volume_nested_groups", "phase_volume_duplicate_area_clusters", "phase_volume_duplicate_area_orbits",
+    "raw_phase_volume_min", "raw_phase_volume_max", "raw_phase_volume_dynamic_range", "normalized_phase_volume_min", "normalized_phase_volume_max", "wphase_min", "wphase_max",
+    "wphase_dynamic_range", "wphase_pair_max_relative_mismatch"]
+# ========================================================================================================================
+# ========================================================================================================================
 
 def clamp(x, lo, hi): return max(lo, min(hi, x))
 
@@ -137,21 +122,35 @@ def min_dist(theta, arr):
     if len(arr) == 0: return np.inf
     return np.linalg.norm(np.asarray(arr) - np.asarray(theta), axis=1).min()
 
+
 def is_real_pass(status):
     return str(status) == "pass_full"
 
-def batch_result_status(code, chi2):
-    valid_pass = (int(code) == 0) and np.isfinite(chi2) and (float(chi2) > 1e-12)
-    if valid_pass:
-        return "pass", float(chi2)
-    if int(code) == 0:
-        return "numeric_fail", np.inf
-    return { 1: "orbit_fail", 2: "solver_failed", 3: "physics_exception", 4: "timeout" }.get(int(code), "unknown_fail"), np.inf
-
-def real_pass_rows(df):
+def family_pass_rows(df, family):
     if "status" not in df.columns:
         return df.iloc[0:0]
-    return df[df["status"].astype(str).map(is_real_pass)]
+    label = f"pass_{str(family).strip().lower()}"
+    return df[df["status"].astype(str) == label]
+
+def real_pass_rows(df):
+    return family_pass_rows(df, "full")
+
+def finite_family_rows(df, family):
+    if "status" not in df.columns or "chi2" not in df.columns:
+        return df.iloc[0:0]
+    suffix = f"_{str(family).strip().lower()}"
+    status = df["status"].astype(str)
+    chi2 = pd.to_numeric(df["chi2"], errors="coerce")
+    return df[status.str.endswith(suffix) & np.isfinite(chi2) & (chi2 > 1e-12)]
+
+def batch_result_status(code, chi2):
+    code = int(code)
+    chi2 = float(chi2)
+    finite_chi2 = np.isfinite(chi2) and chi2 > 1e-12
+    if code == 0:
+        return ("pass" if finite_chi2 else "numeric_fail"), (chi2 if finite_chi2 else np.inf)
+    status = {1: "orbit_fail", 2: "solver_failed", 3: "physics_exception", 4: "timeout"}.get(code, "unknown_fail")
+    return status, (chi2 if finite_chi2 else np.inf)
 
 def _fixed_theta_from_config(config):
     fixed = config.get("FIXED_THETA", None)
@@ -258,7 +257,6 @@ def _jl_surface_brightness_profile(profile, Main):
     :Sigma_err => Float64[x for x in _sb_Sigma_err],
     )""")
     return Main._sb_profile_jl
-
 
 def _clean_stellar_model(model):
     if model is None:
@@ -368,6 +366,8 @@ def _observable_config(config):
     if not isinstance(obs_cfg, dict):
         raise TypeError("config['OBSERVABLES'] must be a dict when provided")
     return obs_cfg
+# ========================================================================================================================
+# ========================================================================================================================
 
 class IdentityScaler:
     def fit(self, X): return self
@@ -449,13 +449,36 @@ class Deck:
             self.save()
             self._dirty = 0
 
+
 class Fixer:
-    def __init__(self, cfg): self.warmup = int(cfg.get("AI_START_AFTER", 500)); self.unlocked = False
+    def __init__(self, cfg):
+        self.model_start = int(cfg.get("AI_MODEL_START_AFTER", 32))
+        self.ai_start = int(cfg.get("AI_START_AFTER", 50))
+        self.strong_start = int(cfg.get("AI_STRONG_AFTER", 150))
+        self.model_started = False
+        self.unlocked = False
+        self.strong = False
+
     def unlock(self, deck, runner):
-        if self.unlocked: return
-        if len(real_pass_rows(deck.df)) >= self.warmup:
-            runner.enable_ai(); self.unlocked = True; print("[AI] unlocked", flush=True)
-    def reward(self, status, chi2): return -1e6 if status != "pass" else -float(chi2)
+        npass = len(real_pass_rows(deck.df))
+        if not self.model_started and npass >= self.model_start:
+            runner.enable_model()
+            self.model_started = True
+            print(f"[AI] surrogate enabled at {npass} full passes", flush=True)
+        if not self.unlocked and npass >= self.ai_start:
+            if not self.model_started:
+                runner.enable_model()
+                self.model_started = True
+            runner.enable_ai(npass)
+            self.unlocked = True
+            print(f"[AI] proposal agent enabled at {npass} full passes", flush=True)
+        if not self.strong and npass >= self.strong_start:
+            runner.enable_strong()
+            self.strong = True
+            print(f"[AI] strong proposal mode enabled at {npass} full passes", flush=True)
+
+    def reward(self, status, chi2):
+        return -1e6 if status != "pass" else -float(chi2)
 
 class FlatDetector:
     def __init__(self, w, eps, p):
@@ -467,43 +490,126 @@ class FlatDetector:
         self.cnt = self.cnt + 1 if np.std(self.buf) < self.eps and np.isfinite(x) else 0
     def flat(self): return self.cnt >= self.p
 
+
 class ConvergenceDetector:
     def __init__(self, cfg, bounds, cols):
-        self.rel_thr = float(cfg.get("CONVERGE_REL_SPREAD", 0.05)); self.chi_thr = float(cfg.get("CONVERGE_CHI_STD", 0.5))
-        self.n_top = int(cfg.get("CONVERGE_N_TOP", 200)); self.n_min = int(cfg.get("CONVERGE_MIN_PASS", 500))
-        self.patience = int(cfg.get("CONVERGE_PATIENCE", 3)); self.every = int(cfg.get("CONVERGE_CHECK_EVERY", 500))
+        self.rel_thr = float(cfg.get("CONVERGE_REL_SPREAD", 0.05))
+        self.chi_thr = float(cfg.get("CONVERGE_CHI_STD", 0.5))
+        self.n_top = int(cfg.get("CONVERGE_N_TOP", 200))
+        self.n_min = int(cfg.get("CONVERGE_MIN_PASS", 500))
+        self.patience = int(cfg.get("CONVERGE_PATIENCE", 3))
+        self.every = int(cfg.get("CONVERGE_CHECK_EVERY", 500))
         self.bounds, self.cols, self.cnt = bounds, cols, 0
+
     def check(self, deck, runner, runs):
-        if not runner.fill_mode: return False
-        if runs % self.every != 0: return False
+        if not runner.fill_mode:
+            return False
+        if runs % self.every != 0:
+            return False
         good = real_pass_rows(deck.df)
-        if len(good) < self.n_min: self.cnt = 0; return False
+        if len(good) < self.n_min:
+            self.cnt = 0
+            return False
         top = good.nsmallest(min(len(good), self.n_top), "chi2")
-        chi_std = top["chi2"].std(); spread = np.std(top[self.cols].values, axis=0)
-        span = np.array([hi - lo for lo, hi in self.bounds]); rel_spread = np.mean(spread / span)
-        if chi_std < self.chi_thr and rel_spread < self.rel_thr: self.cnt += 1
-        else: self.cnt = 0
+        X_unit = runner._unit_search_matrix(top[self.cols].values)
+        if len(X_unit) == 0:
+            self.cnt = 0
+            return False
+        chi_std = float(top["chi2"].std())
+        rel_spread = float(np.mean(np.std(X_unit, axis=0)))
+        self.cnt = self.cnt + 1 if chi_std < self.chi_thr and rel_spread < self.rel_thr else 0
         converged = self.cnt >= self.patience
-        if converged: print(f"[Converge] posterior converged at run {runs}: rel_spread={rel_spread:.4f} chi_std={chi_std:.4f}", flush=True)
+        if converged:
+            print(f"[Converge] posterior converged at run {runs}: rel_spread={rel_spread:.4f} chi_std={chi_std:.4f}", flush=True)
         return converged
+
+# ========================================================================================================================
+# 
+# ========================================================================================================================
+
 
 class Runner:
     def __init__(self, cfg):
         self.cfg, self.bounds, self.cols = cfg, cfg["THETA_BOUNDS"], cfg["PARAMETER_NAMES"]
-        self.dim, self.batch, self.min_d = len(self.cols), int(cfg["BATCH_SIZE"]), float(cfg["MIN_DISTANCE"])
-        self.ai, self.model, self.agent, self.opt_m, self.opt_a = False, None, None, None, None
-        self.noise0, self.noise1, self.tau = float(cfg.get("AI_NOISE_INIT", 0.3)), float(cfg.get("AI_NOISE_MIN", 0.02)), float(cfg.get("AI_NOISE_TAU", 5000))
-        self.step = 0; self.recent = deque(maxlen=5000)
-        self.scaler = IdentityScaler() if StandardScaler is None else StandardScaler()
-        self.scaled, self.fill_mode, self.fill_triggered = False, False, False
-        self.explore_frac = float(cfg.get("EXPLORE_FRACTION", 0.0))
+        self.dim, self.batch = len(self.cols), int(cfg["BATCH_SIZE"])
+        self.min_d = float(cfg.get("SEARCH_MIN_DISTANCE", cfg["MIN_DISTANCE"]))
+        self.fill_min_d = float(cfg.get("FILL_MIN_DISTANCE", max(0.25 * self.min_d, 1.0e-6)))
+        self.model_ready, self.ai, self.strong_ai = False, False, False
+        self.model = self.agent = self.opt_m = self.opt_a = None
+        self.no_bh_model = self.no_halo_model = None
+        self.opt_no_bh = self.opt_no_halo = None
+        self.noise0 = float(cfg.get("AI_NOISE_INIT", 0.30))
+        self.noise1 = float(cfg.get("AI_NOISE_MIN", 0.02))
+        self.tau = float(cfg.get("AI_NOISE_TAU", 300))
+        self.ai_start_pass = 0
+        self.good_full_count = 0
+        self.step = 0
+        self.recent = deque(maxlen=5000)
+        self.fill_mode = self.fill_triggered = False
+        self.explore_frac = float(cfg.get("EXPLORE_FRACTION", 0.10))
+        self.early_explore_frac = float(cfg.get("AI_EARLY_EXPLORE_FRACTION", max(0.35, self.explore_frac)))
+        self.train_window = int(cfg.get("TRAIN_WINDOW", 2000))
+        self.train_recent_fraction = float(cfg.get("TRAIN_RECENT_FRACTION", 0.25))
+        self.train_best_fraction = float(cfg.get("TRAIN_BEST_FRACTION", 0.50))
+        self.train_global_fraction = float(cfg.get("TRAIN_GLOBAL_FRACTION", 0.25))
+        self.min_train_points = int(cfg.get("MIN_TRAIN_POINTS", cfg.get("AI_MODEL_START_AFTER", 32)))
+        self.alt_model_min_pairs = int(cfg.get("ALT_MODEL_MIN_PAIRS", 8))
+        self.mbh_floor = float(cfg.get("MBH_LOG_FLOOR", 1.0e3))
+        self.sbounds = _search_bounds(self.bounds, self.cols, self.mbh_floor)
+        self.search_lo = np.asarray([lo for lo, hi in self.sbounds], dtype=float)
+        self.search_hi = np.asarray([hi for lo, hi in self.sbounds], dtype=float)
+        self.search_span = np.maximum(self.search_hi - self.search_lo, 1.0e-12)
 
-    def enable_ai(self):
-        self.model = Model(self.dim); self.agent = Agent(self.dim)
+    def enable_model(self):
+        if self.model_ready:
+            return
+        self.model = Model(self.dim)
+        self.no_bh_model = Model(self.dim)
+        self.no_halo_model = Model(self.dim)
         self.opt_m = torch.optim.Adam(self.model.parameters(), 1e-3)
-        self.opt_a = torch.optim.Adam(self.agent.parameters(), 1e-3); self.ai = True
+        self.opt_no_bh = torch.optim.Adam(self.no_bh_model.parameters(), 1e-3)
+        self.opt_no_halo = torch.optim.Adam(self.no_halo_model.parameters(), 1e-3)
+        self.model_ready = True
 
-    def _noise(self): return self.noise0 if not self.ai else max(self.noise1, self.noise0 * np.exp(-self.step / self.tau))
+    def enable_ai(self, full_pass_count=0):
+        if not self.model_ready:
+            self.enable_model()
+        if self.ai:
+            return
+        self.agent = Agent(self.dim)
+        self.opt_a = torch.optim.Adam(self.agent.parameters(), 1e-3)
+        self.ai_start_pass = int(full_pass_count)
+        self.good_full_count = max(self.good_full_count, int(full_pass_count))
+        self.ai = True
+
+    def enable_strong(self):
+        self.strong_ai = True
+
+    def _noise(self):
+        if not self.ai:
+            return self.noise0
+        age = max(0, self.good_full_count - self.ai_start_pass)
+        return max(self.noise1, self.noise0 * np.exp(-age / max(self.tau, 1.0)))
+
+    def _unit_search(self, theta):
+        z = _theta_to_search(theta, self.cols, self.mbh_floor)
+        return np.clip((z - self.search_lo) / self.search_span, 0.0, 1.0)
+
+    def _theta_from_unit(self, u):
+        u = np.clip(np.asarray(u, dtype=float), 0.0, 1.0)
+        z = self.search_lo + u * self.search_span
+        return _theta_from_search(z, self.cols, self.bounds, self.mbh_floor)
+
+    def _unit_search_matrix(self, theta_matrix):
+        A = np.asarray(theta_matrix, dtype=float)
+        if A.ndim == 1:
+            A = A.reshape(1, -1)
+        if A.size == 0:
+            return np.empty((0, self.dim), dtype=float)
+        finite = np.all(np.isfinite(A), axis=1)
+        if not np.any(finite):
+            return np.empty((0, self.dim), dtype=float)
+        return np.asarray([self._unit_search(row) for row in A[finite]], dtype=float)
 
     def _base(self, deck):
         good = real_pass_rows(deck.df)
@@ -511,124 +617,186 @@ class Runner:
             if np.random.rand() < 0.15:
                 return good[self.cols].sample(1).values[0]
             return good.nsmallest(min(len(good), 500), "chi2")[self.cols].sample(1).values[0]
-        return deck.df[self.cols].dropna().sample(1).values[0]
+        candidates = deck.df[self.cols].dropna()
+        if len(candidates):
+            return candidates.sample(1).values[0]
+        return random_theta(self.bounds, self.cols, mbh_floor=self.mbh_floor, mbh_zero_fraction=float(self.cfg.get("MBH_ZERO_FRACTION", 0.10)))
 
     def detect_basin(self, deck):
         good = real_pass_rows(deck.df)
-        if len(good) < 500: return False
-        top = good.nsmallest(min(len(good), 200), "chi2")
-        chi_std = top["chi2"].std(); spread = np.std(top[self.cols].values, axis=0)
-        span = np.array([hi - lo for lo, hi in self.bounds]); rel_spread = np.mean(spread / span)
-        return (chi_std < 1.0) and (rel_spread < 0.15)
+        min_pass = int(self.cfg.get("BASIN_MIN_PASS", self.cfg.get("AI_STRONG_AFTER", 150)))
+        if len(good) < min_pass:
+            return False
+        top = good.nsmallest(min(len(good), int(self.cfg.get("BASIN_TOP_N", 100))), "chi2")
+        X_unit = self._unit_search_matrix(top[self.cols].values)
+        if len(X_unit) == 0:
+            return False
+        chi_std = float(top["chi2"].std())
+        rel_spread = float(np.mean(np.std(X_unit, axis=0)))
+        return chi_std < float(self.cfg.get("BASIN_CHI_STD", 1.0)) and rel_spread < float(self.cfg.get("BASIN_REL_SPREAD", 0.15))
 
     def step_scale(self, deck):
-        if not self.ai or not self.fill_mode:
-            return 0.2
+        if not self.ai:
+            return 0.20
+        if not self.fill_mode:
+            return float(self.cfg.get("AI_GLOBAL_STEP_SCALE", 0.20))
         good = real_pass_rows(deck.df)
+        if len(good) == 0:
+            return 0.05
         top = good.nsmallest(min(len(good), 200), "chi2")
-        mbh_floor = float(self.cfg.get("MBH_LOG_FLOOR", 1.0e3))
-        X = np.asarray([_theta_to_search(row, self.cols, mbh_floor) for row in top[self.cols].values], dtype=float)
-        sbounds = _search_bounds(self.bounds, self.cols, mbh_floor)
-        span = np.asarray([hi - lo for lo, hi in sbounds], dtype=float)
-        spread = np.std(X, axis=0)
-        return clamp(0.01 + 0.2 * np.mean(spread / span), 0.01, 0.05)
+        X_unit = self._unit_search_matrix(top[self.cols].values)
+        if len(X_unit) == 0:
+            return 0.05
+        rel_spread = float(np.mean(np.std(X_unit, axis=0)))
+        return clamp(0.01 + 0.20 * rel_spread, 0.01, 0.05)
 
-    def propose(self, deck):
+    def propose(self, deck, n=None):
+        target = self.batch if n is None else max(1, min(int(n), self.batch))
         out = []
-        mbh_floor = float(self.cfg.get("MBH_LOG_FLOOR", 1.0e3))
         mbh_zero_fraction = float(self.cfg.get("MBH_ZERO_FRACTION", 0.10))
-        sbounds = _search_bounds(self.bounds, self.cols, mbh_floor)
-        while len(out) < self.batch:
-            use_ai = ( self.ai and not ( self.explore_frac > 0.0 and np.random.rand() < self.explore_frac) )
+        distance_floor = self.fill_min_d if self.fill_mode else self.min_d
+        max_attempts = int(self.cfg.get("PROPOSAL_MAX_ATTEMPTS", max(2000, 500 * target)))
+        status = deck.df["status"].astype(str) if "status" in deck.df.columns else pd.Series([], dtype=str)
+        full_rows = deck.df[status.str.endswith("_full")] if len(status) else deck.df.iloc[0:0]
+        deck_unit = self._unit_search_matrix(full_rows[self.cols].values) if len(full_rows) else np.empty((0, self.dim), dtype=float)
+        attempts = 0
+
+        while len(out) < target:
+            attempts += 1
+            if attempts > max_attempts:
+                raise RuntimeError(f"Unable to generate {target} distinct proposals after {max_attempts} attempts; accepted={len(out)} distance_floor={distance_floor:g}")
+
+            explore_fraction = self.explore_frac if self.strong_ai else self.early_explore_frac
+            use_ai = self.ai and not (explore_fraction > 0.0 and np.random.rand() < explore_fraction)
+
             if use_ai:
                 if self.fill_mode:
                     good = real_pass_rows(deck.df)
-                    base = (good .nsmallest(100, "chi2")[self.cols] .sample(1) .values[0])
+                    base = good.nsmallest(min(len(good), 100), "chi2")[self.cols].sample(1).values[0]
                 else:
                     base = self._base(deck)
-                base_search = _theta_to_search(base, self.cols, mbh_floor)
-                xb = (self.scaler.transform(base_search.reshape(1, -1))if self.scaled else base_search.reshape(1, -1))
-                a = (self.agent.act(torch.tensor( xb, dtype=torch.float32,), self._noise()).numpy().squeeze())
-                s = self.step_scale(deck)
-                if self.fill_mode and self.step % 200 == 0:
-                    print(f"[FillMode] step_scale={s:.4f}", flush=True)
-                proposed_search = []
-                for i, (slo, shi) in enumerate(sbounds):
-                    zi = (base_search[i] + s * (shi - slo) * a[i])
-                    proposed_search.append(clamp(zi, slo, shi))
-                theta = _theta_from_search( proposed_search, self.cols, self.bounds, mbh_floor)
+                base_unit = self._unit_search(base)
+                action = self.agent.act(torch.tensor(base_unit.reshape(1, -1), dtype=torch.float32), self._noise()).numpy().squeeze()
+                scale = self.step_scale(deck)
+                theta = self._theta_from_unit(base_unit + scale * action)
             else:
-                theta = random_theta(self.bounds, self.cols, mbh_floor=mbh_floor, mbh_zero_fraction=mbh_zero_fraction)
+                theta = random_theta(self.bounds, self.cols, mbh_floor=self.mbh_floor, mbh_zero_fraction=mbh_zero_fraction)
+
             if deck.is_forbidden(theta):
                 continue
-            if not self.fill_mode:
-                if min_dist(theta, self.recent) < self.min_d:
+
+            u = self._unit_search(theta)
+            if self.recent:
+                recent_unit = np.asarray(self.recent, dtype=float)
+                if np.linalg.norm(recent_unit - u, axis=1).min() < distance_floor:
                     continue
-                if (deck.nearest_distance(theta, self.min_d ) < self.min_d):
-                    continue
-            self.recent.append(theta)
+            if len(deck_unit) and np.linalg.norm(deck_unit - u, axis=1).min() < distance_floor:
+                continue
+
+            self.recent.append(u)
             self.step += 1
             out.append((theta, self.step))
+
         return out
 
+    def _training_sample(self, df):
+        if len(df) <= self.train_window:
+            return df.copy()
+        total = self.train_window
+        fractions = np.asarray([self.train_recent_fraction, self.train_best_fraction, self.train_global_fraction], dtype=float)
+        if not np.isfinite(fractions).all() or fractions.sum() <= 0.0:
+            fractions = np.asarray([0.25, 0.50, 0.25], dtype=float)
+        fractions /= fractions.sum()
+        n_recent = max(1, int(round(total * fractions[0])))
+        n_best = max(1, int(round(total * fractions[1])))
+        n_global = max(1, total - n_recent - n_best)
+        recent = df.tail(min(n_recent, len(df)))
+        best = df.nsmallest(min(n_best, len(df)), "chi2")
+        global_sample = df.sample(min(n_global, len(df)))
+        sample = pd.concat([recent, best, global_sample]).loc[lambda x: ~x.index.duplicated(keep="last")]
+        if len(sample) < total:
+            remaining = df.loc[~df.index.isin(sample.index)]
+            if len(remaining):
+                sample = pd.concat([sample, remaining.sample(min(total - len(sample), len(remaining)))])
+        return sample
+
+    def _train_surrogate(self, model, optimizer, X, y):
+        if len(X) == 0:
+            return
+        Xt = torch.tensor(np.asarray(X, dtype=np.float32), dtype=torch.float32)
+        yt = torch.tensor(np.asarray(y, dtype=np.float32).reshape(-1, 1), dtype=torch.float32)
+        pred = model(Xt)
+        loss = ((pred - yt) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    def _matched_delta_training(self, deck, family):
+        full = family_pass_rows(deck.df, "full")
+        alt = family_pass_rows(deck.df, family)
+        if len(full) == 0 or len(alt) == 0:
+            return np.empty((0, self.dim), dtype=float), np.empty(0, dtype=float)
+        full = full.copy()
+        alt = alt.copy()
+        full["proposal_id"] = pd.to_numeric(full["proposal_id"], errors="coerce")
+        alt["proposal_id"] = pd.to_numeric(alt["proposal_id"], errors="coerce")
+        full["chi2"] = pd.to_numeric(full["chi2"], errors="coerce")
+        alt["chi2"] = pd.to_numeric(alt["chi2"], errors="coerce")
+        full = full[np.isfinite(full["proposal_id"]) & np.isfinite(full["chi2"])].drop_duplicates("proposal_id", keep="last")
+        alt = alt[np.isfinite(alt["proposal_id"]) & np.isfinite(alt["chi2"])].drop_duplicates("proposal_id", keep="last")
+        merged = full[["proposal_id", "chi2"] + self.cols].merge(alt[["proposal_id", "chi2"]], on="proposal_id", suffixes=("_full", "_alt"))
+        if len(merged) == 0:
+            return np.empty((0, self.dim), dtype=float), np.empty(0, dtype=float)
+        X = self._unit_search_matrix(merged[self.cols].values)
+        y = merged["chi2_alt"].to_numpy(dtype=float) - merged["chi2_full"].to_numpy(dtype=float)
+        finite = np.isfinite(y)
+        return X[finite], y[finite]
+
+    def predict_alt_delta(self, theta, family):
+        model = self.no_bh_model if family == "no_bh" else self.no_halo_model if family == "no_halo" else None
+        if model is None:
+            return np.nan
+        X, y = self._matched_delta_training_cache.get(family, (None, None)) if hasattr(self, "_matched_delta_training_cache") else (None, None)
+        if X is None or len(X) < self.alt_model_min_pairs:
+            return np.nan
+        with torch.no_grad():
+            value = model(torch.tensor(self._unit_search(theta).reshape(1, -1), dtype=torch.float32)).item()
+        return float(value)
+
     def train(self, deck):
-        if not self.ai:
+        if not self.model_ready:
             return
 
         df = real_pass_rows(deck.df)
-        df = df[np.isfinite(df.reward)]
-        if len(df) < 200:
+        df = df[np.isfinite(pd.to_numeric(df["reward"], errors="coerce")) & np.isfinite(pd.to_numeric(df["chi2"], errors="coerce"))]
+        self.good_full_count = len(df)
+        if len(df) < self.min_train_points:
             return
-        if len(df) > 5000:
-            df = df.tail(5000)
 
-        mbh_floor = float(self.cfg.get("MBH_LOG_FLOOR", 1.0e3))
-        X_phys = df[self.cols].values
-        X_search = np.asarray([_theta_to_search(row, self.cols, mbh_floor) for row in X_phys], dtype=float)
-        y = df.reward.values.reshape(-1, 1)
+        train_df = self._training_sample(df)
+        X = self._unit_search_matrix(train_df[self.cols].values)
+        y = train_df["reward"].to_numpy(dtype=float)
+        self._train_surrogate(self.model, self.opt_m, X, y)
 
-        if not self.scaled:
-            self.scaler.fit(X_search)
-            self.scaled = True
+        self._matched_delta_training_cache = {}
+        for family, model, optimizer in (("no_bh", self.no_bh_model, self.opt_no_bh), ("no_halo", self.no_halo_model, self.opt_no_halo)):
+            X_alt, y_alt = self._matched_delta_training(deck, family)
+            self._matched_delta_training_cache[family] = (X_alt, y_alt)
+            if len(X_alt) >= self.alt_model_min_pairs:
+                self._train_surrogate(model, optimizer, X_alt, y_alt)
 
-        X_scaled = self.scaler.transform(X_search)
-        Xt = torch.tensor(X_scaled, dtype=torch.float32)
-        yt = torch.tensor(y, dtype=torch.float32)
+        if not self.ai:
+            return
 
-        pred = self.model(Xt)
-        model_loss = ((pred - yt) ** 2).mean()
-        self.opt_m.zero_grad()
-        model_loss.backward()
-        self.opt_m.step()
-
-        sbounds = _search_bounds(self.bounds, self.cols, mbh_floor)
-        zlo = np.asarray([lo for lo, hi in sbounds], dtype=np.float32)
-        zhi = np.asarray([hi for lo, hi in sbounds], dtype=np.float32)
-        zspan = np.maximum(zhi - zlo, 1.0e-12)
-
-        if isinstance(self.scaler, IdentityScaler):
-            mean = np.zeros(self.dim, dtype=np.float32)
-            scale = np.ones(self.dim, dtype=np.float32)
-        else:
-            mean = np.asarray(self.scaler.mean_, dtype=np.float32)
-            scale = np.asarray(self.scaler.scale_, dtype=np.float32)
-
-        Zt = torch.tensor(X_search, dtype=torch.float32)
-        mean_t = torch.tensor(mean, dtype=torch.float32)
-        scale_t = torch.tensor(scale, dtype=torch.float32)
-        zlo_t = torch.tensor(zlo, dtype=torch.float32)
-        zhi_t = torch.tensor(zhi, dtype=torch.float32)
-        zspan_t = torch.tensor(zspan, dtype=torch.float32)
-
+        Xt = torch.tensor(np.asarray(X, dtype=np.float32), dtype=torch.float32)
         action = self.agent(Xt)
-        candidate_search = Zt + 0.2 * zspan_t * action
-        candidate_search = torch.maximum(torch.minimum(candidate_search, zhi_t), zlo_t)
-        candidate_scaled = (candidate_search - mean_t) / scale_t
+        action_scale = float(self.step_scale(deck))
+        candidate_unit = torch.clamp(Xt + action_scale * action, 0.0, 1.0)
 
         for p in self.model.parameters():
             p.requires_grad_(False)
 
-        predicted_reward = self.model(candidate_scaled)
+        predicted_reward = self.model(candidate_unit)
         agent_loss = -predicted_reward.mean() + 1.0e-4 * action.pow(2).mean()
         self.opt_a.zero_grad()
         agent_loss.backward()
@@ -636,6 +804,10 @@ class Runner:
 
         for p in self.model.parameters():
             p.requires_grad_(True)
+
+# ========================================================================================================================
+#
+# ========================================================================================================================
 
 def run_daemon(config, physics_engine):
     from collections import defaultdict
@@ -659,7 +831,12 @@ def run_daemon(config, physics_engine):
     print("runner.bounds:", runner.bounds)
     flat = FlatDetector(config.get("FLAT_WINDOW", 200), config.get("FLAT_THRESHOLD", 1e-6), config.get("FLAT_PATIENCE", 3))
     converge = ConvergenceDetector(config, config["THETA_BOUNDS"], config["PARAMETER_NAMES"])
-    runs, best = 0, np.inf
+    proposal_count, eval_count, full_count = 0, 0, 0
+    existing_full = real_pass_rows(deck.df)
+    best = float(existing_full["chi2"].min()) if len(existing_full) else np.inf
+    existing_pid = pd.to_numeric(deck.df.get("proposal_id", pd.Series(dtype=float)), errors="coerce")
+    if np.isfinite(existing_pid).any():
+        runner.step = int(np.nanmax(existing_pid))
     t_acc, t_cnt = defaultdict(float), defaultdict(int); PROF_EVERY = int(config.get("PROF_EVERY", 25))
     obs = getattr(physics_engine, "__wrapped_obs__", None)
     if obs is None:
@@ -803,79 +980,138 @@ def run_daemon(config, physics_engine):
         f"model_owner_limit={model_owner_limit or 'auto'}",
         flush=True,
     )
-    while runs < config["MAX_RUNS"]:
-        print(f"[Daemon] loop iter runs={runs}", flush=True); t0 = time.perf_counter()
-        deck._flush_buf()
-        base_props = ([(list(fixed_theta), runs + 1)] if fixed_theta is not None else runner.propose(deck))
-        print("base_props[:3] =", base_props[:3])
-        props = []
-        
-        for theta, pid in base_props:
-            halo_param, halo_scale, MBH, ML = theta
-            variant_map = {
-                "full": ([halo_param, halo_scale, MBH, ML], base_halo_type),
-                "bh_only": ([0.0, halo_scale, MBH, ML], "none"),
-                "halo_only": ([halo_param, halo_scale, 0.0, ML], base_halo_type),
-                "bh_up": ([halo_param, halo_scale, MBH * 2.0, ML], base_halo_type),
-                "bh_down": ([halo_param, halo_scale, MBH * 0.5, ML], base_halo_type),
-                "halo_up": ([halo_param * 2.0, halo_scale, MBH, ML], base_halo_type),
-                "halo_down": ([halo_param * 0.5, halo_scale, MBH, ML], base_halo_type),
-                "halo_scale_up": ([halo_param, halo_scale * 2.0, MBH, ML], base_halo_type),
-                "halo_scale_down": ([halo_param, halo_scale * 0.5, MBH, ML], base_halo_type),
-                "ml_up": ([halo_param, halo_scale, MBH, ML * 2.0], base_halo_type),
-                "ml_down": ([halo_param, halo_scale, MBH, ML * 0.5], base_halo_type),
-            }
-            variants = [ (label, *variant_map[label]) for label in _selected_variants(config, variant_map)]
-            # keep each perturbed theta inside bounds
-            bounded_variants = []
-            for label, tvar, halo_type_variant in variants:
-                tfix = []
-                for k, x in enumerate(tvar):
-                    lo, hi = config["THETA_BOUNDS"][k]
-                    tfix.append(clamp(float(x), float(lo), float(hi)))
-                bounded_variants.append((label, tfix, halo_type_variant))
-            for label, tvar, halo_type_variant in bounded_variants:
-                props.append((tvar, pid, label, halo_type_variant))
-        t_acc["propose"] += time.perf_counter() - t0; t_cnt["propose"] += 1
-        print(f"[Daemon] proposing {len(props)} variants, starting eval...", flush=True)
-        _jnt = os.environ.get("JULIA_NUM_THREADS", "1")
-        _nthreads = (os.cpu_count() or 1) if _jnt == "auto" else int(_jnt)
-        CHUNK = int(config.get("CHUNK_SIZE", max(3 * _nthreads, len(props))))
-        def _record(theta, pid, label, status, chi2, diag=None):
-            nonlocal best, runs
-            if status != "pass" or not np.isfinite(chi2) or chi2 <= 1e-12:
-                status = status if status != "pass" else "numeric_fail"
-                chi2 = np.inf
-                if diag is not None:
-                    diag = dict(diag)
-                    diag["chi2_losvd"] = np.inf
-            reward = fixer.reward(status, chi2)
-            final_status = f"{status}_{label}"
-            t_add = time.perf_counter()
-            deck.add(theta, chi2, reward, pid, final_status, diag=diag)
-            t_acc["add"] += time.perf_counter() - t_add; t_cnt["add"] += 1
-            valid_real_pass = is_real_pass(final_status) and np.isfinite(chi2) and (chi2 > 1e-12)
+
+    _jnt = os.environ.get("JULIA_NUM_THREADS", "1")
+    _nthreads = (os.cpu_count() or 1) if _jnt == "auto" else int(_jnt)
+    owner_capacity = model_owner_limit if model_owner_limit > 0 else max(1, _nthreads // max(threads_per_model, 1))
+    feedback_cfg = int(config.get("FEEDBACK_BATCH_SIZE", 0))
+    feedback_batch = owner_capacity if feedback_cfg <= 0 else min(feedback_cfg, runner.batch)
+    feedback_batch = max(1, min(feedback_batch, runner.batch))
+    CHUNK = max(1, int(config.get("CHUNK_SIZE", feedback_batch)))
+    max_evals = int(config.get("MAX_EVALS", 0))
+    alt_trigger_delta = float(config.get("ALT_TRIGGER_DELTA_CHI2", 100.0))
+    alt_density_radius = float(config.get("ALT_DENSITY_RADIUS", 0.05))
+    alt_sensitivity_delta = float(config.get("ALT_SENSITIVITY_DELTA_CHI2", 100.0))
+
+    print(f"[SEARCH CADENCE] configured_batch={runner.batch} feedback_batch={feedback_batch} owner_capacity={owner_capacity} chunk={CHUNK}", flush=True)
+    print(f"[SCIENCE BRANCH] full_delta<={alt_trigger_delta:g} density_radius={alt_density_radius:g} sensitivity_delta<={alt_sensitivity_delta:g}", flush=True)
+
+    def _variant(theta, label):
+        halo_param, halo_scale, MBH, ML = [float(x) for x in theta]
+        variants = {
+            "full": ([halo_param, halo_scale, MBH, ML], base_halo_type),
+            "no_bh": ([halo_param, halo_scale, 0.0, ML], base_halo_type),
+            "no_halo": ([0.0, halo_scale, MBH, ML], "none"),
+            "no_bh_halo_up": ([halo_param * 2.0, halo_scale, 0.0, ML], base_halo_type),
+            "no_bh_halo_down": ([halo_param * 0.5, halo_scale, 0.0, ML], base_halo_type),
+            "no_bh_halo_scale_up": ([halo_param, halo_scale * 2.0, 0.0, ML], base_halo_type),
+            "no_bh_halo_scale_down": ([halo_param, halo_scale * 0.5, 0.0, ML], base_halo_type),
+            "no_bh_ml_up": ([halo_param, halo_scale, 0.0, ML * 2.0], base_halo_type),
+            "no_bh_ml_down": ([halo_param, halo_scale, 0.0, ML * 0.5], base_halo_type),
+            "no_halo_bh_up": ([0.0, halo_scale, MBH * 2.0, ML], "none"),
+            "no_halo_bh_down": ([0.0, halo_scale, MBH * 0.5, ML], "none"),
+            "no_halo_ml_up": ([0.0, halo_scale, MBH, ML * 2.0], "none"),
+            "no_halo_ml_down": ([0.0, halo_scale, MBH, ML * 0.5], "none"),
+        }
+        aliases = {"halo_only": "no_bh", "bh_only": "no_halo"}
+        label = aliases.get(str(label).strip().lower(), str(label).strip().lower())
+        if label not in variants:
+            raise ValueError(f"Unknown evaluation variant {label!r}; choose from {list(variants)}")
+        return label, *variants[label]
+
+    def _bounded_prop(theta, pid, label):
+        label, tvar, halo_type_variant = _variant(theta, label)
+        tfix = []
+        for k, x in enumerate(tvar):
+            lo, hi = config["THETA_BOUNDS"][k]
+            tfix.append(clamp(float(x), float(lo), float(hi)))
+        return tfix, pid, label, halo_type_variant
+
+    def _dedupe_props(props):
+        out, seen = [], set()
+        for theta, pid, label, halo_type_variant in props:
+            key = (str(halo_type_variant).strip().lower(), tuple(round(float(x), 12) for x in theta))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((theta, pid, label, halo_type_variant))
+        return out
+
+    def _family_dims(family):
+        if family == "no_bh":
+            return (0, 1, 3)
+        if family == "no_halo":
+            return (2, 3)
+        raise ValueError(f"Unknown restricted family {family!r}")
+
+    def _family_region_sparse(theta, family):
+        rows = family_pass_rows(deck.df, family)
+        if len(rows) == 0:
+            return True
+        dims = _family_dims(family)
+        target = runner._unit_search(theta)[list(dims)]
+        X = runner._unit_search_matrix(rows[runner.cols].values)
+        if len(X) == 0:
+            return True
+        distance = np.linalg.norm(X[:, list(dims)] - target, axis=1)
+        return not np.any(distance <= alt_density_radius)
+
+    def _record(theta, pid, label, status, chi2, diag=None):
+        nonlocal best, eval_count, full_count
+        finite_chi2 = np.isfinite(chi2) and chi2 > 1e-12
+        if status == "pass" and not finite_chi2:
+            status = "numeric_fail"
+        if not finite_chi2:
+            chi2 = np.inf
+        if diag is not None:
+            diag = dict(diag)
+            diag["chi2_losvd"] = chi2
+
+        reward = fixer.reward(status, chi2)
+        final_status = f"{status}_{label}"
+        t_add = time.perf_counter()
+        deck.add(theta, chi2, reward, pid, final_status, diag=diag)
+        t_acc["add"] += time.perf_counter() - t_add
+        t_cnt["add"] += 1
+
+        eval_count += 1
+        if label == "full":
+            full_count += 1
+
+        valid_real_pass = final_status == "pass_full" and finite_chi2
+        valid_family_pass = status == "pass" and finite_chi2
+        new_best = False
+
+        if label == "full":
             if valid_real_pass:
                 flat.push(chi2)
-                fixer.unlock(deck, runner)
-                if chi2 < best: best = chi2
-            else: flat.push(np.inf)
-            runs += 1
-            if runs >= int(config["MAX_RUNS"]):
-                deck.save()
-                print(f"[Daemon] Reached MAX_RUNS={config['MAX_RUNS']}", flush=True)
-                return True
-            if not runner.fill_triggered and runner.detect_basin(deck):
-                runner.fill_mode = runner.fill_triggered = True
-                print(f"[Daemon] Basin detected at run {runs} — switching to fill mode", flush=True)
-            if runs % PROF_EVERY == 0:
-                avg = lambda k: (t_acc[k] / t_cnt[k]) if t_cnt[k] else 0.0
-                t_eval = t_acc["eval"]; per_batch = t_eval / max(t_cnt["propose"], 1); per_theta = t_eval / max(t_cnt["eval"], 1)
-                print(f"[PROF] runs={runs} best={best:.4f} propose={avg('propose'):.4f}s eval/batch={per_batch:.4f}s eval/theta={per_theta:.4f}s add={avg('add'):.4f}s", flush=True)
-                t_acc.clear(); t_cnt.clear()
-            if flat.flat(): deck.save(); print(f"[Daemon] Flat region detected after {runs} runs", flush=True); return True
-            if converge.check(deck, runner, runs): deck.save(); return True
-            return False
+                if chi2 < best:
+                    best = chi2
+                    new_best = True
+            else:
+                flat.push(np.inf)
+
+        stop = False
+        if fixed_theta is None and label == "full" and full_count >= int(config["MAX_RUNS"]):
+            stop = True
+            print(f"[Daemon] Reached MAX_RUNS={config['MAX_RUNS']} full models", flush=True)
+        if max_evals > 0 and eval_count >= max_evals:
+            stop = True
+            print(f"[Daemon] Reached MAX_EVALS={max_evals}", flush=True)
+
+        if label == "full" and full_count % PROF_EVERY == 0:
+            avg = lambda k: (t_acc[k] / t_cnt[k]) if t_cnt[k] else 0.0
+            t_eval = t_acc["eval"]
+            per_wave = t_eval / max(t_cnt["propose"], 1)
+            per_theta = t_eval / max(t_cnt["eval"], 1)
+            print(f"[PROF] full={full_count} evals={eval_count} proposals={proposal_count} best={best:.4f} propose={avg('propose'):.4f}s eval/wave={per_wave:.4f}s eval/theta={per_theta:.4f}s add={avg('add'):.4f}s", flush=True)
+            t_acc.clear()
+            t_cnt.clear()
+
+        return stop, dict(theta=list(theta), pid=pid, label=label, status=status, final_status=final_status, chi2=chi2, finite_chi2=finite_chi2, valid_real_pass=valid_real_pass, valid_family_pass=valid_family_pass, new_best=new_best, full_index=full_count if label == "full" else None)
+
+    def _evaluate_props(props):
+        records = []
         stop = False
         grouped_props = defaultdict(list)
         for theta, pid, label, halo_type_variant in props:
@@ -1034,7 +1270,13 @@ kinematic_bin_edges=_kin_bins_jl
 
                     for j, (theta, pid, label, halo_type_variant) in enumerate(chunk_props):
                         code = int(status_code_vec[j])
-                        status, chi2 = batch_result_status(code, float(chi2_vec[j]))
+                        raw_chi2 = float(chi2_vec[j])
+                        finite_chi2 = np.isfinite(raw_chi2) and raw_chi2 > 1e-12
+                        if code == 0:
+                            status = "pass" if finite_chi2 else "numeric_fail"
+                        else:
+                            status = {1: "orbit_fail", 2: "solver_failed", 3: "physics_exception", 4: "timeout"}.get(code, "unknown_fail")
+                        chi2 = raw_chi2 if finite_chi2 else np.inf
                         coverage_status = str(coverage_status_vec[j])
                         coverage_issue_region = str(coverage_issue_region_vec[j])
                         coverage_issue_axis = str(coverage_issue_axis_vec[j])
@@ -1101,7 +1343,9 @@ kinematic_bin_edges=_kin_bins_jl
                             wphase_dynamic_range=float(wphase_dynamic_range_vec[j]),
                             wphase_pair_max_relative_mismatch=float(wphase_pair_max_relative_mismatch_vec[j]),
                         )
-                        if _record(theta, pid, label, status, chi2, diag=diag):
+                        stop_now, record = _record(theta, pid, label, status, chi2, diag=diag)
+                        records.append(record)
+                        if stop_now:
                             stop = True
                             break
                 except Exception as e:
@@ -1126,7 +1370,124 @@ kinematic_bin_edges=_kin_bins_jl
                     break
             if stop:
                 break
-        if stop: return
-        t0 = time.perf_counter(); deck._flush_buf(); runner.train(deck)
-        t_acc["train"] += time.perf_counter() - t0; t_cnt["train"] += 1
+        return stop, records
+
+
+
+    fixer.unlock(deck, runner)
+    runner.train(deck)
+
+    while full_count < int(config["MAX_RUNS"]):
+        print(f"[Daemon] loop full={full_count} evals={eval_count} proposals={proposal_count}", flush=True)
+        t0 = time.perf_counter()
+        deck._flush_buf()
+
+        if fixed_theta is not None:
+            selected = config.get("EVAL_VARIANTS", ["full", "no_bh", "no_halo"])
+            if isinstance(selected, str):
+                selected = [selected]
+            props = _dedupe_props([_bounded_prop(list(fixed_theta), runner.step + 1, label) for label in selected])
+            runner.step += 1
+            proposal_count += 1
+            t_acc["propose"] += time.perf_counter() - t0
+            t_cnt["propose"] += 1
+            print(f"[Daemon] fixed-theta evaluation: {len(props)} unique variant(s)", flush=True)
+            _evaluate_props(props)
+            deck.save()
+            return
+
+        remaining = int(config["MAX_RUNS"]) - full_count
+        wave_size = min(feedback_batch, remaining)
+        base_props = runner.propose(deck, n=wave_size)
+        proposal_count += len(base_props)
+        print("base_props[:3] =", base_props[:3])
+
+        full_props = _dedupe_props([_bounded_prop(theta, pid, "full") for theta, pid in base_props])
+        t_acc["propose"] += time.perf_counter() - t0
+        t_cnt["propose"] += 1
+
+        print(f"[Daemon] proposing {len(full_props)} full models, starting eval...", flush=True)
+        stop, full_records = _evaluate_props(full_props)
+        deck._flush_buf()
+
+        if stop:
+            deck.save()
+            return
+
+        fixer.unlock(deck, runner)
+        t0 = time.perf_counter()
+        runner.train(deck)
+        t_acc["train"] += time.perf_counter() - t0
+        t_cnt["train"] += 1
+
+        if not runner.fill_triggered and runner.detect_basin(deck):
+            runner.fill_mode = runner.fill_triggered = True
+            print(f"[Daemon] Basin detected at full_count={full_count} — switching to fill mode", flush=True)
+
+        if flat.flat():
+            deck.save()
+            print(f"[Daemon] Flat region detected after {full_count} full models", flush=True)
+            return
+
+        if converge.check(deck, runner, full_count):
+            deck.save()
+            return
+
+        relevant_full = [r for r in full_records if r["valid_real_pass"] and np.isfinite(best) and (r["chi2"] - best <= alt_trigger_delta)]
+        alt_props = []
+
+        for record in relevant_full:
+            theta, pid = record["theta"], record["pid"]
+            if _family_region_sparse(theta, "no_bh"):
+                alt_props.append(_bounded_prop(theta, pid, "no_bh"))
+            if _family_region_sparse(theta, "no_halo"):
+                alt_props.append(_bounded_prop(theta, pid, "no_halo"))
+
+        alt_props = _dedupe_props(alt_props)
+
+        if alt_props:
+            print(f"[SCIENCE BRANCH] evaluating {len(alt_props)} restricted-model probe(s) from {len(relevant_full)} relevant full fit(s)", flush=True)
+            stop, alt_records = _evaluate_props(alt_props)
+            deck._flush_buf()
+
+            if stop:
+                deck.save()
+                return
+
+            fixer.unlock(deck, runner)
+            runner.train(deck)
+
+            full_by_pid = {r["pid"]: r for r in full_records if r["valid_real_pass"]}
+            sensitivity_props = []
+
+            for record in alt_records:
+                if not record["valid_family_pass"]:
+                    continue
+                matched_full = full_by_pid.get(record["pid"])
+                if matched_full is None:
+                    continue
+                delta = record["chi2"] - matched_full["chi2"]
+                if not np.isfinite(delta) or delta > alt_sensitivity_delta:
+                    continue
+
+                if record["label"] == "no_bh":
+                    labels = ["no_bh_halo_up", "no_bh_halo_down", "no_bh_halo_scale_up", "no_bh_halo_scale_down", "no_bh_ml_up", "no_bh_ml_down"]
+                elif record["label"] == "no_halo":
+                    labels = ["no_halo_bh_up", "no_halo_bh_down", "no_halo_ml_up", "no_halo_ml_down"]
+                else:
+                    continue
+
+                print(f"[SCIENCE BRANCH] {record['label']} competitive at proposal={record['pid']} delta_chi2={delta:.6g}; expanding local sensitivity", flush=True)
+                sensitivity_props.extend(_bounded_prop(record["theta"], record["pid"], label) for label in labels)
+
+            sensitivity_props = _dedupe_props(sensitivity_props)
+
+            if sensitivity_props:
+                stop, _ = _evaluate_props(sensitivity_props)
+                deck._flush_buf()
+                runner.train(deck)
+                if stop:
+                    deck.save()
+                    return
+
     deck.save()

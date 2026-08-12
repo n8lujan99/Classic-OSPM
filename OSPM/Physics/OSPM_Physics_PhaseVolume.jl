@@ -327,30 +327,23 @@ function _karl_phase_nested_area_differences!(delta_area::Vector{Float64}, sos_a
     length(valid_mask) == n || error("valid_mask length does not match sos_area")
     length(energy_index) == n || error("energy_index length does not match sos_area")
     length(lz_index) == n || error("lz_index length does not match sos_area")
-
     groups = Dict{Tuple{Int,Int},Vector{Int}}()
-
     @inbounds for i in 1:n
         valid_mask[i] || continue
         key = (energy_index[i], lz_index[i])
         key[1] > 0 && key[2] > 0 || continue
         push!(get!(groups, key, Int[]), i)
     end
-
     duplicate_clusters = 0
     duplicate_orbits = 0
-
     for members in values(groups)
         sort!(members; by=i -> (sos_area[i], i))
-
         previous_area = 0.0
         k = 1
-
         while k <= length(members)
             first_member = members[k]
             cluster_area = sos_area[first_member]
             j = k + 1
-
             while j <= length(members)
                 next_area = sos_area[members[j]]
                 tol = duplicate_rtol * max(abs(cluster_area), abs(next_area), 1.0)
@@ -358,31 +351,24 @@ function _karl_phase_nested_area_differences!(delta_area::Vector{Float64}, sos_a
                 cluster_area = max(cluster_area, next_area)
                 j += 1
             end
-
             cluster_count = j - k
             annular_area = cluster_area - previous_area
-
             if !(isfinite(annular_area) && annular_area > 0.0)
                 scale = max(abs(cluster_area), abs(previous_area), 1.0)
                 annular_area = max(duplicate_rtol * scale, eps(Float64) * scale)
             end
-
             per_orbit_area = annular_area / cluster_count
-
             @inbounds for q in k:(j - 1)
                 delta_area[members[q]] = per_orbit_area
             end
-
             if cluster_count > 1
                 duplicate_clusters += 1
                 duplicate_orbits += cluster_count
             end
-
             previous_area = max(previous_area, cluster_area)
             k = j
         end
     end
-
     return duplicate_clusters, duplicate_orbits, length(groups)
 end
 
@@ -499,37 +485,27 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
 
     delta_sos_area = fill(NaN, n)
     interior_mask = valid_mask .& .!circular_boundary_mask
-
     duplicate_clusters, duplicate_orbits, nested_groups = _karl_phase_nested_area_differences!(delta_sos_area, sos_area, interior_mask, st.energy_index, st.lz_index; duplicate_rtol=duplicate_rtol)
-
     circular_boundary_widths_assigned = _karl_phase_assign_circular_boundary_widths!(delta_sos_area, sos_area, circular_boundary_mask, valid_mask, st.energy_index, st.lz_index)
-
     raw_phase_volume = fill(NaN, n)
 
     @inbounds for i in 1:n
         valid_mask[i] || continue
-
         volume = abs(delta_sos_area[i] * dE[i] * dLz[i])
-
         if isfinite(volume) && volume > 0.0
             raw_phase_volume[i] = volume
         else
             valid_mask[i] = false
         end
     end
-
     invalid_after_product = findall(required_mask .& .!valid_mask)
-
     if strict && !isempty(invalid_after_product)
         preview = join(first(invalid_after_product, min(length(invalid_after_product), 20)), ",")
         suffix = length(invalid_after_product) > 20 ? ",..." : ""
         error("Karl phase-volume product is invalid for $(length(invalid_after_product)) recorded base orbit(s): [$preview$suffix]")
     end
-
     phase_volume, mean_log_normalization = _karl_phase_normalize(raw_phase_volume, valid_mask, normalization)
-
     wphase = fill(NaN, n)
-
     @inbounds for i in 1:n
         if valid_mask[i]
             wphase[i] = 1.0 / phase_volume[i]
@@ -540,9 +516,7 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
     phase_volume_paired = _karl_phase_repeat_pairs(phase_volume)
     wphase_paired = _karl_phase_repeat_pairs(wphase)
     valid_paired = _karl_phase_repeat_pairs(Float64.(valid_mask)) .== 1.0
-
     valid_indices = findall(valid_mask)
-
     raw_min = isempty(valid_indices) ? NaN : minimum(raw_phase_volume[valid_indices])
     raw_max = isempty(valid_indices) ? NaN : maximum(raw_phase_volume[valid_indices])
     norm_min = isempty(valid_indices) ? NaN : minimum(phase_volume[valid_indices])
@@ -550,50 +524,16 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
     wphase_min = isempty(valid_indices) ? NaN : minimum(wphase[valid_indices])
     wphase_max = isempty(valid_indices) ? NaN : maximum(wphase[valid_indices])
 
-    diagnostics = (
-        convention=:inverse_phase_volume,
-        entropy_expression=Symbol("-sum(w*log(w*wphase))"),
-        normalization=normalization,
-        mean_log_normalization=mean_log_normalization,
-        planned_base_orbits=n,
-        planned_paired_columns=2 * n,
-        launches_recorded=count(identity, st.launch_recorded),
-        sos_recorded=count(identity, st.sos_recorded),
-        valid_base_orbits=length(valid_indices),
-        invalid_recorded_orbits=count(identity, required_mask .& .!valid_mask),
-        nested_groups=nested_groups,
-        duplicate_area_clusters=duplicate_clusters,
-        duplicate_area_orbits=duplicate_orbits,
-        circular_boundary_orbits=count(identity, circular_boundary_mask),
-        circular_boundary_widths_assigned=circular_boundary_widths_assigned,
-        raw_phase_volume_min=raw_min,
-        raw_phase_volume_max=raw_max,
-        raw_phase_volume_dynamic_range=(isfinite(raw_min) && raw_min > 0.0) ? raw_max / raw_min : NaN,
-        normalized_phase_volume_min=norm_min,
-        normalized_phase_volume_max=norm_max,
-        wphase_min=wphase_min,
-        wphase_max=wphase_max,
-        energy_centers=energy_centers,
-        energy_widths=energy_widths,
-        lz_centers=lz_centers,
-        lz_widths=lz_widths,
-    )
+    diagnostics = (convention=:inverse_phase_volume, entropy_expression=Symbol("-sum(w*log(w*wphase))"), normalization=normalization, mean_log_normalization=mean_log_normalization,
+        planned_base_orbits=n, planned_paired_columns=2 * n, launches_recorded=count(identity, st.launch_recorded), sos_recorded=count(identity, st.sos_recorded), valid_base_orbits=length(valid_indices),
+        invalid_recorded_orbits=count(identity, required_mask .& .!valid_mask), nested_groups=nested_groups, duplicate_area_clusters=duplicate_clusters, duplicate_area_orbits=duplicate_orbits,
+        circular_boundary_orbits=count(identity, circular_boundary_mask), circular_boundary_widths_assigned=circular_boundary_widths_assigned, raw_phase_volume_min=raw_min,
+        raw_phase_volume_max=raw_max, raw_phase_volume_dynamic_range=(isfinite(raw_min) && raw_min > 0.0) ? raw_max / raw_min : NaN, normalized_phase_volume_min=norm_min, normalized_phase_volume_max=norm_max,
+        wphase_min=wphase_min, wphase_max=wphase_max, energy_centers=energy_centers, energy_widths=energy_widths, lz_centers=lz_centers, lz_widths=lz_widths)
 
-    return (
-        raw_phase_volume_base=raw_phase_volume,
-        phase_volume_base=phase_volume,
-        wphase_base=wphase,
-        raw_phase_volume_paired=raw_phase_volume_paired,
-        phase_volume_paired=phase_volume_paired,
-        wphase_paired=wphase_paired,
-        valid_base=valid_mask,
-        valid_paired=valid_paired,
-        sos_area=sos_area,
-        delta_sos_area=delta_sos_area,
-        dE=dE,
-        dLz=dLz,
-        diagnostics=diagnostics,
-    )
+    return (raw_phase_volume_base=raw_phase_volume, phase_volume_base=phase_volume, wphase_base=wphase, raw_phase_volume_paired=raw_phase_volume_paired,
+        phase_volume_paired=phase_volume_paired, wphase_paired=wphase_paired, valid_base=valid_mask, valid_paired=valid_paired, sos_area=sos_area,
+        delta_sos_area=delta_sos_area, dE=dE, dLz=dLz, diagnostics=diagnostics)
 end
 
 function build_karl_wphase(st::KarlPhaseVolumeState; kwargs...)

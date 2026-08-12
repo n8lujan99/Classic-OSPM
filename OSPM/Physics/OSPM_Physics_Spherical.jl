@@ -1641,13 +1641,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     coverage_issue_axis[i] = coverage_meta.issue_axis
                     coverage_issue_shell_bands[i] = coverage_meta.issue_shell_bands
                     coverage_reasons[i] = coverage_meta.reasons
-
                     if !coverage.accepted
                         _print_orbit_failure_diagnostics(ws, i)
 
                         println("[ORBIT COVERAGE WARNING] i=", i, " region=", coverage_meta.issue_region, " axis=", coverage_meta.issue_axis, " shell_bands=", isempty(coverage_meta.issue_shell_bands) ? "none" : coverage_meta.issue_shell_bands, " succeeded=", coverage.succeeded, " attempted=", coverage.attempted, " planned=", coverage.planned, " required=", coverage.required, " coverage_fraction=", coverage.coverage_fraction, " attempted_fraction=", coverage.attempted_fraction, " success_fraction=", coverage.success_fraction, " shell_min=", coverage.shell_minimum_coverage, " lfrac_min=", coverage.lfrac_minimum_coverage, " theta_min=", coverage.theta_minimum_coverage, " shell_gap=", coverage.shell_coverage_gap, " lfrac_gap=", coverage.lfrac_coverage_gap, " theta_gap=", coverage.theta_coverage_gap, " joint_holes=", length(coverage.joint_holes), " deadline_hit=", coverage_deadline_hit[i], " reasons=", isempty(coverage_meta.reasons) ? "none" : coverage_meta.reasons)
                     end
-
                     if !_orbit_library_usable(ws, coverage.successful_columns)
                         status[i] = 1
                         solver_failure_reason[i] = "unusable_orbit_library"
@@ -1655,11 +1653,9 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
-
                     A_losvd, A_light = _compact_orbit_matrices(ws, coverage.successful_columns)
                     wphase_use = Float64[]
                     phase_diag = nothing
-                    
                     try
                         wphase_use, phase_diag = _build_compact_karl_wphase(ws, coverage.successful_columns,)
                     catch phase_error
@@ -1730,7 +1726,6 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     finally
                         Threads.atomic_add!(scheduler_counters.weight_models, -1)
                     end
-
 
                 _store_solver_diagnostics!(i, wdiag)
                 finite_weight_solution = length(w) == size(A_losvd, 2) && all(isfinite, w)

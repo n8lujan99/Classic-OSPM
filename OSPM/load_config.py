@@ -77,33 +77,117 @@ def _build_general_defaults(local_debug):
     norbit = 10000
     if norbit % 2 != 0:
         raise ValueError(f"Karl paired-orbit path requires even NORBIT; got {norbit}")
+
     return {
         # Core runtime
-        "MODE": "karl","LOCAL_DEBUG": local_debug,"N_WORKERS": detect_workers(),"NORBIT": norbit,
+        "MODE": "karl",
+        "LOCAL_DEBUG": local_debug,
+        "N_WORKERS": detect_workers(),
+        "NORBIT": norbit,
+
         # Standard data-column contract
-        "STAR_R_COL": "R_pc", "STAR_V_COL": "vlos_kms", "STAR_VERR_COL": "verr_kms", "RA_COL": "ra_deg", "DEC_COL": "dec_deg", "VLOS_COL": "vlos_kms",
+        "STAR_R_COL": "R_pc",
+        "STAR_V_COL": "vlos_kms",
+        "STAR_VERR_COL": "verr_kms",
+        "RA_COL": "ra_deg",
+        "DEC_COL": "dec_deg",
+        "VLOS_COL": "vlos_kms",
+
         # Observable and solver policy
-        "OBSERVABLES": {"NVBIN": 21, "NTHETA_LAUNCH": 9, "ORBIT_FILL_PCT": 0.85, "ORBIT_REGIONAL_FLOOR": 0.80, "ORBIT_MAX_REGIONAL_GAP": 0.10, "ORBIT_SHELL_BANDS": 8,
-            "ORBIT_COVERAGE_CHECK_EVERY": 50, "ORBIT_WARN_FILL_PCT": 0.95, "ORBIT_WARN_SUCCESS_PCT": 0.99, "ORBIT_WARN_REGIONAL_FLOOR": 0.80, "ORBIT_WARN_MAX_REGIONAL_GAP": 0.15,
-            "MODEL_OWNER_LIMIT": 0, "THREADS_PER_MODEL": 8, "KARL_ALPHAT": 1.0, "KARL_LIGHT_REL_TOL": 0.01, "KARL_LIGHT_SIGMA_TOL": 2.0, "KARL_DELTA_CHI2_ITER_TOL": 0.3, "KARL_MAXITER": 1000,
-            "ENTROPY_FLOOR": 1e-30, "HALO_Q_AXIS_RATIO": 1.0},
+        "OBSERVABLES": {
+            "NVBIN": 21,
+            "NTHETA_LAUNCH": 9,
+            "ORBIT_FILL_PCT": 0.85,
+            "ORBIT_REGIONAL_FLOOR": 0.80,
+            "ORBIT_MAX_REGIONAL_GAP": 0.10,
+            "ORBIT_SHELL_BANDS": 8,
+            "ORBIT_COVERAGE_CHECK_EVERY": 50,
+            "ORBIT_WARN_FILL_PCT": 0.95,
+            "ORBIT_WARN_SUCCESS_PCT": 0.99,
+            "ORBIT_WARN_REGIONAL_FLOOR": 0.80,
+            "ORBIT_WARN_MAX_REGIONAL_GAP": 0.15,
+            "MODEL_OWNER_LIMIT": 0,
+            "THREADS_PER_MODEL": 8,
+            "KARL_ALPHAT": 1.0,
+            "KARL_LIGHT_REL_TOL": 0.01,
+            "KARL_LIGHT_SIGMA_TOL": 2.0,
+            "KARL_DELTA_CHI2_ITER_TOL": 0.3,
+            "KARL_MAXITER": 1000,
+            "ENTROPY_FLOOR": 1e-30,
+            "HALO_Q_AXIS_RATIO": 1.0,
+        },
+
         # Shared penalty policy
-        "PEN_SPHERE_STRENGTH": 2500, "PEN_SPHERE_POWER": 2.0, "PEN_SLOPE_STRENGTH": 5000,
+        "PEN_SPHERE_STRENGTH": 2500,
+        "PEN_SPHERE_POWER": 2.0,
+        "PEN_SLOPE_STRENGTH": 5000,
+
         # Shared numerical-domain controls
-        "MIN_DISTANCE": 5e-4, "R_GRID_POINTS": 256, "POTENTIAL_EXTENT": 6.0, "BH_MIN_RADIUS_MULTIPLIER": 2.0,
+        "MIN_DISTANCE": 5e-4,
+        "R_GRID_POINTS": 256,
+        "POTENTIAL_EXTENT": 6.0,
+        "BH_MIN_RADIUS_MULTIPLIER": 2.0,
+
         # Deck behavior
-        "ALLOWED_STATUSES": list(ALLOWED_STATUSES), "FILL_DEFAULT_STATUS": "todo",
+        "ALLOWED_STATUSES": list(ALLOWED_STATUSES),
+        "FILL_DEFAULT_STATUS": "todo",
+
         # Sampling
-        "BATCH_SIZE": 1 if local_debug else 120, "MIN_BATCH_SIZE": 1 if local_debug else 120, "MAX_BATCH_SIZE": 1 if local_debug else 360, "CHUNK_SIZE": 1 if local_debug else 20, "_PRINT_EVERY": 10, "_print_counter": 1,
-        # AI and learning
-        "AI_START_AFTER": 500, "MIN_TRAIN_POINTS": 300, "TRAIN_WINDOW": 500, "AI_NOISE_INIT": 0.30, "AI_NOISE_MIN": 0.02, "AI_NOISE_TAU": 5000, "AI_MIN_DISTINCT_PASS": 800, 
-        "RESET_INTERVAL": 10000, "AI_DEBUG_EVERY": 200, "AI_SNAPSHOT_EVERY": 2000, "FLAT_WINDOW": 200, "FLAT_THRESHOLD": 1e-6, "FLAT_PATIENCE": 10, "AI_RESET_ON_FLAT": True,
+        "BATCH_SIZE": 1 if local_debug else 120,
+        "MIN_BATCH_SIZE": 1 if local_debug else 120,
+        "MAX_BATCH_SIZE": 1 if local_debug else 360,
+        "CHUNK_SIZE": 1 if local_debug else 20,
+        "_PRINT_EVERY": 10,
+        "_print_counter": 1,
+
+        # AI startup and learning
+        "AI_MODEL_START_AFTER": 32,
+        "AI_START_AFTER": 50,
+        "AI_STRONG_AFTER": 150,
+        "MIN_TRAIN_POINTS": 32,
+        "TRAIN_WINDOW": 2000,
+        "TRAIN_RECENT_FRACTION": 0.25,
+        "TRAIN_BEST_FRACTION": 0.50,
+        "TRAIN_GLOBAL_FRACTION": 0.25,
+        "AI_NOISE_INIT": 0.30,
+        "AI_NOISE_MIN": 0.02,
+        "AI_NOISE_TAU": 300,
+        "AI_MIN_DISTINCT_PASS": 32,
+        "RESET_INTERVAL": 10000,
+        "AI_DEBUG_EVERY": 200,
+        "AI_SNAPSHOT_EVERY": 2000,
+        "AI_RESET_ON_FLAT": True,
+
+        # Search cadence
+        "FEEDBACK_BATCH_SIZE": 0,
+        "SEARCH_MIN_DISTANCE": 5e-4,
+        "FILL_MIN_DISTANCE": 1.25e-4,
+        "PROPOSAL_MAX_ATTEMPTS": 5000,
+
+        # Restricted-model science checks
+        "ALT_TRIGGER_DELTA_CHI2": 100.0,
+        "ALT_DENSITY_RADIUS": 0.05,
+        "ALT_SENSITIVITY_DELTA_CHI2": 100.0,
+
+        # Basin and convergence
+        "FLAT_WINDOW": 200,
+        "FLAT_THRESHOLD": 1e-6,
+        "FLAT_PATIENCE": 10,
+
         # Termination and runtime
-        "MAX_RUNS": 1 if local_debug else 300000, "STOP_NO_IMPROVEMENT": 2000, "IMPROVEMENT_EPSILON": 1e-6, "LOG_INTERVAL": 1 if local_debug else 10, "PROF_EVERY": 1 if local_debug else 20, "EVAL_TIMEOUT_S": 600.0 if local_debug else 1800.0,
+        "MAX_RUNS": 1 if local_debug else 300000,
+        "STOP_NO_IMPROVEMENT": 2000,
+        "IMPROVEMENT_EPSILON": 1e-6,
+        "LOG_INTERVAL": 1 if local_debug else 10,
+        "PROF_EVERY": 1 if local_debug else 20,
+        "EVAL_TIMEOUT_S": 600.0 if local_debug else 1800.0,
+
         # Debug evaluation policy
         "EVAL_VARIANTS": ["full"] if local_debug else None,
+
         # Physical constants
-        "G": 6.67430e-11, "Msun": 1.98847e30,
+        "G": 6.67430e-11,
+        "Msun": 1.98847e30,
     }
 
 

@@ -59,6 +59,7 @@ const DEFAULT_KARL_LIGHT_REL_TOL = 0.01
 const DEFAULT_KARL_DELTA_CHI2_ITER_TOL = 0.3
 const DEFAULT_KARL_INVALID_SIGMA_SENTINEL = -666.0
 const DEFAULT_KARL_STEP_SAFETY = 0.90
+const DEFAULT_KARL_SPEAR_RCOND_WARN = 1.0e-12
 
 
 # ========================================================================================================================
