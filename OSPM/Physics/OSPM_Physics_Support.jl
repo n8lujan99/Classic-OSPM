@@ -14,25 +14,31 @@ const G    = 6.67430e-11
 const c    = 2.99792458e8
 const pc   = 3.0856775814913673e16
 const Msun = 1.98847e30
+
 # machine floors
 const EPS_FORCE = 1e-14
 const EPS_VEL   = 1e-14
 const EPS_ARG   = 1e-14
+
 # physical geometry gate
 const EPS_SIN = 1e-6
+
 # scale-aware force gate
 const REL_FORCE    = 1e-10   # loosen to 1e-9 if needed
 const BRACKET_FRAC = 1e-6    # MUST be >> eps(Float64)
+
 # TUNABLE KNOBS — adjust these to control resolution, accuracy, and parallelism.
 # -- Halo potential grid --
 const DEFAULT_NR              = 256       # radial grid points for potential table
 const DEFAULT_RMAX_FACTOR     = 300.0     # max radius in units of r_s
+
 # -- Orbit integration --
 const DEFAULT_NSTEPS          = 4000      # RK4 steps per orbit
 const DEFAULT_STOP_RMIN_FACTOR = 1.001    # orbit stops when r < factor * rmin
 const DEFAULT_DT_FRAC         = 0.01      # timestep = dt_frac / orbital_frequency
 const DEFAULT_DT_FLOOR        = 1e-30     # floor on orbital-frequency denominator
 const DEFAULT_R0_FRAC         = 0.98      # starting radius as fraction of apocenter
+
 # -- A-matrix / orbit library --
 const DEFAULT_LFRAC           = (0.05, 0.2, 0.4, 0.7, 1.0)  # angular momentum fractions
 const DEFAULT_DR_FRAC         = 0.05      # radial matching tolerance (fraction of R)
@@ -40,17 +46,15 @@ const DEFAULT_NBINS_OCC       = 6         # occupancy histogram bins
 const DEFAULT_MAX_ATTEMPTS    = 6        # max orbit-launch attempts multiplier
 const DEFAULT_DR_FLOOR_FRAC   = 0.01      # floor on dR (fraction)
 const DEFAULT_DR_FLOOR_PC     = 0.0       # floor on dR (parsecs)
+
 # -- Karl-style binned LOSVD / projected-light fit --
 const DEFAULT_MIN_STARS_PER_BIN = 20       # minimum stars per projected radial bin
 const DEFAULT_NVBIN             = 21       # LOSVD velocity bins per radial aperture
-
 const DEFAULT_KARL_ALPHA        = 1e-4     # legacy value retained only for call compatibility
 const DEFAULT_KARL_ALPHAT       = 1.0      # Karl-style data-mismatch multiplier in entropy mode
 const DEFAULT_KARL_MAXITER      = 60       # Karl SPEAR/Newton iteration cap
 const DEFAULT_KARL_ENTROPY_FLOOR = 1e-30   # floor for log(w_i*wphase_i) entropy
-
 const DEFAULT_KARL_APFAC         = 1.0      # Karl SPEAR step factor
-
 const DEFAULT_KARL_LIGHT_REL_TOL = 0.01
 const DEFAULT_KARL_DELTA_CHI2_ITER_TOL = 0.3
 const DEFAULT_KARL_INVALID_SIGMA_SENTINEL = -666.0

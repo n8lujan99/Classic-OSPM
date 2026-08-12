@@ -41,10 +41,10 @@ CONFIG = {
     # Restricted after the wide-core run allowed nearly halo-free,
     # black-hole-dominated solutions.
     "THETA_BOUNDS": [
-        (0.0, 30.0),        # v0, km/s; 2025 paper range
-        (1.0, 10000.0),     # r_c, pc; 2025 paper range
+        (0.0, 25.0),        # v0, km/s; 2025 paper range
+        (1.0, 500),         # r_c, pc; 2025 paper range
         (0.0, 2.5e6),       # MBH, Msun; extended above paper's 1.5e6 ceiling because χ² is still improving toward higher MBH in this code
-        (0.2, 1.6),         # M/L; 2025 paper range
+        (0.2, 5.0),         # M/L; 2025 paper range
     ],
 
     # =========================================================
@@ -101,13 +101,14 @@ CONFIG = {
     # Galaxy-scale numerical domain
     # =========================================================
     "MAX_DISTANCE": 2e3,
-
+    "MBH_LOG_FLOOR": 1.0e3,
+    "MBH_ZERO_FRACTION": 0.10,
     # =========================================================
     # Paths and run identity
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT/"Segue1_Simon_stars_v2.csv"),
-    "CSV_PATH": str(PROFILE_ROOT/"default"/"segue1-paper-bounds-expanded-mbh-phasevolume-try2.csv"),
+    "CSV_PATH": str(PROFILE_ROOT/"default"/"segue1-paper-bounds-expanded-mbh-phasevolume-try3.csv"),
 }
 
 # Just some notes on the Segue 1 runs and analysis.

@@ -79,7 +79,60 @@ PHASE_VOLUME_DIAG_COLUMNS = [
 ]
 
 def clamp(x, lo, hi): return max(lo, min(hi, x))
-def random_theta(bounds): return [np.random.uniform(lo, hi) for lo, hi in bounds]
+
+def _search_mode(name):
+    name = str(name).strip().lower()
+    if name in {"r_c", "r_s"}:
+        return "log"
+    if name == "mbh":
+        return "logzero"
+    return "linear"
+
+def _to_search_value(name, x, mbh_floor=1.0e3):
+    mode = _search_mode(name)
+    x = float(x)
+    if mode == "log":
+        if x <= 0.0:
+            raise ValueError(f"{name} must be > 0 for logarithmic search")
+        return np.log10(x)
+    if mode == "logzero":
+        return np.log10(max(x, 0.0) + mbh_floor)
+    return x
+
+def _from_search_value(name, z, mbh_floor=1.0e3):
+    mode = _search_mode(name)
+    z = float(z)
+    if mode == "log":
+        return 10.0 ** z
+    if mode == "logzero":
+        return max(0.0, 10.0 ** z - mbh_floor)
+    return z
+
+def _search_bounds(bounds, names, mbh_floor=1.0e3):
+    return [(_to_search_value(name, lo, mbh_floor),  _to_search_value(name, hi, mbh_floor) ) for name, (lo, hi) in zip(names, bounds)]
+
+def _theta_to_search(theta, names, mbh_floor=1.0e3):
+    return np.asarray([ _to_search_value(name, x, mbh_floor) for name, x in zip(names, theta)], dtype=float)
+
+def _theta_from_search(z, names, bounds, mbh_floor=1.0e3):
+    theta = []
+    for name, zi, (lo, hi) in zip(names, z, bounds):
+        x = _from_search_value(name, zi, mbh_floor)
+        theta.append(clamp(x, float(lo), float(hi)))
+    return theta
+
+def random_theta(bounds, names, mbh_floor=1.0e3, mbh_zero_fraction=0.10):
+    sbounds = _search_bounds(bounds, names, mbh_floor)
+    theta = []
+    for name, (lo, hi), (slo, shi) in zip(names, bounds, sbounds):
+        if (str(name).strip().lower() == "mbh" and float(lo) <= 0.0 and np.random.rand() < mbh_zero_fraction):
+            theta.append(0.0)
+            continue
+        z = np.random.uniform(slo, shi)
+        x = _from_search_value(name, z, mbh_floor)
+        theta.append(clamp(x, float(lo), float(hi)))
+    return theta
+
 def min_dist(theta, arr):
     if len(arr) == 0: return np.inf
     return np.linalg.norm(np.asarray(arr) - np.asarray(theta), axis=1).min()
@@ -469,36 +522,49 @@ class Runner:
         return (chi_std < 1.0) and (rel_spread < 0.15)
 
     def step_scale(self, deck):
-        if not self.ai or not self.fill_mode: return 0.2
+        if not self.ai or not self.fill_mode:
+            return 0.2
         good = real_pass_rows(deck.df)
         top = good.nsmallest(min(len(good), 200), "chi2")
-        spread = np.std(top[self.cols].values, axis=0); span = np.array([hi - lo for lo, hi in self.bounds])
+        mbh_floor = float(self.cfg.get("MBH_LOG_FLOOR", 1.0e3))
+        X = np.asarray([_theta_to_search(row, self.cols, mbh_floor) for row in top[self.cols].values], dtype=float)
+        sbounds = _search_bounds(self.bounds, self.cols, mbh_floor)
+        span = np.asarray([hi - lo for lo, hi in sbounds], dtype=float)
+        spread = np.std(X, axis=0)
         return clamp(0.01 + 0.2 * np.mean(spread / span), 0.01, 0.05)
 
     def propose(self, deck):
         out = []
+        mbh_floor = float(self.cfg.get("MBH_LOG_FLOOR", 1.0e3))
+        mbh_zero_fraction = float(self.cfg.get("MBH_ZERO_FRACTION", 0.10))
+        sbounds = _search_bounds(self.bounds, self.cols, mbh_floor)
         while len(out) < self.batch:
-            if self.ai and not (self.explore_frac > 0 and np.random.rand() < self.explore_frac):
+            use_ai = ( self.ai and not ( self.explore_frac > 0.0 and np.random.rand() < self.explore_frac) )
+            if use_ai:
                 if self.fill_mode:
                     good = real_pass_rows(deck.df)
-                    base = good.nsmallest(100, "chi2")[self.cols].sample(1).values[0]
+                    base = (good .nsmallest(100, "chi2")[self.cols] .sample(1) .values[0])
                 else:
                     base = self._base(deck)
-                xb = self.scaler.transform(base.reshape(1, -1)) if self.scaled else base.reshape(1, -1)
-                a = self.agent.act(torch.tensor(xb, dtype=torch.float32), self._noise()).numpy().squeeze()
+                base_search = _theta_to_search(base, self.cols, mbh_floor)
+                xb = (self.scaler.transform(base_search.reshape(1, -1))if self.scaled else base_search.reshape(1, -1))
+                a = (self.agent.act(torch.tensor( xb, dtype=torch.float32,), self._noise()).numpy().squeeze())
                 s = self.step_scale(deck)
                 if self.fill_mode and self.step % 200 == 0:
                     print(f"[FillMode] step_scale={s:.4f}", flush=True)
-                theta = [clamp(base[i] + s * (hi - lo) * a[i], lo, hi)
-                         for i, (lo, hi) in enumerate(self.bounds)]
+                proposed_search = []
+                for i, (slo, shi) in enumerate(sbounds):
+                    zi = (base_search[i] + s * (shi - slo) * a[i])
+                    proposed_search.append(clamp(zi, slo, shi))
+                theta = _theta_from_search( proposed_search, self.cols, self.bounds, mbh_floor)
             else:
-                theta = random_theta(self.bounds)
+                theta = random_theta(self.bounds, self.cols, mbh_floor=mbh_floor, mbh_zero_fraction=mbh_zero_fraction)
             if deck.is_forbidden(theta):
                 continue
             if not self.fill_mode:
                 if min_dist(theta, self.recent) < self.min_d:
                     continue
-                if deck.nearest_distance(theta, self.min_d) < self.min_d:
+                if (deck.nearest_distance(theta, self.min_d ) < self.min_d):
                     continue
             self.recent.append(theta)
             self.step += 1
@@ -506,17 +572,70 @@ class Runner:
         return out
 
     def train(self, deck):
-        if not self.ai: return
+        if not self.ai:
+            return
+
         df = real_pass_rows(deck.df)
         df = df[np.isfinite(df.reward)]
-        if len(df) < 200: return
-        if len(df) > 5000: df = df.tail(5000)
-        X, y = df[self.cols].values, df.reward.values.reshape(-1, 1)
-        if not self.scaled: self.scaler.fit(X); self.scaled = True
-        Xt = torch.tensor(self.scaler.transform(X), dtype=torch.float32)
+        if len(df) < 200:
+            return
+        if len(df) > 5000:
+            df = df.tail(5000)
+
+        mbh_floor = float(self.cfg.get("MBH_LOG_FLOOR", 1.0e3))
+        X_phys = df[self.cols].values
+        X_search = np.asarray([_theta_to_search(row, self.cols, mbh_floor) for row in X_phys], dtype=float)
+        y = df.reward.values.reshape(-1, 1)
+
+        if not self.scaled:
+            self.scaler.fit(X_search)
+            self.scaled = True
+
+        X_scaled = self.scaler.transform(X_search)
+        Xt = torch.tensor(X_scaled, dtype=torch.float32)
         yt = torch.tensor(y, dtype=torch.float32)
-        loss = ((self.model(Xt) - yt) ** 2).mean()
-        self.opt_m.zero_grad(); loss.backward(); self.opt_m.step()
+
+        pred = self.model(Xt)
+        model_loss = ((pred - yt) ** 2).mean()
+        self.opt_m.zero_grad()
+        model_loss.backward()
+        self.opt_m.step()
+
+        sbounds = _search_bounds(self.bounds, self.cols, mbh_floor)
+        zlo = np.asarray([lo for lo, hi in sbounds], dtype=np.float32)
+        zhi = np.asarray([hi for lo, hi in sbounds], dtype=np.float32)
+        zspan = np.maximum(zhi - zlo, 1.0e-12)
+
+        if isinstance(self.scaler, IdentityScaler):
+            mean = np.zeros(self.dim, dtype=np.float32)
+            scale = np.ones(self.dim, dtype=np.float32)
+        else:
+            mean = np.asarray(self.scaler.mean_, dtype=np.float32)
+            scale = np.asarray(self.scaler.scale_, dtype=np.float32)
+
+        Zt = torch.tensor(X_search, dtype=torch.float32)
+        mean_t = torch.tensor(mean, dtype=torch.float32)
+        scale_t = torch.tensor(scale, dtype=torch.float32)
+        zlo_t = torch.tensor(zlo, dtype=torch.float32)
+        zhi_t = torch.tensor(zhi, dtype=torch.float32)
+        zspan_t = torch.tensor(zspan, dtype=torch.float32)
+
+        action = self.agent(Xt)
+        candidate_search = Zt + 0.2 * zspan_t * action
+        candidate_search = torch.maximum(torch.minimum(candidate_search, zhi_t), zlo_t)
+        candidate_scaled = (candidate_search - mean_t) / scale_t
+
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+
+        predicted_reward = self.model(candidate_scaled)
+        agent_loss = -predicted_reward.mean() + 1.0e-4 * action.pow(2).mean()
+        self.opt_a.zero_grad()
+        agent_loss.backward()
+        self.opt_a.step()
+
+        for p in self.model.parameters():
+            p.requires_grad_(True)
 
 def run_daemon(config, physics_engine):
     from collections import defaultdict
@@ -556,10 +675,8 @@ def run_daemon(config, physics_engine):
 
     def opt(*names, default=None):
         for name in names:
-            if name in obs_cfg and obs_cfg[name] is not None:
-                return obs_cfg[name]
-            if name in engine_cfg and engine_cfg[name] is not None:
-                return engine_cfg[name]
+            if name in obs_cfg and obs_cfg[name] is not None: return obs_cfg[name]
+            if name in engine_cfg and engine_cfg[name] is not None: return engine_cfg[name]
             if name in config and config[name] is not None:
                 return config[name]
         for name in names:
@@ -689,29 +806,24 @@ def run_daemon(config, physics_engine):
     while runs < config["MAX_RUNS"]:
         print(f"[Daemon] loop iter runs={runs}", flush=True); t0 = time.perf_counter()
         deck._flush_buf()
-        base_props = (
-            [(list(fixed_theta), runs + 1)]
-            if fixed_theta is not None
-            else runner.propose(deck)
-        )
+        base_props = ([(list(fixed_theta), runs + 1)] if fixed_theta is not None else runner.propose(deck))
         print("base_props[:3] =", base_props[:3])
         props = []
+        
         for theta, pid in base_props:
             halo_param, halo_scale, MBH, ML = theta
             variant_map = {
-                "full":       ([halo_param,       halo_scale, MBH,       ML], base_halo_type),
-                # isolate major gravitating components
-                "bh_only":    ([0.0,              halo_scale, MBH,       ML], "none"),  # stars + BH, no halo
-                "halo_only":  ([halo_param,       halo_scale, 0.0,       ML], base_halo_type),
-                # BH perturbations
-                "bh_up":      ([halo_param,       halo_scale, MBH * 2.0, ML], base_halo_type),
-                "bh_down":    ([halo_param,       halo_scale, MBH * 0.5, ML], base_halo_type),
-                # halo perturbations
-                "halo_up":    ([halo_param * 2.0, halo_scale, MBH,       ML], base_halo_type),
-                "halo_down":  ([halo_param * 0.5, halo_scale, MBH,       ML], base_halo_type),
-                # stellar M/L perturbations
-                "ml_up":      ([halo_param,       halo_scale, MBH,       ML * 2.0], base_halo_type),
-                "ml_down":    ([halo_param,       halo_scale, MBH,       ML * 0.5], base_halo_type),
+                "full": ([halo_param, halo_scale, MBH, ML], base_halo_type),
+                "bh_only": ([0.0, halo_scale, MBH, ML], "none"),
+                "halo_only": ([halo_param, halo_scale, 0.0, ML], base_halo_type),
+                "bh_up": ([halo_param, halo_scale, MBH * 2.0, ML], base_halo_type),
+                "bh_down": ([halo_param, halo_scale, MBH * 0.5, ML], base_halo_type),
+                "halo_up": ([halo_param * 2.0, halo_scale, MBH, ML], base_halo_type),
+                "halo_down": ([halo_param * 0.5, halo_scale, MBH, ML], base_halo_type),
+                "halo_scale_up": ([halo_param, halo_scale * 2.0, MBH, ML], base_halo_type),
+                "halo_scale_down": ([halo_param, halo_scale * 0.5, MBH, ML], base_halo_type),
+                "ml_up": ([halo_param, halo_scale, MBH, ML * 2.0], base_halo_type),
+                "ml_down": ([halo_param, halo_scale, MBH, ML * 0.5], base_halo_type),
             }
             variants = [ (label, *variant_map[label]) for label in _selected_variants(config, variant_map)]
             # keep each perturbed theta inside bounds

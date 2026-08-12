@@ -13,7 +13,7 @@ include("OSPM_Physics_PhaseVolume.jl")
 # ========================================================================================================================
 const DEFAULT_ORBIT_FILL_PCT = 0.85
 const DEFAULT_ORBIT_REGIONAL_FLOOR = 0.80
-const DEFAULT_ORBIT_MAX_REGIONAL_GAP = 0.10 
+const DEFAULT_ORBIT_MAX_REGIONAL_GAP = 0.25 
 const DEFAULT_ORBIT_SHELL_BANDS = 8
 const DEFAULT_ORBIT_COVERAGE_CHECK_EVERY = 50
 const DEFAULT_ORBIT_WARN_FILL_PCT = 0.95
