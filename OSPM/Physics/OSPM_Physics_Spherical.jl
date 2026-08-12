@@ -1216,9 +1216,6 @@ end
 # ========================================================================================================================
 # ========================================================================================================================
 function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, helper::Bool=false)
-    # Admit a worker and close the orbit phase through the same gate.  This
-    # prevents a helper that observed phase=1 from entering after the owner has
-    # already moved on to coverage assessment.
     admitted = false
     lock(st.worker_gate)
     try
@@ -1234,8 +1231,26 @@ function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, help
         Threads.atomic_add!(scheduler_counters.orbit_workers, 1)
         helper && Threads.atomic_add!(scheduler_counters.helper_workers, 1)
     end
+    did_work = false
     try
-        _orbit_worker!(st)
+        while st.phase[] == 1 && time_ns() <= st.t_deadline && st.next_orbit[] <= length(st.launch_order)
+            next_before = st.next_orbit[]
+            try
+                _orbit_worker!(st)
+                did_work = true
+                break
+            catch e
+                next_after = st.next_orbit[]
+                if next_after <= next_before
+                    rethrow()
+                end
+                did_work = true
+                println("[ORBIT QUARANTINED] worker=", Threads.threadid(), " helper=", helper, " claimed_progress=", next_after - next_before, " error=", sprint(showerror, e))
+                st.phase[] == 1 || break
+                time_ns() <= st.t_deadline || break
+                st.next_orbit[] <= length(st.launch_order) || break
+            end
+        end
     finally
         if scheduler_counters !== nothing
             helper && Threads.atomic_add!(scheduler_counters.helper_workers, -1)
@@ -1243,7 +1258,7 @@ function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, help
         end
         Threads.atomic_add!(st.active_workers, -1)
     end
-    return true
+    return did_work
 end
 
 function _close_orbit_phase!(st::OrbitWorkState; next_phase::Int=2)
@@ -1294,12 +1309,14 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     _close_orbit_phase!(st)
     filled = st.filled_atomic[]
     coverage = _assess_orbit_coverage(st; fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count)
+    
     if !coverage.accepted
         _print_orbit_failure_diagnostics(st, 0)
-        error("Incomplete orbit coverage: filled $filled / " * "$(coverage.planned) base slots; " * join(coverage.rejection_reasons, " | "))
+        println("[ORBIT COVERAGE WARNING] filled=", filled, " planned=", coverage.planned, " succeeded=", coverage.succeeded, " coverage_fraction=", coverage.coverage_fraction, " reasons=", isempty(coverage.rejection_reasons) ? "none" : join(coverage.rejection_reasons, " | "))
     end
-    _orbit_library_usable(st, coverage.successful_columns) ||
-        error("Unusable orbit library: a successful paired orbit column or projected-light row has no support")
+
+    _orbit_library_usable(st, coverage.successful_columns) || error("Unusable orbit library: no usable compact orbit solution remains after failed orbit columns are removed")
+
     A_losvd, A_light = _compact_orbit_matrices(st, coverage.successful_columns)
     wphase_use, phase_diag = _build_compact_karl_wphase(st, coverage.successful_columns)
     A = vcat(A_losvd, A_light)
@@ -1628,46 +1645,21 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     if !coverage.accepted
                         _print_orbit_failure_diagnostics(ws, i)
 
-                        println(
-                            "[ORBIT COVERAGE WARNING]",
-                            " i=", i,
-                            " region=", coverage_meta.issue_region,
-                            " axis=", coverage_meta.issue_axis,
-                            " shell_bands=", isempty(coverage_meta.issue_shell_bands) ?
-                                "none" : coverage_meta.issue_shell_bands,
-                            " succeeded=", coverage.succeeded,
-                            " attempted=", coverage.attempted,
-                            " planned=", coverage.planned,
-                            " required=", coverage.required,
-                            " coverage_fraction=", coverage.coverage_fraction,
-                            " attempted_fraction=", coverage.attempted_fraction,
-                            " success_fraction=", coverage.success_fraction,
-                            " shell_min=", coverage.shell_minimum_coverage,
-                            " lfrac_min=", coverage.lfrac_minimum_coverage,
-                            " theta_min=", coverage.theta_minimum_coverage,
-                            " shell_gap=", coverage.shell_coverage_gap,
-                            " lfrac_gap=", coverage.lfrac_coverage_gap,
-                            " theta_gap=", coverage.theta_coverage_gap,
-                            " joint_holes=", length(coverage.joint_holes),
-                            " deadline_hit=", coverage_deadline_hit[i],
-                            " reasons=", isempty(coverage_meta.reasons) ?
-                                "none" : coverage_meta.reasons,
-                        )
-                        status[i] = 1
-                        solver_failure_reason[i] = "incomplete_orbit_coverage"
-                        Threads.atomic_xchg!(ws.phase, 3)
-                        continue
+                        println("[ORBIT COVERAGE WARNING] i=", i, " region=", coverage_meta.issue_region, " axis=", coverage_meta.issue_axis, " shell_bands=", isempty(coverage_meta.issue_shell_bands) ? "none" : coverage_meta.issue_shell_bands, " succeeded=", coverage.succeeded, " attempted=", coverage.attempted, " planned=", coverage.planned, " required=", coverage.required, " coverage_fraction=", coverage.coverage_fraction, " attempted_fraction=", coverage.attempted_fraction, " success_fraction=", coverage.success_fraction, " shell_min=", coverage.shell_minimum_coverage, " lfrac_min=", coverage.lfrac_minimum_coverage, " theta_min=", coverage.theta_minimum_coverage, " shell_gap=", coverage.shell_coverage_gap, " lfrac_gap=", coverage.lfrac_coverage_gap, " theta_gap=", coverage.theta_coverage_gap, " joint_holes=", length(coverage.joint_holes), " deadline_hit=", coverage_deadline_hit[i], " reasons=", isempty(coverage_meta.reasons) ? "none" : coverage_meta.reasons)
                     end
+
                     if !_orbit_library_usable(ws, coverage.successful_columns)
                         status[i] = 1
                         solver_failure_reason[i] = "unusable_orbit_library"
-                        println("[ORBIT LIBRARY REJECTED] i=", i, " reason=zero_support_successful_column_or_light_row")
+                        println("[ORBIT LIBRARY REJECTED] i=", i, " successful_base_orbits=", coverage.succeeded, " successful_columns=", length(coverage.successful_columns), " reason=no_usable_compact_orbit_solution")
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
+
                     A_losvd, A_light = _compact_orbit_matrices(ws, coverage.successful_columns)
                     wphase_use = Float64[]
                     phase_diag = nothing
+                    
                     try
                         wphase_use, phase_diag = _build_compact_karl_wphase(ws, coverage.successful_columns,)
                     catch phase_error

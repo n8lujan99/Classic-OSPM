@@ -108,7 +108,7 @@ CONFIG = {
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT/"Segue1_Simon_stars_v2.csv"),
-    "CSV_PATH": str(PROFILE_ROOT/"default"/"segue1-paper-bounds-expanded-mbh-phasevolume-try3.csv"),
+    "CSV_PATH": str(PROFILE_ROOT/"default"/"segue1-paper-bounds-expanded-mbh-phasevolume-try4.csv"),
 }
 
 # Just some notes on the Segue 1 runs and analysis.

@@ -907,18 +907,19 @@ function launch_orbit_apocenter(; rapo::Float64, theta0::Float64, Lz_frac::Float
     return ((r0, theta0, dt, vr0, 0.0), Lz, E, vc, :ok)
 end
 
-function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_rmin_factor=DEFAULT_STOP_RMIN_FACTOR, return_diag::Bool=false, pot=nothing,
-    energy_check_every::Int=100, dt_scale::Float64=1.0, max_relative_energy_drift_allowed::Float64=Inf, energy_drift_boundary_allowance::Float64=5.0e-4,
-    local_step_safety::Float64=0.10, max_substeps_per_step::Int=256, continuation_state=nothing, reference_energy=nothing)
-
+function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_rmin_factor=DEFAULT_STOP_RMIN_FACTOR, return_diag::Bool=false, pot=nothing, energy_check_every::Int=100, dt_scale::Float64=1.0, max_relative_energy_drift_allowed::Float64=Inf, energy_drift_boundary_allowance::Float64=5.0e-4, local_step_safety::Float64=0.10, max_substeps_per_step::Int=256, continuation_state=nothing, reference_energy=nothing)
     isfinite(dt_scale) && dt_scale > 0.0 || error("dt_scale must be finite and positive")
     !isnan(max_relative_energy_drift_allowed) && max_relative_energy_drift_allowed > 0.0 || error("max_relative_energy_drift_allowed must be positive or Inf")
     isfinite(energy_drift_boundary_allowance) && energy_drift_boundary_allowance >= 0.0 || error("energy_drift_boundary_allowance must be finite and nonnegative")
     isfinite(local_step_safety) && local_step_safety > 0.0 || error("local_step_safety must be finite and positive")
     max_substeps_per_step > 0 || error("max_substeps_per_step must be positive")
+
     ns = Int(nsteps)
     ns > 0 || error("nsteps must be positive")
     length(orbit_ctx.R_pos) >= 2 || error("orbit force-radius grid must contain at least two points")
+
+    return_diag && pot === nothing && error("integrate_orbit_rk4 requires pot when return_diag=true")
+    return_diag && energy_check_every <= 0 && error("energy_check_every must be positive")
 
     energy_drift_limit = max_relative_energy_drift_allowed + energy_drift_boundary_allowance
 
@@ -938,8 +939,6 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
     vr0 = length(ic) >= 4 ? f64(ic[4]) : 0.0
     vtheta0 = length(ic) >= 5 ? f64(ic[5]) : 0.0
 
-    isfinite(dt) && dt != 0.0 || error("orbit timestep must be finite and nonzero")
-
     state = if continuation_state === nothing
         st0, ct0 = sincos(theta0)
         R0 = r0 * st0
@@ -956,12 +955,15 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
     vr = Vector{Float64}(undef, ns)
     theta = Vector{Float64}(undef, ns)
     vtheta = Vector{Float64}(undef, ns)
+
     actual = 0
     termination_reason = :completed
+
     initial_energy = NaN
     final_energy = NaN
     max_absolute_energy_drift = NaN
     max_relative_energy_drift = NaN
+
     total_substeps = 0
     max_substeps_used = 0
     minimum_substep = Inf
@@ -972,48 +974,62 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         all(isfinite, s) || return :nonfinite_state
         Rcyl, z = s[1], s[2]
         Rcyl < 0.0 && return :crossed_cylindrical_axis
+
         rr = hypot(Rcyl, z)
         isfinite(rr) || return :nonfinite_radius
         rr < rmin_stop && return :hit_rmin
         rr > rmax_stop && return :hit_rmax
+
         if xLz != 0.0 && Rcyl <= 0.0
             return :hit_cylindrical_axis
         end
+
         return :ok
     end
 
     function spherical_state(s)
         Rcyl, z, vR, vz = s
         rr = hypot(Rcyl, z)
+
         isfinite(rr) && rr > 0.0 || return (NaN, NaN, NaN, NaN)
+
         st = Rcyl / rr
         ct = z / rr
         tr = atan(Rcyl, z)
         vrr = vR * st + vz * ct
         vtt = vR * ct - vz * st
+
         return rr, tr, vrr, vtt
     end
 
     function orbit_energy(s)
         Rcyl, z, vR, vz = s
+
         all(isfinite, s) || return NaN
         Rcyl >= 0.0 || return NaN
+
         rr = hypot(Rcyl, z)
         rmin_stop <= rr <= rmax_stop || return NaN
+
         tr = atan(Rcyl, z)
         potential = f64(pot(rr, tr))
         isfinite(potential) || return NaN
+
         if xLz != 0.0 && Rcyl <= 0.0
             return NaN
         end
+
         vphi = xLz == 0.0 ? 0.0 : f64(xLz) / Rcyl
+
         return potential + 0.5 * (vR^2 + vz^2 + vphi^2)
     end
 
     function local_step_limit(s, k1)
         Rcyl, z, vR, vz = s
         rr = hypot(Rcyl, z)
+
         isfinite(rr) && rr > 0.0 || return NaN
+
         accel = hypot(k1[3], k1[4])
         omega_dyn = isfinite(accel) && accel > 0.0 ? sqrt(accel / max(rr, rmin_stop)) : 0.0
         omega_rad = hypot(vR, vz) / max(rr, rmin_stop)
@@ -1061,96 +1077,133 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         return next_state, :ok
     end
 
-    initial_state_reason = state_exit_reason(state)
-    initial_state_reason !== :ok && (termination_reason = initial_state_reason)
+    if !(isfinite(dt) && dt != 0.0)
+        termination_reason = :invalid_initial_timestep
+    end
 
-    if return_diag
-        pot === nothing && error("integrate_orbit_rk4 requires pot when return_diag=true")
-        energy_check_every > 0 || error("energy_check_every must be positive")
+    if termination_reason === :completed
+        initial_state_reason = state_exit_reason(state)
+        initial_state_reason !== :ok && (termination_reason = initial_state_reason)
+    end
+
+    if return_diag && termination_reason === :completed
         current_start_energy = orbit_energy(state)
-        isfinite(current_start_energy) || error("initial orbit energy is nonfinite")
-        initial_energy = reference_energy === nothing ? current_start_energy : f64(reference_energy)
-        isfinite(initial_energy) || error("reference_energy must be finite")
-        final_energy = current_start_energy
-        max_absolute_energy_drift = abs(current_start_energy - initial_energy)
-        max_relative_energy_drift = max_absolute_energy_drift / max(abs(initial_energy), 1.0)
-        if max_relative_energy_drift > energy_drift_limit
-            termination_reason = :energy_drift_exceeded
+
+        if !isfinite(current_start_energy)
+            termination_reason = :nonfinite_initial_energy
+        else
+            initial_energy = reference_energy === nothing ? current_start_energy : f64(reference_energy)
+
+            if !isfinite(initial_energy)
+                termination_reason = :nonfinite_reference_energy
+            else
+                final_energy = current_start_energy
+                max_absolute_energy_drift = abs(current_start_energy - initial_energy)
+                max_relative_energy_drift = max_absolute_energy_drift / max(abs(initial_energy), 1.0)
+
+                if max_relative_energy_drift > energy_drift_limit
+                    termination_reason = :energy_drift_exceeded
+                end
+            end
         end
     end
 
     if termination_reason === :completed
         @inbounds for step in 1:ns
             current_reason = state_exit_reason(state)
+
             if current_reason !== :ok
                 termination_reason = current_reason
                 break
             end
+
             rr, tr, vrr, vtt = spherical_state(state)
+
             if !(isfinite(rr) && isfinite(tr) && isfinite(vrr) && isfinite(vtt))
                 termination_reason = :nonfinite_spherical_conversion
                 break
             end
+
             actual += 1
             r[actual] = rr
             theta[actual] = tr
             vr[actual] = vrr
             vtheta[actual] = vtt
+
             if return_diag && (step == 1 || step % energy_check_every == 0)
                 current_energy = orbit_energy(state)
+
                 if !isfinite(current_energy)
                     termination_reason = :nonfinite_energy
                     break
                 end
+
                 absolute_drift = abs(current_energy - initial_energy)
                 relative_drift = absolute_drift / max(abs(initial_energy), 1.0)
+
                 final_energy = current_energy
                 max_absolute_energy_drift = max(max_absolute_energy_drift, absolute_drift)
                 max_relative_energy_drift = max(max_relative_energy_drift, relative_drift)
+
                 if relative_drift > energy_drift_limit
                     termination_reason = :energy_drift_exceeded
                     break
                 end
             end
+
             remaining = abs(dt)
             dt_sign = sign(dt)
             substeps_this_step = 0
+
             while remaining > 0.0
                 substeps_this_step += 1
+
                 if substeps_this_step > max_substeps_per_step
                     termination_reason = :adaptive_substep_limit
                     break
                 end
+
                 k1 = derivs(state, xLz, orbit_ctx.frc, orbit_ctx.R_pos)
+
                 if !all(isfinite, k1)
                     termination_reason = :invalid_k1
                     break
                 end
+
                 h_limit = local_step_limit(state, k1)
+
                 if !(isfinite(h_limit) && h_limit > 0.0)
                     termination_reason = :invalid_local_timestep
                     break
                 end
+
                 h_abs = min(remaining, h_limit)
+
                 if !(isfinite(h_abs) && h_abs > 0.0)
                     termination_reason = :adaptive_timestep_underflow
                     break
                 end
+
                 h = dt_sign * h_abs
                 next_state, substep_reason = rk4_substep(state, h, k1)
+
                 if substep_reason === :crossed_cylindrical_axis || substep_reason === :hit_cylindrical_axis
                     h_abs *= 0.5
+
                     if h_abs <= abs(dt) / max_substeps_per_step
                         termination_reason = :adaptive_axis_resolution_failed
                         break
                     end
+
                     h = dt_sign * h_abs
                     next_state, substep_reason = rk4_substep(state, h, k1)
                 end
+
                 if substep_reason !== :ok
                     termination_reason = substep_reason
                     break
                 end
+
                 state = next_state
                 remaining = max(0.0, remaining - h_abs)
                 completed_duration += h_abs
@@ -1158,31 +1211,39 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
                 minimum_substep = min(minimum_substep, h_abs)
                 maximum_substep = max(maximum_substep, h_abs)
             end
+
             max_substeps_used = max(max_substeps_used, substeps_this_step)
+
             termination_reason !== :completed && break
         end
     end
+
     resize!(r, actual)
     resize!(vr, actual)
     resize!(theta, actual)
     resize!(vtheta, actual)
+
     if termination_reason === :completed
         final_state_reason = state_exit_reason(state)
         final_state_reason !== :ok && (termination_reason = final_state_reason)
     end
+
     if return_diag
-        if state_exit_reason(state) === :ok
+        if termination_reason === :completed && state_exit_reason(state) === :ok
             checked_final_energy = orbit_energy(state)
+
             if isfinite(checked_final_energy)
                 absolute_drift = abs(checked_final_energy - initial_energy)
                 relative_drift = absolute_drift / max(abs(initial_energy), 1.0)
+
                 final_energy = checked_final_energy
                 max_absolute_energy_drift = max(max_absolute_energy_drift, absolute_drift)
                 max_relative_energy_drift = max(max_relative_energy_drift, relative_drift)
-                if termination_reason === :completed && relative_drift > energy_drift_limit
+
+                if relative_drift > energy_drift_limit
                     termination_reason = :energy_drift_exceeded
                 end
-            elseif termination_reason === :completed
+            else
                 termination_reason = :nonfinite_final_energy
             end
         end
@@ -1193,14 +1254,45 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         final_vz = all(isfinite, state) ? f64(state[4]) : NaN
         final_r = isfinite(final_R) && isfinite(final_z) ? hypot(final_R, final_z) : NaN
         final_theta = isfinite(final_r) && final_r > 0.0 && isfinite(final_R) && final_R >= 0.0 ? atan(final_R, final_z) : NaN
+
         energy_valid = isfinite(max_relative_energy_drift) && max_relative_energy_drift <= energy_drift_limit
-        diag = (termination_reason=termination_reason, requested_steps=ns, completed_steps=actual, base_dt=base_dt, dt=dt, dt_scale=dt_scale, requested_duration=ns * abs(dt),
-            completed_duration=completed_duration, force_rmin=force_rmin, force_rmax=force_rmax, rmin_stop=rmin_stop, rmax_stop=rmax_stop, minimum_r=isempty(r) ? NaN : minimum(r),
-            maximum_r=isempty(r) ? NaN : maximum(r), final_r=final_r, final_theta=final_theta, final_R=final_R, final_z=final_z, final_vR=final_vR, final_vz=final_vz,
-            initial_energy=initial_energy, final_energy=final_energy, max_absolute_energy_drift=max_absolute_energy_drift, max_relative_energy_drift=max_relative_energy_drift,
-            max_relative_energy_drift_allowed=max_relative_energy_drift_allowed, energy_drift_boundary_allowance=energy_drift_boundary_allowance, energy_drift_limit=energy_drift_limit,
-            energy_valid=energy_valid, energy_check_every=energy_check_every, local_step_safety=local_step_safety, total_substeps=total_substeps,
-            max_substeps_used=max_substeps_used, minimum_substep=isfinite(minimum_substep) ? minimum_substep : NaN, maximum_substep=maximum_substep)
+
+        diag = (
+            termination_reason=termination_reason,
+            requested_steps=ns,
+            completed_steps=actual,
+            base_dt=base_dt,
+            dt=dt,
+            dt_scale=dt_scale,
+            requested_duration=isfinite(dt) ? ns * abs(dt) : NaN,
+            completed_duration=completed_duration,
+            force_rmin=force_rmin,
+            force_rmax=force_rmax,
+            rmin_stop=rmin_stop,
+            rmax_stop=rmax_stop,
+            minimum_r=isempty(r) ? NaN : minimum(r),
+            maximum_r=isempty(r) ? NaN : maximum(r),
+            final_r=final_r,
+            final_theta=final_theta,
+            final_R=final_R,
+            final_z=final_z,
+            final_vR=final_vR,
+            final_vz=final_vz,
+            initial_energy=initial_energy,
+            final_energy=final_energy,
+            max_absolute_energy_drift=max_absolute_energy_drift,
+            max_relative_energy_drift=max_relative_energy_drift,
+            max_relative_energy_drift_allowed=max_relative_energy_drift_allowed,
+            energy_drift_boundary_allowance=energy_drift_boundary_allowance,
+            energy_drift_limit=energy_drift_limit,
+            energy_valid=energy_valid,
+            energy_check_every=energy_check_every,
+            local_step_safety=local_step_safety,
+            total_substeps=total_substeps,
+            max_substeps_used=max_substeps_used,
+            minimum_substep=isfinite(minimum_substep) ? minimum_substep : NaN,
+            maximum_substep=maximum_substep,
+        )
 
         return r, vr, theta, vtheta, diag
     end

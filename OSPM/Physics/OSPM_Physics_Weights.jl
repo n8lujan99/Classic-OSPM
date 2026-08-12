@@ -89,51 +89,6 @@ function karl_wphase_diagnostics(wphase::Vector{Float64}; paired::Bool=true)
     )
 end
 
-@inline function _safe_positive(x::Float64; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
-    return (isfinite(x) && x > floor) ? x : floor
-end
-
-function losvd_width_at_fraction(v::Vector{Float64}, f::Vector{Float64}, frac::Float64)
-    length(v) == length(f) || error("velocity and LOSVD arrays must match")
-    length(v) >= 2 || return NaN
-    fmax = maximum(f)
-    !(isfinite(fmax) && fmax > 0.0) && return NaN
-    level = frac * fmax
-    inds = findall(x -> isfinite(x) && x >= level, f)
-    isempty(inds) && return NaN
-    return maximum(v[inds]) - minimum(v[inds])
-end
-
-function karl_update_xmu_from_fwhm(xmu::Float64, model_losvd_by_bin::Vector{Vector{Float64}}, data_losvd_by_bin::Vector{Vector{Float64}}, velocity_centers_by_bin::Vector{Vector{Float64}}; apfacmu::Float64=1.0, fractions::NTuple{2,Float64}=(0.25, 0.50))
-    length(model_losvd_by_bin) == length(data_losvd_by_bin) == length(velocity_centers_by_bin) ||
-        error("LOSVD bin collections must have matching lengths")
-
-    sxmu = 0.0
-    nuse = 0
-    for ib in eachindex(model_losvd_by_bin)
-        model = model_losvd_by_bin[ib]
-        data = data_losvd_by_bin[ib]
-        vel = velocity_centers_by_bin[ib]
-        for frac in fractions
-            fwm = losvd_width_at_fraction(vel, model, frac)
-            fwd = losvd_width_at_fraction(vel, data, frac)
-            if isfinite(fwm) && isfinite(fwd) && fwd > 0.0
-                sxmu += fwm / fwd
-                nuse += 1
-            end
-        end
-    end
-    nuse > 0 || return xmu, NaN, NaN
-    sxmu /= nuse
-    pml_xmu = xmu + xmu * (sxmu - 1.0)
-    xmu_new = xmu + apfacmu * xmu * (sxmu - 1.0)
-    return xmu_new, sxmu, pml_xmu
-end
-
-@inline function karl_ml_from_xmu(xmu::Float64)
-    return xmu > 0.0 ? 1.0 / (xmu * xmu) : Inf
-end
-
 function karl_initial_weights_from_wphase(wphase::Vector{Float64}; paired::Bool=true, rotfrac::Float64=0.75, floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     n = length(wphase)
     n > 0 || return Float64[]
@@ -186,6 +141,49 @@ function karl_initial_weights_from_wphase(wphase::Vector{Float64}; paired::Bool=
     minimum(w) >= floor ||
         error("Karl initial orbit weights fell below the entropy floor")
     return w
+end
+
+# ========================================================================================================================
+
+function losvd_width_at_fraction(v::Vector{Float64}, f::Vector{Float64}, frac::Float64)
+    length(v) == length(f) || error("velocity and LOSVD arrays must match")
+    length(v) >= 2 || return NaN
+    fmax = maximum(f)
+    !(isfinite(fmax) && fmax > 0.0) && return NaN
+    level = frac * fmax
+    inds = findall(x -> isfinite(x) && x >= level, f)
+    isempty(inds) && return NaN
+    return maximum(v[inds]) - minimum(v[inds])
+end
+
+function karl_update_xmu_from_fwhm(xmu::Float64, model_losvd_by_bin::Vector{Vector{Float64}}, data_losvd_by_bin::Vector{Vector{Float64}}, velocity_centers_by_bin::Vector{Vector{Float64}}; apfacmu::Float64=1.0, fractions::NTuple{2,Float64}=(0.25, 0.50))
+    length(model_losvd_by_bin) == length(data_losvd_by_bin) == length(velocity_centers_by_bin) ||
+        error("LOSVD bin collections must have matching lengths")
+
+    sxmu = 0.0
+    nuse = 0
+    for ib in eachindex(model_losvd_by_bin)
+        model = model_losvd_by_bin[ib]
+        data = data_losvd_by_bin[ib]
+        vel = velocity_centers_by_bin[ib]
+        for frac in fractions
+            fwm = losvd_width_at_fraction(vel, model, frac)
+            fwd = losvd_width_at_fraction(vel, data, frac)
+            if isfinite(fwm) && isfinite(fwd) && fwd > 0.0
+                sxmu += fwm / fwd
+                nuse += 1
+            end
+        end
+    end
+    nuse > 0 || return xmu, NaN, NaN
+    sxmu /= nuse
+    pml_xmu = xmu + xmu * (sxmu - 1.0)
+    xmu_new = xmu + apfacmu * xmu * (sxmu - 1.0)
+    return xmu_new, sxmu, pml_xmu
+end
+
+@inline function karl_ml_from_xmu(xmu::Float64)
+    return xmu > 0.0 ? 1.0 / (xmu * xmu) : Inf
 end
 
 function karl_losvd_fracnew_state(A_losvd::Matrix{Float64}, w::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, Nspatial::Int, Nvbin::Int; invalid_sigma_sentinel::Float64=DEFAULT_KARL_INVALID_SIGMA_SENTINEL)
@@ -250,6 +248,33 @@ end
     end
     return S
 end
+
+function max_light_relative_residual(A_light::Matrix{Float64}, w::Vector{Float64}, light_target::Vector{Float64}; relative_floor::Float64=1e-12)
+    size(A_light, 1) == length(light_target) || error("light_target length must match A_light rows")
+    size(A_light, 2) == length(w) || error("w length must match A_light columns")
+    isempty(light_target) && return Inf
+    light_model = A_light * w
+    denominator_floor = relative_floor * max(1.0, maximum(abs.(light_target)))
+    max_relative_residual = 0.0
+    @inbounds for i in eachindex(light_target)
+        relative_residual = abs(light_model[i] - light_target[i]) / max(abs(light_target[i]), denominator_floor)
+        max_relative_residual = max(max_relative_residual, relative_residual)
+    end
+    return max_relative_residual
+end
+
+##CHI##
+@inline function chi2_block(A::Matrix{Float64}, w::Vector{Float64}, d::Vector{Float64}, sigma::Vector{Float64})
+    p = A * w
+    s = 0.0
+    @inbounds for i in eachindex(d)
+        si = max(sigma[i], 1e-12)
+        rr = (p[i] - d[i]) / si
+        s += rr * rr
+    end
+    return s
+end
+
 
 # ========================================================================================================================
 # §3c  SHARED SPEAR LINEAR-ALGEBRA PRIMITIVES
@@ -357,6 +382,17 @@ function build_expanded_weights_initial(w_orbit::Vector{Float64}, A_losvd::Matri
     return vcat(w_orbit, slack)
 end
 
+
+
+
+
+
+
+
+# ========================================================================================================================
+
+# ========================================================================================================================
+
 # ========================================================================================================================
 # CHI
 # ========================================================================================================================
@@ -446,15 +482,12 @@ function _project_expanded_weights!(w_all::Vector{Float64}, Norbit::Int; floor::
     return true
 end
 
-
-# ========================================================================================================================
-# Working AREA 
-# ====================================================================================================================================================================================
-function karl_safe_step_factor(w::AbstractVector{Float64}, dw::AbstractVector{Float64}; requested_step::Float64=DEFAULT_KARL_APFAC, floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, safety::Float64=DEFAULT_KARL_STEP_SAFETY)
+function karl_safe_step_factor(w::AbstractVector{Float64}, dw::AbstractVector{Float64}; requested_step::Float64=DEFAULT_KARL_APFAC, floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, safety::Float64=DEFAULT_KARL_STEP_SAFETY, active_bound=nothing)
     length(w) == length(dw) || error("w and dw lengths must match")
     isfinite(requested_step) && requested_step > 0.0 || error("requested_step must be finite and positive")
     isfinite(safety) && 0.0 < safety < 1.0 || error("safety must lie strictly between 0 and 1")
     isfinite(floor) && floor > 0.0 || error("floor must be finite and positive")
+    active_bound !== nothing && length(active_bound) != length(w) && error("active_bound length must match w")
 
     boundary = Inf
     limiting_idx = 0
@@ -462,10 +495,10 @@ function karl_safe_step_factor(w::AbstractVector{Float64}, dw::AbstractVector{Fl
     @inbounds for j in eachindex(w)
         isfinite(w[j]) && isfinite(dw[j]) || error("nonfinite weight or Newton direction")
         w[j] >= floor || error("orbit weight $j is already below the entropy floor")
+        active_bound !== nothing && active_bound[j] && continue
 
         if dw[j] < 0.0
             candidate = (w[j] - floor) / (-dw[j])
-
             if candidate < boundary
                 boundary = candidate
                 limiting_idx = j
@@ -478,13 +511,71 @@ function karl_safe_step_factor(w::AbstractVector{Float64}, dw::AbstractVector{Fl
     end
 
     stepfac = isfinite(boundary) ? min(requested_step, safety * boundary) : requested_step
-    isfinite(stepfac) && stepfac > 0.0 || error("Karl safe step factor is non-positive or nonfinite")
-
     return stepfac, limiting_idx, boundary
 end
 
-function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, light_sigma::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}; Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, wphase=nothing, maxiter::Int=DEFAULT_KARL_MAXITER, seed::UInt=UInt(0), entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, apfac::Float64=DEFAULT_KARL_APFAC, return_diag::Bool=false, rcond_every::Int=250)
-    Nlight, Norbit = size(A_light)
+function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, step_safety::Float64=DEFAULT_KARL_STEP_SAFETY, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, active_bound=nothing, max_active_passes::Int=64, bound_kkt_tol::Float64=1.0e-10)
+    Narr, nvar = size(Cm)
+    length(w_all) == nvar || error("w_all length must match Cm columns")
+    0 < Norbit <= nvar || error("Norbit must be between 1 and length(w_all)")
+    length(target) == Narr || error("target length must match Cm rows")
+    length(dS) == nvar || error("dS length must match Cm columns")
+    length(ddS) == nvar || error("ddS length must match Cm columns")
+
+    active = active_bound === nothing ? falses(Norbit) : BitVector(active_bound)
+    length(active) == Norbit || error("active_bound length must match Norbit")
+
+    model = Cm * w_all
+    base_delY = target .- model
+    aset = karl_spear_active_set_update(w_all, Norbit, Cm, target, dS, ddS, active; apfac=apfac, entropy_floor=entropy_floor, compute_rcond=compute_rcond, rcond_warn=rcond_warn, max_active_passes=max_active_passes, bound_kkt_tol=bound_kkt_tol)
+
+    wnew = Vector{Float64}(aset.w)
+    dw = Vector{Float64}(aset.dw)
+    all(isfinite, wnew) || error("Karl active-set SPEAR produced nonfinite weights")
+
+    orbit_before = @view w_all[1:Norbit]
+    orbit_after = @view wnew[1:Norbit]
+    orbit_dw = @view dw[1:Norbit]
+
+    min_orbit_weight = minimum(orbit_before)
+    min_updated_orbit_weight, min_updated_orbit_idx = findmin(orbit_after)
+    n_at_floor_before = count(x -> x <= entropy_floor, orbit_before)
+    n_at_floor_after = count(x -> x <= entropy_floor, orbit_after)
+    n_below_floor = count(x -> x < entropy_floor, orbit_after)
+    n_nonpositive_orbits = count(x -> x <= 0.0, orbit_after)
+
+    n_below_floor == 0 || error("Karl active-set step crossed the entropy floor")
+    n_nonpositive_orbits == 0 || error("Karl active-set step produced non-positive orbit weights")
+
+    spear_rhs_l2 = isempty(aset.rhs) ? NaN : norm(aset.rhs)
+    spear_system_residual_l2 = isempty(aset.rhs) ? NaN : norm(aset.Am * aset.lambda - aset.rhs)
+    spear_system_relative_residual = isempty(aset.rhs) ? NaN : spear_system_residual_l2 / max(spear_rhs_l2, eps(Float64))
+    accepted_delta = wnew .- w_all
+    linearized_constraint_error_l2 = norm(Cm * accepted_delta .- base_delY)
+    post_step_constraint_l2 = norm(target .- Cm * wnew)
+    max_abs_dw = isempty(dw) ? 0.0 : maximum(abs, dw)
+
+    limiting_idx = aset.limiting_idx
+    limiting_weight = limiting_idx > 0 ? w_all[limiting_idx] : NaN
+    limiting_dw = limiting_idx > 0 ? dw[limiting_idx] : NaN
+
+    println("[KARL ACTIVE SET STEP] active_passes=", aset.active_passes, " bound=", aset.n_active_bound, " free=", aset.n_free_orbits_final, " activated=", aset.n_activated_total, " released=", aset.released_total, " largest_batch=", aset.max_batch_activated, " stabilized=", aset.active_set_stabilized, " rcond_est=", aset.rcond_est, " near_singular=", aset.near_singular_spear_matrix)
+
+    return merge(aset, (
+        w=wnew, dw=dw, model=model, delY=base_delY,
+        max_abs_dw=max_abs_dw, spear_rhs_l2=spear_rhs_l2, spear_system_residual_l2=spear_system_residual_l2, spear_system_relative_residual=spear_system_relative_residual,
+        requested_step=apfac, stepfac=apfac, step_safety=step_safety, step_limited=false,
+        limiting_weight=limiting_weight, limiting_dw=limiting_dw,
+        min_orbit_weight=min_orbit_weight, min_updated_orbit_weight=min_updated_orbit_weight, min_updated_orbit_idx=min_updated_orbit_idx,
+        n_nonpositive_orbits=n_nonpositive_orbits, n_below_floor=n_below_floor, n_at_floor=n_at_floor_after,
+        n_at_floor_before=n_at_floor_before, n_at_floor_after=n_at_floor_after, n_negative_dw=count(<(0.0), orbit_dw),
+        strict_cycle_visits=0, cycle_break_release_total=0, locked_release_candidates=0, release_trial_count=0, release_locked_count=0,
+        degenerate_rebinds_total=0, release_locks_total=0,
+        linearized_constraint_error_l2=linearized_constraint_error_l2, post_step_constraint_l2=post_step_constraint_l2,
+    ))
+end
+
+function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, light_sigma::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}; Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, wphase=nothing, maxiter::Int=DEFAULT_KARL_MAXITER, seed::UInt=UInt(0), entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, apfac::Float64=DEFAULT_KARL_APFAC, return_diag::Bool=false, rcond_every::Int=250, max_active_passes::Int=64, bound_kkt_tol::Float64=1.0e-10)    Nlight, Norbit = size(A_light)
     Nlosvd, Norbit2 = size(A_losvd)
     fail_w = zeros(Float64, Norbit)
 
@@ -531,45 +622,36 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     for iter in 1:maxiter
         iterations = iter
         compute_rcond = iter == 1 || iter == maxiter || iter % rcond_every == 0
-
         w_all_new, step_ok, sdiag = karl_spear_step_light_losvd_all(w_all, Norbit, Cm, target_base, A_losvd, losvd_target, losvd_sigma, wp; Nlight=Nlight, Nspatial=Nspatial, Nvbin=Nvbin, alphat=alphat, apfac=apfac, entropy_floor=entropy_floor, compute_rcond=compute_rcond, print_consistency=(iter == 1))
         last_diag = sdiag
         iter == 1 && (raw_spear_diag = sdiag.raw_spear_diag)
         isfinite(sdiag.rcond_est) && (last_rcond_est = sdiag.rcond_est)
-
         if !step_ok
             failure_reason = sdiag.failure_reason
             ok = false
             break
         end
-
         w_all .= w_all_new
         w_current = Vector{Float64}(@view w_all[1:Norbit])
         slack_current = Vector{Float64}(@view w_all[(Norbit + 1):end])
         losvd_state = karl_losvd_fracnew_state(A_losvd, w_current, losvd_target, losvd_sigma, Nspatial, Nvbin)
-
         chi2_losvd_current = losvd_state.chi_total
         delta_chi2_iteration = abs(chi2_losvd_current - previous_chi2_losvd)
         max_light_relative_residual_value = max_light_relative_residual(A_light, w_current, light_target)
         max_light_sigma_residual_value = light_sigma_residual(w_current)
         light_constraint_ok = max_light_sigma_residual_value <= light_sigma_tol
-
         slack_residual_l2 = norm(slack_current .- losvd_state.residual)
         slack_scale = max(1.0, norm(slack_current), norm(losvd_state.residual))
         slack_consistent = slack_residual_l2 <= light_rel_tol * slack_scale
         normalized = abs(sum(w_current) - 1.0) <= light_rel_tol
-
         light_model = A_light * w_current
         light_sigma_progress = abs.(light_model .- light_target) ./ light_sigma_use
         worst_light_bin = argmax(light_sigma_progress)
-
         println("[WEIGHT PROGRESS] iteration=", iter, " active_passes=", sdiag.active_passes, " N_active_bound=", sdiag.n_active_bound, " stepfac=", sdiag.stepfac, " fracnew_min=", minimum(losvd_state.fracnew), " fracnew_max=", maximum(losvd_state.fracnew), " chi_losvd=", chi2_losvd_current, " max_light_sigma_residual=", light_sigma_progress[worst_light_bin], " worst_light_bin=", worst_light_bin, " delta_chi2=", delta_chi2_iteration)
-
         if light_constraint_ok && slack_consistent && normalized && delta_chi2_iteration <= delta_chi2_iter_tol
             converged = true
             break
         end
-
         previous_chi2_losvd = chi2_losvd_current
     end
 
@@ -577,7 +659,6 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     slack = Vector{Float64}(@view w_all[(Norbit + 1):end])
     finite_state = all(isfinite, w) && all(isfinite, slack)
     !finite_state && (failure_reason = :nonfinite_final_state; ok = false)
-
     final_losvd = finite_state ? karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, Nspatial, Nvbin) : nothing
     chi2_losvd = final_losvd === nothing ? Inf : final_losvd.chi_total
     slack_residual_l2 = final_losvd === nothing ? Inf : norm(slack .- final_losvd.residual)
@@ -589,11 +670,9 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     max_light_relative_residual_value = finite_state ? max_light_relative_residual(A_light, w, light_target) : Inf
     max_light_sigma_residual_value = finite_state ? light_sigma_residual(w) : Inf
     light_constraint_ok = max_light_sigma_residual_value <= light_sigma_tol
-
     final_target = copy(target_base)
     final_losvd !== nothing && (final_target[(Nlight + 1):(Nlight + Nlosvd)] .= final_losvd.effective_target)
     constraint_l2 = finite_state ? norm(final_target .- Cm * w_all) : Inf
-
     constraint_ok = light_constraint_ok && slack_consistent && normalized
     delta_chi2_ok = isfinite(delta_chi2_iteration) && delta_chi2_iteration <= delta_chi2_iter_tol
     solver_converged = ok && converged && constraint_ok && delta_chi2_ok
@@ -613,31 +692,13 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     if return_diag
         ent = finite_state ? karl_entropy_value(w, wp; entropy_floor=entropy_floor) : -Inf
         losvd_penalty = alphat * chi2_losvd
-
-        diag = (
-            entropy=ent,
-            chi=chi2_losvd,
-            chi_losvd=chi2_losvd,
-            profit=ent - losvd_penalty,
-            alphat=alphat,
-            losvd_penalty=losvd_penalty,
-            chi_slack=losvd_penalty,
-            slack_to_losvd=chi2_losvd > 0.0 ? losvd_penalty / chi2_losvd : NaN,
-            fracnew=final_losvd === nothing ? Float64[] : final_losvd.fracnew,
-            fracnew_min=final_losvd === nothing ? NaN : minimum(final_losvd.fracnew),
-            fracnew_max=final_losvd === nothing ? NaN : maximum(final_losvd.fracnew),
-            delta_chi2_iteration=delta_chi2_iteration,
-            delta_chi2_iteration_ok=delta_chi2_ok,
-            delta_chi2_iteration_tol=delta_chi2_iter_tol,
-            max_light_relative_residual=max_light_relative_residual_value,
-            max_light_sigma_residual=max_light_sigma_residual_value,
-            light_constraint_ok=light_constraint_ok,
-            light_rel_tol=light_rel_tol,
-            light_sigma_tol=light_sigma_tol,
-            solver_converged=solver_converged,
-            failure_reason=failure_reason,
-            rcond_est=last_rcond_est,
-            max_abs_dw=last_diag === nothing ? NaN : last_diag.max_abs_dw,
+        diag = (entropy=ent, chi=chi2_losvd, chi_losvd=chi2_losvd, profit=ent - losvd_penalty, alphat=alphat, losvd_penalty=losvd_penalty, chi_slack=losvd_penalty,
+            slack_to_losvd=chi2_losvd > 0.0 ? losvd_penalty / chi2_losvd : NaN, fracnew=final_losvd === nothing ? Float64[] : final_losvd.fracnew,
+            fracnew_min=final_losvd === nothing ? NaN : minimum(final_losvd.fracnew), fracnew_max=final_losvd === nothing ? NaN : maximum(final_losvd.fracnew),
+            delta_chi2_iteration=delta_chi2_iteration, delta_chi2_iteration_ok=delta_chi2_ok, delta_chi2_iteration_tol=delta_chi2_iter_tol,
+            max_light_relative_residual=max_light_relative_residual_value, max_light_sigma_residual=max_light_sigma_residual_value,
+            light_constraint_ok=light_constraint_ok, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol,
+            solver_converged=solver_converged, failure_reason=failure_reason, rcond_est=last_rcond_est, max_abs_dw=last_diag === nothing ? NaN : last_diag.max_abs_dw,
             stepfac=last_diag === nothing ? NaN : last_diag.stepfac,
             iterations=iterations,
             constraint_ok=constraint_ok,
@@ -680,185 +741,280 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     return w, solver_converged
 end
 
-
-function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64};
-    apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, step_safety::Float64=DEFAULT_KARL_STEP_SAFETY, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN)
+function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}, active_bound::AbstractVector{Bool}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, max_active_passes::Int=64, bound_kkt_tol::Float64=1.0e-10)
     Narr, nvar = size(Cm)
     length(w_all) == nvar || error("w_all length must match Cm columns")
-    0 < Norbit <= nvar || error("Norbit must be between 1 and length(w_all)")
     length(target) == Narr || error("target length must match Cm rows")
     length(dS) == nvar || error("dS length must match Cm columns")
     length(ddS) == nvar || error("ddS length must match Cm columns")
+    length(active_bound) == Norbit || error("active_bound length must match Norbit")
+    0 < Norbit <= nvar || error("Norbit must be between 1 and length(w_all)")
     isfinite(apfac) && apfac > 0.0 || error("apfac must be finite and positive")
-    isfinite(step_safety) && 0.0 < step_safety < 1.0 || error("step_safety must lie strictly between 0 and 1")
-    isfinite(rcond_warn) && rcond_warn >= 0.0 || error("rcond_warn must be finite and non-negative")
+    isfinite(entropy_floor) && entropy_floor > 0.0 || error("entropy_floor must be finite and positive")
+    max_active_passes > 0 || error("max_active_passes must be positive")
+    isfinite(bound_kkt_tol) && bound_kkt_tol >= 0.0 || error("bound_kkt_tol must be finite and nonnegative")
+
+    active = BitVector(active_bound)
+    newly_activated = falses(Norbit)
     model = Cm * w_all
     base_delY = target .- model
-    Am = karl_spear_build_Am(Cm, ddS; floor=entropy_floor)
-    rhs = copy(base_delY)
-    karl_spear_rhs!(rhs, Cm, dS, ddS; floor=entropy_floor)
+
+    n_activated_total = 0
+    activated_events_total = 0
+    released_total = 0
+    max_batch_activated = 0
+    last_batch_activated = 0
+    last_boundary_idx = 0
+    last_boundary_candidate = Inf
+    last_boundary_batch_size = 0
+    max_release_candidates_seen = 0
+    last_release_candidates = 0
+    last_released_idx = 0
+    last_released_multiplier = NaN
+    weight_moved_to_floor = 0.0
     rcond_est = NaN
+    rcond_min = Inf
     near_singular_spear_matrix = false
-    if compute_rcond
-        cond_est = try
-            cond(Am)
+    near_singular_seen = false
+    initial_min_trial_weight = minimum(@view w_all[1:Norbit])
+    initial_min_trial_idx = argmin(@view w_all[1:Norbit])
+    initial_n_violators = 0
+    initial_n_negative_dw = 0
+    limiting_idx = 0
+    limiting_candidate = Inf
+    min_bound_multiplier = NaN
+    max_bound_multiplier = NaN
+    most_negative_bound_multiplier = 0.0
+    active_set_failure_reason = :none
+    active_passes = 0
+
+    for pass in 1:max_active_passes
+        active_passes = pass
+        free_orbits = findall(!, active)
+
+        if isempty(free_orbits)
+            active_set_failure_reason = :no_free_orbits
+            break
+        end
+
+        free_vars = vcat(free_orbits, collect((Norbit + 1):nvar))
+        fixed_dw = zeros(Float64, nvar)
+
+        @inbounds for j in 1:Norbit
+            active[j] && (fixed_dw[j] = (entropy_floor - w_all[j]) / apfac)
+        end
+
+        rhs = copy(base_delY)
+
+        @inbounds for j in 1:Norbit
+            active[j] && fixed_dw[j] != 0.0 && (rhs .-= (@view Cm[:, j]) .* fixed_dw[j])
+        end
+
+        Cm_free = Matrix{Float64}(Cm[:, free_vars])
+        dS_free = dS[free_vars]
+        ddS_free = ddS[free_vars]
+
+        Am = karl_spear_build_Am(Cm_free, ddS_free; floor=entropy_floor)
+        karl_spear_rhs!(rhs, Cm_free, dS_free, ddS_free; floor=entropy_floor)
+
+        if compute_rcond
+            cond_est = try cond(Am) catch; Inf end
+            this_rcond = isfinite(cond_est) ? 1.0 / max(cond_est, 1.0) : 0.0
+            rcond_est = this_rcond
+            rcond_min = min(rcond_min, this_rcond)
+            near_singular_spear_matrix = !isfinite(this_rcond) || this_rcond <= rcond_warn
+            near_singular_seen |= near_singular_spear_matrix
+        end
+
+        lambda = try
+            _solve_spear_system(Am, rhs)
         catch
-            Inf
+            active_set_failure_reason = :reduced_spear_solve_failed
+            break
         end
-        rcond_est = isfinite(cond_est) ? 1.0 / max(cond_est, 1.0) : 0.0
-        near_singular_spear_matrix = !isfinite(rcond_est) || rcond_est <= rcond_warn
-    end
 
-    lambda = _solve_spear_system(Am, rhs)
-    dw = karl_spear_delta_w(Cm, lambda, dS, ddS; floor=entropy_floor)
-    spear_rhs_l2 = norm(rhs)
-    spear_system_residual_l2 = norm(Am * lambda - rhs)
-    spear_system_relative_residual = spear_system_residual_l2 / max(spear_rhs_l2, eps(Float64))
-    full_trial = w_all .+ apfac .* dw
-    full_trial_orbits = @view full_trial[1:Norbit]
-    initial_min_trial_weight, initial_min_trial_idx = findmin(full_trial_orbits)
-    n_initial_violators = count(x -> x < entropy_floor, full_trial_orbits)
-    initial_n_negative_dw = count(x -> x < 0.0, @view(dw[1:Norbit]))
-    stepfac, limiting_idx, limiting_candidate = karl_safe_step_factor(@view(w_all[1:Norbit]), @view(dw[1:Norbit]); requested_step=apfac, floor=entropy_floor, safety=step_safety)
-    wnew = w_all .+ stepfac .* dw
-    all(isfinite, wnew) || error("Karl damped SPEAR step produced nonfinite weights")
-    orbit_before = @view w_all[1:Norbit]
-    orbit_after = @view wnew[1:Norbit]
-    orbit_dw = @view dw[1:Norbit]
-    min_orbit_weight = minimum(orbit_before)
-    min_updated_orbit_weight, min_updated_orbit_idx = findmin(orbit_after)
-    n_at_floor_before = count(x -> x <= entropy_floor, orbit_before)
-    n_at_floor_after = count(x -> x <= entropy_floor, orbit_after)
-    n_below_floor = count(x -> x < entropy_floor, orbit_after)
-    n_nonpositive_orbits = count(x -> x <= 0.0, orbit_after)
-    n_below_floor == 0 || error("Karl damped step crossed the entropy floor")
-    n_nonpositive_orbits == 0 || error("Karl damped step produced non-positive orbit weights")
-    limiting_weight = limiting_idx > 0 ? w_all[limiting_idx] : NaN
-    limiting_dw = limiting_idx > 0 ? dw[limiting_idx] : NaN
-    step_limited = stepfac < apfac * (1.0 - 100.0 * eps(Float64))
-    linearized_constraint_error_l2 = norm(stepfac .* (Cm * dw) .- base_delY)
-    post_step_constraint_l2 = norm(target .- Cm * wnew)
-    max_abs_dw = maximum(abs, dw)
-    first_row = @view Cm[1, :]
-    first_orbit_row = @view Cm[1, 1:Norbit]
-    first_constraint_n_contributors = 0
-    first_constraint_weight_on_contributors_before = 0.0
-    first_constraint_weight_on_contributors_after = 0.0
-    first_constraint_max_orbit_coefficient = 0.0
-    first_constraint_max_contribution_before = 0.0
-    first_constraint_max_contribution_after = 0.0
-    first_constraint_max_contribution_idx = 0
-    @inbounds for j in 1:Norbit
-        coefficient = first_orbit_row[j]
-        if coefficient > 0.0
-            first_constraint_n_contributors += 1
-            first_constraint_weight_on_contributors_before += w_all[j]
-            first_constraint_weight_on_contributors_after += wnew[j]
-            first_constraint_max_orbit_coefficient = max(first_constraint_max_orbit_coefficient, coefficient)
-            contribution_before = coefficient * w_all[j]
-            contribution_after = coefficient * wnew[j]
-            if contribution_before > first_constraint_max_contribution_before
-                first_constraint_max_contribution_before = contribution_before
-                first_constraint_max_contribution_idx = j
+        dw_free = karl_spear_delta_w(Cm_free, lambda, dS_free, ddS_free; floor=entropy_floor)
+        dw = copy(fixed_dw)
+        dw[free_vars] .= dw_free
+        trial = w_all .+ apfac .* dw
+
+        @inbounds for j in 1:Norbit
+            active[j] && (trial[j] = entropy_floor)
+        end
+
+        if pass == 1
+            initial_min_trial_weight, initial_min_trial_idx = findmin(@view trial[1:Norbit])
+            initial_n_violators = count(x -> x < entropy_floor, @view trial[1:Norbit])
+            initial_n_negative_dw = count(<(0.0), @view dw[1:Norbit])
+
+            @inbounds for j in free_orbits
+                if dw[j] < 0.0
+                    candidate = (w_all[j] - entropy_floor) / (-dw[j])
+                    if candidate < limiting_candidate
+                        limiting_candidate = candidate
+                        limiting_idx = j
+                    end
+                end
             end
-            first_constraint_max_contribution_after = max(first_constraint_max_contribution_after, contribution_after)
         end
+
+        violators = Int[]
+
+        @inbounds for j in free_orbits
+            trial[j] < entropy_floor && push!(violators, j)
+        end
+
+        if !isempty(violators)
+            activated_events_total += 1
+            n_activated_total += length(violators)
+            max_batch_activated = max(max_batch_activated, length(violators))
+            last_batch_activated = length(violators)
+            last_boundary_batch_size = length(violators)
+            batch_boundary = Inf
+            batch_boundary_idx = 0
+
+            @inbounds for j in violators
+                if dw[j] < 0.0
+                    candidate = (w_all[j] - entropy_floor) / (-dw[j])
+                    if candidate < batch_boundary
+                        batch_boundary = candidate
+                        batch_boundary_idx = j
+                    end
+                end
+
+                weight_moved_to_floor += max(w_all[j] - entropy_floor, 0.0)
+                active[j] = true
+                newly_activated[j] = true
+            end
+
+            last_boundary_idx = batch_boundary_idx
+            last_boundary_candidate = batch_boundary
+            continue
+        end
+
+        release_candidates = Int[]
+        release_multipliers = Float64[]
+        bound_values = Float64[]
+
+        @inbounds for j in 1:Norbit
+            if active[j]
+                multiplier = dot(@view(Cm[:, j]), lambda) - dS[j]
+                push!(bound_values, multiplier)
+                scale = max(1.0, abs(dS[j]), abs(dot(@view(Cm[:, j]), lambda)))
+
+                if !newly_activated[j] && multiplier < -bound_kkt_tol * scale
+                    push!(release_candidates, j)
+                    push!(release_multipliers, multiplier)
+                end
+            end
+        end
+
+        if isempty(bound_values)
+            min_bound_multiplier = NaN
+            max_bound_multiplier = NaN
+            most_negative_bound_multiplier = 0.0
+        else
+            min_bound_multiplier = minimum(bound_values)
+            max_bound_multiplier = maximum(bound_values)
+            most_negative_bound_multiplier = min(0.0, min_bound_multiplier)
+        end
+
+        last_release_candidates = length(release_candidates)
+        max_release_candidates_seen = max(max_release_candidates_seen, last_release_candidates)
+
+        if !isempty(release_candidates)
+            released_total += length(release_candidates)
+            imin = argmin(release_multipliers)
+            last_released_idx = release_candidates[imin]
+            last_released_multiplier = release_multipliers[imin]
+
+            @inbounds for j in release_candidates
+                active[j] = false
+            end
+
+            continue
+        end
+
+        return (
+            w=Vector{Float64}(trial), dw=Vector{Float64}(dw), lambda=Vector{Float64}(lambda), Am=Matrix{Float64}(Am), rhs=Vector{Float64}(rhs), active_bound=active,
+            active_set_stabilized=true, active_set_failure_reason=:none, active_passes=active_passes,
+            n_active_bound=count(active), n_free_orbits_final=Norbit-count(active),
+            n_activated_total=n_activated_total, activated_events_total=activated_events_total, boundary_events_total=activated_events_total,
+            max_batch_activated=max_batch_activated, last_batch_activated=last_batch_activated, last_boundary_batch_size=last_boundary_batch_size,
+            last_boundary_idx=last_boundary_idx, last_boundary_candidate=last_boundary_candidate,
+            n_release_candidates=last_release_candidates, max_release_candidates_seen=max_release_candidates_seen,
+            released_total=released_total, last_released_idx=last_released_idx, last_released_multiplier=last_released_multiplier,
+            min_bound_multiplier=min_bound_multiplier, max_bound_multiplier=max_bound_multiplier, most_negative_bound_multiplier=most_negative_bound_multiplier,
+            bound_kkt_tolerance=bound_kkt_tol, weight_moved_to_floor=weight_moved_to_floor,
+            initial_min_trial_weight=initial_min_trial_weight, initial_min_trial_idx=initial_min_trial_idx,
+            n_initial_violators=initial_n_violators, initial_n_negative_dw=initial_n_negative_dw,
+            limiting_idx=limiting_idx, limiting_candidate=limiting_candidate,
+            rcond_est=rcond_est, rcond_min=isfinite(rcond_min) ? rcond_min : NaN, rcond_warn=rcond_warn,
+            near_singular_spear_matrix=near_singular_spear_matrix, near_singular_seen=near_singular_seen,
+        )
     end
-    first_constraint_target = target[1]
-    first_constraint_model_before = model[1]
-    first_constraint_model_after = dot(first_row, wnew)
-    first_constraint_denominator = max(abs(first_constraint_target), eps(Float64))
-    first_constraint_relative_before = abs(first_constraint_model_before - first_constraint_target) / first_constraint_denominator
-    first_constraint_relative_after = abs(first_constraint_model_after - first_constraint_target) / first_constraint_denominator
-    println("[KARL DAMPED STEP] requested_step=", apfac, " stepfac=", stepfac, " safety=", step_safety, " limited=", step_limited,
-        " limiting_orbit=", limiting_idx, " boundary=", limiting_candidate, " full_step_violators=", n_initial_violators,
-        " full_step_min_weight=", initial_min_trial_weight, " updated_min_weight=", min_updated_orbit_weight, " rcond_est=", rcond_est,
-        " near_singular=", near_singular_spear_matrix)
-    return (w=wnew, dw=dw, lambda=lambda, Am=Am, delY=base_delY, model=model, rcond_est=rcond_est, rcond_warn=rcond_warn, near_singular_spear_matrix=near_singular_spear_matrix,
-        max_abs_dw=max_abs_dw, spear_rhs_l2=spear_rhs_l2, spear_system_residual_l2=spear_system_residual_l2, spear_system_relative_residual=spear_system_relative_residual,
 
-        stepfac=stepfac, requested_step=apfac, step_safety=step_safety, step_limited=step_limited, limiting_idx=limiting_idx,
-        limiting_weight=limiting_weight, limiting_dw=limiting_dw, limiting_candidate=limiting_candidate,
-
-        min_orbit_weight=min_orbit_weight, min_updated_orbit_weight=min_updated_orbit_weight, min_updated_orbit_idx=min_updated_orbit_idx,
-        initial_min_trial_weight=initial_min_trial_weight, initial_min_trial_idx=initial_min_trial_idx, n_initial_violators=n_initial_violators,
-        initial_n_negative_dw=initial_n_negative_dw, n_nonpositive_orbits=n_nonpositive_orbits, n_below_floor=n_below_floor, n_at_floor=n_at_floor_after,
-        n_at_floor_before=n_at_floor_before, n_at_floor_after=n_at_floor_after, n_negative_dw=count(x -> x < 0.0, orbit_dw),
-
-        n_active_bound=0, n_activated_total=0, activated_events_total=0, n_free_orbits_final=Norbit, active_passes=1, active_set_stabilized=true,
-        boundary_events_total=step_limited ? 1 : 0, max_batch_activated=0, last_batch_activated=0, last_boundary_idx=limiting_idx, last_boundary_candidate=limiting_candidate,
-        last_boundary_batch_size=0, n_release_candidates=0, max_release_candidates_seen=0, released_total=0, last_released_idx=0, last_released_multiplier=NaN,
-        most_negative_bound_multiplier=0.0, min_bound_multiplier=NaN, max_bound_multiplier=NaN, bound_kkt_tolerance=NaN, strict_cycle_visits=0, cycle_break_release_total=0,
-        locked_release_candidates=0, release_trial_count=0, release_locked_count=0, degenerate_rebinds_total=0, release_locks_total=0, weight_moved_to_floor=0.0,
-
-        linearized_constraint_error_l2=linearized_constraint_error_l2, post_step_constraint_l2=post_step_constraint_l2,
-
-        first_constraint_target=first_constraint_target, first_constraint_model_before=first_constraint_model_before,
-        first_constraint_model_after=first_constraint_model_after, first_constraint_relative_before=first_constraint_relative_before,
-        first_constraint_relative_after=first_constraint_relative_after, first_constraint_n_contributors=first_constraint_n_contributors,
-        first_constraint_weight_on_contributors_before=first_constraint_weight_on_contributors_before, first_constraint_weight_on_contributors_after=first_constraint_weight_on_contributors_after,
-        first_constraint_max_orbit_coefficient=first_constraint_max_orbit_coefficient, first_constraint_max_contribution_before=first_constraint_max_contribution_before,
-        first_constraint_max_contribution_after=first_constraint_max_contribution_after, first_constraint_max_contribution_idx=first_constraint_max_contribution_idx,
+    return (
+        w=copy(w_all), dw=zeros(Float64, nvar), lambda=Float64[], Am=zeros(Float64,0,0), rhs=Float64[], active_bound=active,
+        active_set_stabilized=false, active_set_failure_reason=active_set_failure_reason == :none ? :active_set_max_passes : active_set_failure_reason,
+        active_passes=active_passes, n_active_bound=count(active), n_free_orbits_final=Norbit-count(active),
+        n_activated_total=n_activated_total, activated_events_total=activated_events_total, boundary_events_total=activated_events_total,
+        max_batch_activated=max_batch_activated, last_batch_activated=last_batch_activated, last_boundary_batch_size=last_boundary_batch_size,
+        last_boundary_idx=last_boundary_idx, last_boundary_candidate=last_boundary_candidate,
+        n_release_candidates=last_release_candidates, max_release_candidates_seen=max_release_candidates_seen,
+        released_total=released_total, last_released_idx=last_released_idx, last_released_multiplier=last_released_multiplier,
+        min_bound_multiplier=min_bound_multiplier, max_bound_multiplier=max_bound_multiplier, most_negative_bound_multiplier=most_negative_bound_multiplier,
+        bound_kkt_tolerance=bound_kkt_tol, weight_moved_to_floor=weight_moved_to_floor,
+        initial_min_trial_weight=initial_min_trial_weight, initial_min_trial_idx=initial_min_trial_idx,
+        n_initial_violators=initial_n_violators, initial_n_negative_dw=initial_n_negative_dw,
+        limiting_idx=limiting_idx, limiting_candidate=limiting_candidate,
+        rcond_est=rcond_est, rcond_min=isfinite(rcond_min) ? rcond_min : NaN, rcond_warn=rcond_warn,
+        near_singular_spear_matrix=near_singular_spear_matrix, near_singular_seen=near_singular_seen,
     )
 end
 
-
-function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target_base::Vector{Float64}, A_losvd::Matrix{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, wphase_orbit::Vector{Float64};
-    Nlight::Int, Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, print_consistency::Bool=false)
+function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target_base::Vector{Float64}, A_losvd::Matrix{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, wphase_orbit::Vector{Float64}; Nlight::Int, Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, print_consistency::Bool=false, active_bound=nothing, max_active_passes::Int=64, bound_kkt_tol::Float64=1.0e-10)
     Narr, nvar = size(Cm)
     Nlosvd, Norbit2 = size(A_losvd)
+
     Norbit2 == Norbit || error("A_losvd orbit count does not match Norbit")
     length(w_all) == nvar || error("w_all length does not match expanded Cm")
     length(target_base) == Narr || error("target length does not match expanded Cm rows")
     nvar - Norbit == Nlosvd || error("expanded slack count does not match LOSVD row count")
     length(wphase_orbit) == Norbit || error("wphase length does not match Norbit")
     Nspatial * Nvbin == Nlosvd || error("Nspatial*Nvbin does not match Nlosvd")
+
+    active = active_bound === nothing ? falses(Norbit) : BitVector(active_bound)
     w_orbit = Vector{Float64}(@view w_all[1:Norbit])
     losvd_state = karl_losvd_fracnew_state(A_losvd, w_orbit, losvd_target, losvd_sigma, Nspatial, Nvbin)
     entropy, chi_slack, dS, ddS = build_expanded_entropy_derivatives(w_all, Norbit, wphase_orbit, losvd_state.residual, losvd_state.effective_sigma; alphat=alphat, entropy_floor=entropy_floor)
+
     target = copy(target_base)
     target[(Nlight + 1):(Nlight + Nlosvd)] .= losvd_state.effective_target
+
     raw_diag = print_consistency ? karl_raw_spear_consistency_diagnostic(w_all, Norbit, Cm, target, dS, ddS; apfac=apfac, entropy_floor=entropy_floor) : nothing
-    update_diag = karl_spear_update_expanded(w_all, Norbit, Cm, target, dS, ddS; apfac=apfac, entropy_floor=entropy_floor, compute_rcond=compute_rcond, rcond_warn=rcond_warn)
+    update_diag = karl_spear_update_expanded(w_all, Norbit, Cm, target, dS, ddS; apfac=apfac, entropy_floor=entropy_floor, compute_rcond=compute_rcond, rcond_warn=rcond_warn, active_bound=active, max_active_passes=max_active_passes, bound_kkt_tol=bound_kkt_tol)
+
     wnew = Vector{Float64}(update_diag.w)
     finite_state = all(isfinite, wnew)
     orbit_floor_ok = finite_state && _project_expanded_weights!(wnew, Norbit; floor=entropy_floor)
-    step_ok = finite_state && orbit_floor_ok && update_diag.active_set_stabilized
-    failure_reason =
-        !finite_state ? :nonfinite_updated_state :
-        !orbit_floor_ok ? :orbit_floor_violation :
-        !update_diag.active_set_stabilized ? :active_set_not_stabilized :
-        :none
-    diag = merge(update_diag, ( entropy=entropy, chi_slack=chi_slack, fracnew=losvd_state.fracnew, effective_losvd_target=losvd_state.effective_target, effective_losvd_sigma=losvd_state.effective_sigma,
-        losvd_residual=losvd_state.residual, chi_by_spatial=losvd_state.chi_by_spatial, chi_losvd_karl=losvd_state.chi_total, raw_spear_diag=raw_diag, slack=Vector{Float64}(wnew[(Norbit + 1):end]), w_all=wnew,
-        failure_reason=failure_reason))
+    step_ok = finite_state && orbit_floor_ok
+
+    failure_reason = !finite_state ? :nonfinite_updated_state : !orbit_floor_ok ? :orbit_floor_violation : :none
+    step_warning = !update_diag.active_set_stabilized ? update_diag.active_set_failure_reason : :none
+
+    diag = merge(update_diag, (
+        entropy=entropy, chi_slack=chi_slack, fracnew=losvd_state.fracnew,
+        effective_losvd_target=losvd_state.effective_target, effective_losvd_sigma=losvd_state.effective_sigma,
+        losvd_residual=losvd_state.residual, chi_by_spatial=losvd_state.chi_by_spatial, chi_losvd_karl=losvd_state.chi_total,
+        raw_spear_diag=raw_diag, slack=Vector{Float64}(wnew[(Norbit + 1):end]), w_all=wnew,
+        failure_reason=failure_reason, step_warning=step_warning,
+    ))
+
     return wnew, step_ok, diag
 end
-# ====================================================================================================================================================================================
-# ========================================================================================================================
 
-function max_light_relative_residual(A_light::Matrix{Float64}, w::Vector{Float64}, light_target::Vector{Float64}; relative_floor::Float64=1e-12)
-    size(A_light, 1) == length(light_target) || error("light_target length must match A_light rows")
-    size(A_light, 2) == length(w) || error("w length must match A_light columns")
-    isempty(light_target) && return Inf
-    light_model = A_light * w
-    denominator_floor = relative_floor * max(1.0, maximum(abs.(light_target)))
-    max_relative_residual = 0.0
-    @inbounds for i in eachindex(light_target)
-        relative_residual = abs(light_model[i] - light_target[i]) / max(abs(light_target[i]), denominator_floor)
-        max_relative_residual = max(max_relative_residual, relative_residual)
-    end
-    return max_relative_residual
+@inline function _safe_positive(x::Float64; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
+    return (isfinite(x) && x > floor) ? x : floor
 end
 
-##CHI##
-@inline function chi2_block(A::Matrix{Float64}, w::Vector{Float64}, d::Vector{Float64}, sigma::Vector{Float64})
-    p = A * w
-    s = 0.0
-    @inbounds for i in eachindex(d)
-        si = max(sigma[i], 1e-12)
-        rr = (p[i] - d[i]) / si
-        s += rr * rr
-    end
-    return s
-end
