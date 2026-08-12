@@ -924,34 +924,34 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
     return pot, frc, R
 end
 
-function build_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+function build_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, required_rmax_m::Float64=0.0, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+    isfinite(required_rmax_m) && required_rmax_m >= 0.0 || error("required_rmax_m must be finite and nonnegative")
     halo = halo_from_theta(rho_s, r_s, MBH, ML; halo_type=halo_type, stellar_model=stellar_model, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
-    R = build_R_halo_physical(nR; rmin=halo[:rmin], rmax=rmax_factor * halo[:rs])
+    halo_scaled_rmax = rmax_factor * halo[:rs]
+    rmax_use = max(halo_scaled_rmax, required_rmax_m)
+    R = build_R_halo_physical(nR; rmin=halo[:rmin], rmax=rmax_use)
     tabv, tabfr, Menc = tables_spherical(R, 1, halo, rho_interp)
     pot, frc, _ = make_potential_force_funcs(halo, R, 1, tabv, tabfr, Menc)
     HaloContext(halo, f64.(R), tabv, tabfr, Menc, pot, frc)
 end
 
-function get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+function get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, required_rmax_m::Float64=0.0, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+    isfinite(required_rmax_m) && required_rmax_m >= 0.0 || error("required_rmax_m must be finite and nonnegative")
     ht = Symbol(lowercase(String(halo_type)))
     sig = stellar_model_sig(stellar_model)
     qh = max(abs(f64(halo_q_axis_ratio)), 1e-6)
     halo_for_sig = halo_from_theta(rho_s, r_s, MBH, ML; halo_type=ht, stellar_model=nothing, halo_q_axis_ratio=qh, karl_halo_params=karl_halo_params)
     ksig = ht === :karl_halo ? karl_halo_sig(halo_for_sig) : UInt(0)
     combined_sig = hash((sig, ksig))
-    key = (_quant(f64(rho_s)), _quant(f64(r_s)), _quant(f64(MBH)), _quant(f64(ML)), combined_sig, ht, _quant(qh), nR, _quant(f64(rmax_factor)))
+    key = (_quant(f64(rho_s)), _quant(f64(r_s)), _quant(f64(MBH)), _quant(f64(ML)), combined_sig, ht, _quant(qh), nR, _quant(f64(rmax_factor)), _quant(required_rmax_m / pc))
     lock(_HALO_LOCK)
     ctx = get(_HALO_CTX_CACHE, key, nothing)
     unlock(_HALO_LOCK)
     ctx !== nothing && return ctx
-    newctx = build_halo_context(rho_s, r_s, MBH, ML, ht; stellar_model=stellar_model, nR=nR, rmax_factor=rmax_factor, halo_q_axis_ratio=qh, karl_halo_params=karl_halo_params)
+    newctx = build_halo_context(rho_s, r_s, MBH, ML, ht; stellar_model=stellar_model, nR=nR, rmax_factor=rmax_factor, required_rmax_m=required_rmax_m, halo_q_axis_ratio=qh, karl_halo_params=karl_halo_params)
     lock(_HALO_LOCK)
     ctx = get(_HALO_CTX_CACHE, key, nothing)
     if ctx === nothing
-        # Continuous parameter searches rarely revisit an exact four-parameter
-        # context.  Bound this cache so old closures do not accumulate for the
-        # lifetime of a long daemon run.  The expensive reusable stellar table
-        # lives in _STELLAR_COMPONENT_CACHE and is not evicted here.
         if length(_HALO_CTX_CACHE) >= 256
             delete!(_HALO_CTX_CACHE, first(keys(_HALO_CTX_CACHE)))
         end

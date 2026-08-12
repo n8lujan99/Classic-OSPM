@@ -54,7 +54,7 @@ const DEFAULT_KARL_ALPHA        = 1e-4     # legacy value retained only for call
 const DEFAULT_KARL_ALPHAT       = 1.0      # Karl-style data-mismatch multiplier in entropy mode
 const DEFAULT_KARL_MAXITER      = 60       # Karl SPEAR/Newton iteration cap
 const DEFAULT_KARL_ENTROPY_FLOOR = 1e-30   # floor for log(w_i*wphase_i) entropy
-const DEFAULT_KARL_APFAC         = 1.0      # Karl SPEAR step factor
+const DEFAULT_KARL_APFAC         = 0.01      # Karl SPEAR step factor (testing was 1.0)
 const DEFAULT_KARL_LIGHT_REL_TOL = 0.01
 const DEFAULT_KARL_DELTA_CHI2_ITER_TOL = 0.3
 const DEFAULT_KARL_INVALID_SIGMA_SENTINEL = -666.0
@@ -81,7 +81,7 @@ struct HaloContext
     frc::Function
 end
 
-const _HALO_CTX_CACHE = Dict{Tuple{Float64,Float64,Float64,Float64,UInt64,Symbol,Float64,Int,Float64},HaloContext}()
+const _HALO_CTX_CACHE = Dict{Tuple{Float64,Float64,Float64,Float64,UInt64,Symbol,Float64,Int,Float64,Float64},HaloContext}()
 const _HALO_LOCK = ReentrantLock()
 
 # ========================================================================================================================

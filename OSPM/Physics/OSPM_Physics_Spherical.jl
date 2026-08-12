@@ -249,6 +249,27 @@ function _balanced_launch_order(planned_indices::Vector{Int}, shells::Vector{Flo
 
     for members in values(cells)
         sort!(members; by=c -> (orbit_cost[c], c))
+
+        if length(members) > 1
+            radial_order = similar(members)
+            lo = 1
+            hi = length(members)
+            k = 1
+
+            while lo <= hi
+                radial_order[k] = members[lo]
+                k += 1
+                lo += 1
+
+                if lo <= hi
+                    radial_order[k] = members[hi]
+                    k += 1
+                    hi -= 1
+                end
+            end
+
+            members .= radial_order
+        end
     end
 
     cell_keys = sort!(collect(keys(cells)))
@@ -258,22 +279,25 @@ function _balanced_launch_order(planned_indices::Vector{Int}, shells::Vector{Flo
 
     while length(launch_order) < length(planned_indices)
         added = false
+
         @inbounds for cell in cell_keys
             members = cells[cell]
+
             if depth <= length(members)
                 push!(launch_order, members[depth])
                 added = true
             end
         end
+
         added || break
         depth += 1
     end
 
     length(launch_order) == length(planned_indices) ||
         error("Balanced launch ordering lost orbit cells: " * "ordered=$(length(launch_order)) " * "planned=$(length(planned_indices))")
+
     return launch_order
 end
-
 function _build_orbit_shells(R_star_m::Vector{Float64}, light_edges::Vector{Float64})
     shells = Float64[]
     sizehint!(shells, length(R_star_m) + length(light_edges))
@@ -302,19 +326,15 @@ function _init_orbit_work(
     v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, ctx;
     nsteps::Int, Lfrac, dt_frac_orbit::Float64, max_attempts_factor::Int,
     t_deadline::UInt64, velocity_edges=nothing, light_bin_edges=nothing,
-    kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=9,
+    kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5,
     fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT,
     regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR,
     max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP,
     shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS,
     coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY)
-    iseven(Norbit) || error(
-        "Karl prograde/retrograde orbit pairing requires even Norbit because " *
-        "Norbit is the final A-matrix column count",
-    )
+    iseven(Norbit) || error("Karl prograde/retrograde orbit pairing requires even Norbit because " * "Norbit is the final A-matrix column count")
 
     max_attempts_factor > 0 || error("max_attempts_factor must be positive")
-
     Nbase_orbit = Norbit ÷ 2
     Nstar = length(R_star_m)
     valid_vec = collect(Bool, valid_vlos)
@@ -339,12 +359,11 @@ function _init_orbit_work(
 
     shells = _build_orbit_shells(R_star_m, light_edges)
     isempty(shells) && error("Orbit shell grid has no finite positive radii")
+    ctx.R[end] > shells[end] || error("Force grid does not cover orbit shell grid: force_rmax=$(ctx.R[end] / pc) pc shell_rmax=$(shells[end] / pc) pc")
 
     Nshells = length(shells)
 
-    Nbase_orbit >= Nshells || error(
-        "Orbit library has $Nbase_orbit base slots for $Nshells required radial shells; increase Norbit",
-    )
+    Nbase_orbit >= Nshells || error("Orbit library has $Nbase_orbit base slots for $Nshells required radial shells; increase Norbit")
 
     A_losvd = zeros(Float64, Nlosvd, Norbit)
     A_light = zeros(Float64, Nlight, Norbit)
@@ -384,98 +403,23 @@ function _init_orbit_work(
         "Increase Norbit to at least $(2 * full_phase_grid).",
     )
 
-    family_grid = _build_family_launch_grid(
-        Nbase_orbit, shells, Lfrac, third_launches,
-        ctx.pot, ctx.frc, force_geometry,
-    )
-
-    launch_order = _balanced_launch_order(
-        family_grid.planned_indices, shells, Lfrac,
-        third_launches, shell_band_count,
-    )
-
+    family_grid = _build_family_launch_grid(Nbase_orbit, shells, Lfrac, third_launches, ctx.pot, ctx.frc, force_geometry)
+    launch_order = _balanced_launch_order(family_grid.planned_indices, shells, Lfrac, third_launches, shell_band_count)
     first_coverage_check = max(1, ceil(Int, fill_pct * length(launch_order)))
-
     sini_use = clamp01(f64(sini))
     cosi_use = sqrt(max(0.0, 1.0 - sini_use * sini_use))
+    orbit_ctx = (frc=ctx.frc, R_pos=ctx.R, halo=ctx.halo, force_geometry=force_geometry)
 
-    orbit_ctx = (
-        frc=ctx.frc,
-        R_pos=ctx.R,
-        halo=ctx.halo,
-        force_geometry=force_geometry,
-    )
-
-    return OrbitWorkState(
-        Norbit,
-        Nbase_orbit,
-        Nstar,
-        Nspatial,
-        Nvbin_eff,
-        Nlosvd,
-        Nlight,
-        Nshells,
-        nsteps,
-        max_attempts_factor,
-
-        third_launches,
-        family_grid.launch_r0,
-        family_grid.launch_theta0,
-        family_grid.launch_energy,
-        family_grid.launch_lz,
-
-        sini_use,
-        cosi_use,
-        R_star_m,
-        valid_vec,
-        v_star_mps,
-        verr_star_mps,
-
-        spatial_edges,
-        light_edges,
-        velocity_edges_use,
-        shells,
-        launch_order,
-
-        orbit_ctx,
-        ctx.pot,
-        ctx.frc,
-        Lfrac,
-        force_geometry,
-
-        dt_frac_orbit,
-        t_deadline,
-        fill_pct,
-        regional_floor,
-        max_regional_gap,
-        shell_band_count,
-        max(1, coverage_check_every),
-        Threads.Atomic{Int}(first_coverage_check),
-
-        A_losvd,
-        A_light,
-
-        success_flags,
-        attempts_used,
-        min_r_reached,
-        rapo_list,
-        failure_stage,
-        launch_failure_state,
-        sos_points,
-        integration_points,
-        integration_termination,
-
-        initial_energy_diag,
-        final_energy_diag,
-        max_energy_drift,
-        max_relative_energy_drift,
-
-        phase_volume_state,
-        Threads.Atomic{Int}(1),
-        Threads.Atomic{Int}(0),
-        Threads.Atomic{Int}(0),
-        Threads.Atomic{Int}(0),
-        ReentrantLock(),
+    return OrbitWorkState(Norbit, Nbase_orbit, Nstar, Nspatial, Nvbin_eff, Nlosvd, Nlight, Nshells, nsteps, max_attempts_factor,
+        third_launches, family_grid.launch_r0, family_grid.launch_theta0, family_grid.launch_energy, family_grid.launch_lz,
+        sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps,
+        spatial_edges, light_edges, velocity_edges_use, shells, launch_order,
+        orbit_ctx, ctx.pot, ctx.frc, Lfrac, force_geometry,
+        dt_frac_orbit, t_deadline, fill_pct, regional_floor, max_regional_gap, shell_band_count, max(1, coverage_check_every), Threads.Atomic{Int}(first_coverage_check),
+        A_losvd, A_light,
+        success_flags, attempts_used, min_r_reached, rapo_list, failure_stage, launch_failure_state, sos_points, integration_points, integration_termination,
+        initial_energy_diag, final_energy_diag, max_energy_drift, max_relative_energy_drift,
+        phase_volume_state, Threads.Atomic{Int}(1), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), ReentrantLock(),
     )
 end
 
@@ -607,9 +551,9 @@ function _assess_orbit_coverage(st::OrbitWorkState; fill_pct::Float64=DEFAULT_OR
 
     rejection_reasons = String[]
 
-    attempted_count < planned && push!(
+    attempted_count < required && push!(
         rejection_reasons,
-        "$(planned - attempted_count) planned phase-grid orbit(s) were not attempted",
+        "only $attempted_count planned phase-grid orbit(s) were attempted; $required are required by fill_pct=$(fill_pct)",
     )
 
     total_coverage < fill_pct && push!(
@@ -647,7 +591,6 @@ function _assess_orbit_coverage(st::OrbitWorkState; fill_pct::Float64=DEFAULT_OR
     end
 
     accepted =
-        attempted_count == planned &&
         total_coverage >= fill_pct &&
         shell_min >= regional_floor &&
         lfrac_min >= regional_floor &&
@@ -875,45 +818,52 @@ function _coverage_metadata( coverage; fill_pct::Float64, regional_floor::Float6
 end
 
 function _maybe_stop_orbit_phase_for_coverage!(st::OrbitWorkState)
-    st.phase[] == 1 || return false
-    filled = st.filled_atomic[]
-    next_check = st.next_coverage_check[]
-    filled >= next_check || return false
-    Threads.atomic_cas!(st.next_coverage_check, next_check, next_check + st.coverage_check_every) == next_check || return false
-    coverage = _assess_orbit_coverage(st; fill_pct=st.fill_pct, regional_floor=st.regional_floor, max_regional_gap=st.max_regional_gap, shell_band_count=st.shell_band_count, verify_atomic=false)
-    coverage.accepted || return false
-
-    if Threads.atomic_cas!(st.phase, 1, 2) == 1
-        println(
-            "[ORBIT COVERAGE TARGET] ",
-            "filled=", coverage.succeeded,
-            " planned=", coverage.planned,
-            " coverage_fraction=", coverage.coverage_fraction,
-            " shell_min=", coverage.shell_minimum_coverage,
-            " lfrac_min=", coverage.lfrac_minimum_coverage,
-            " theta_min=", coverage.theta_minimum_coverage,
-            " shell_gap=", coverage.shell_coverage_gap,
-            " lfrac_gap=", coverage.lfrac_coverage_gap,
-            " theta_gap=", coverage.theta_coverage_gap,
-        )
-        return true
-    end
     return false
 end
 
 function _orbit_library_usable(st::OrbitWorkState, successful_columns::Vector{Int})
-    isempty(successful_columns) && return false
+    if isempty(successful_columns)
+        println("[ORBIT LIBRARY USABILITY FAIL] reason=no_successful_columns")
+        return false
+    end
+    bad_columns = Int[]
     @inbounds for col in successful_columns
-        activity = sum(abs, @view(st.A_losvd[:, col])) + sum(abs, @view(st.A_light[:, col]))
+        losvd_activity = sum(abs, @view(st.A_losvd[:, col]))
+        light_activity = sum(abs, @view(st.A_light[:, col]))
+        activity = losvd_activity + light_activity
         if !(isfinite(activity) && activity > 0.0)
-            return false
+            push!(bad_columns, col)
+            println(
+                "[ORBIT LIBRARY BAD COLUMN]",
+                " col=", col,
+                " losvd_activity=", losvd_activity,
+                " light_activity=", light_activity,
+                " total_activity=", activity,
+            )
         end
     end
+    bad_light_rows = Int[]
     @inbounds for row in 1:st.Nlight
         activity = sum(abs, @view(st.A_light[row, successful_columns]))
         if !(isfinite(activity) && activity > 0.0)
-            return false
+            push!(bad_light_rows, row)
+            println(
+                "[ORBIT LIBRARY BAD LIGHT ROW]",
+                " row=", row,
+                " R_inner_pc=", st.light_edges[row] / pc,
+                " R_outer_pc=", st.light_edges[row + 1] / pc,
+                " activity=", activity,
+            )
         end
+    end
+    if !isempty(bad_columns) || !isempty(bad_light_rows)
+        println(
+            "[ORBIT LIBRARY USABILITY FAIL]",
+            " bad_columns=", length(bad_columns),
+            " bad_light_rows=", length(bad_light_rows),
+            " successful_columns=", length(successful_columns),
+        )
+        return false
     end
     return true
 end
@@ -1057,6 +1007,24 @@ function _orbit_worker!(st::OrbitWorkState)
         orbit_max_rel_drift = integration_diag.max_relative_energy_drift
 
         store_integration_diag!(c_claim, integration_diag, length(r), reference_energy, orbit_max_abs_drift, orbit_max_rel_drift)
+        if integration_diag.termination_reason === :hit_rmax
+            println(
+                "[ORBIT RMAX HIT]",
+                " c=", c_claim,
+                " shell_id=", shell_id,
+                " lfrac_id=", lfrac_id,
+                " third_id=", third_id,
+                " third_u=", st.third_launches[third_id],
+                " rapo_pc=", rapo / pc,
+                " rturn_pc=", rturn / pc,
+                " rmax_stop_pc=", integration_diag.rmax_stop / pc,
+                " maximum_r_pc=", integration_diag.maximum_r / pc,
+                " final_r_pc=", integration_diag.final_r / pc,
+                " completed_steps=", integration_diag.completed_steps,
+                " dt_scale=", integration_diag.dt_scale,
+                " max_rel_energy_drift=", integration_diag.max_relative_energy_drift,
+            )
+        end
 
         if !integration_diag.energy_valid
             st.failure_stage[c_claim] = :energy_drift_exceeded
@@ -1277,7 +1245,7 @@ end
 # ========================================================================================================================
 # ========================================================================================================================
 # Main A-matrix builder: maps orbital weights → Karl observables.
-function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
+function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
     Nstar = length(R_star_m)
     @assert length(has_vlos) == Nstar
     @assert length(v_star_mps) == Nstar
@@ -1287,7 +1255,9 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
     prewarm_stellar_force_cache(stellar_model_jl)
-    ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
+    light_edges_force = light_bin_edges === nothing ? resolve_karl_spatial_edges(kinematic_bin_edges) : resolve_karl_light_edges(light_bin_edges)
+    required_force_rmax_m = 1.5 * light_edges_force[end]
+    ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, required_rmax_m=required_force_rmax_m, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
     sini = clamp01(f64(sini))
     Rmin = minimum(R_star_m)
     Rmax = maximum(R_star_m)
@@ -1389,7 +1359,7 @@ end
 # Batch evaluator: Karl-style binned LOSVD + projected-light fit.
 # This is the Heart of the whole Pipeline 
 # and is where all the parallelism is implemented
-function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=9, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
+function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
     nrow, nbatch = size(thetas)
     surface_brightness_profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     light_rel_tol > 0.0 || error("light_rel_tol must be positive")
@@ -1416,6 +1386,8 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
     prewarm_stellar_force_cache(stellar_model_jl)
+    light_edges_force = light_bin_edges === nothing ? resolve_karl_spatial_edges(kinematic_bin_edges) : resolve_karl_light_edges(light_bin_edges)
+    required_force_rmax_m = 1.5 * light_edges_force[end]
     status = fill(4, nbatch)
     chi2_losvd = fill(Inf, nbatch)
     chi2_inner = fill(Inf, nbatch)
@@ -1603,7 +1575,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         solver_failure_reason[i] = "invalid_stellar_radius_range"
                         continue
                     end
-                    ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
+                    ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, required_rmax_m=required_force_rmax_m, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
                     ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every)
                     work_states[i] = ws
                     planned_base_orbits[i] = length(ws.launch_order)
