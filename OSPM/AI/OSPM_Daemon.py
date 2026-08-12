@@ -394,7 +394,7 @@ class Deck:
         self.config = config
         self.path = config["CSV_PATH"]
         self.cols = list(dict.fromkeys(required_columns + PHASE_VOLUME_DIAG_COLUMNS))
-        self.params, self.flush = config["PARAMETER_NAMES"], int(config.get("CSV_FLUSH_INTERVAL", 50))
+        self.params, self.flush = config["PARAMETER_NAMES"], int(config.get("CSV_FLUSH_INTERVAL", 10))
         self._dirty = 0; self._buf = []; self._pbuf = []; self._sbuf = []
         self._load()
     def _load(self):
