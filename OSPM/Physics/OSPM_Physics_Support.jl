@@ -41,7 +41,7 @@ const DEFAULT_R0_FRAC         = 0.98      # starting radius as fraction of apoce
 
 # -- A-matrix / orbit library --
 const DEFAULT_LFRAC           = (0.05, 0.2, 0.4, 0.7, 1.0)  # angular momentum fractions
-const DEFAULT_DR_FRAC         = 0.05      # radial matching tolerance (fraction of R)
+const DEFAULT_DR_FRAC         = 0.01      # radial matching tolerance (fraction of R)
 const DEFAULT_NBINS_OCC       = 6         # occupancy histogram bins
 const DEFAULT_MAX_ATTEMPTS    = 6        # max orbit-launch attempts multiplier
 const DEFAULT_DR_FLOOR_FRAC   = 0.01      # floor on dR (fraction)
