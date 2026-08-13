@@ -140,7 +140,7 @@ CONFIG = {
     # Paths and run identity
     # =========================================================
     **build_data_paths(PROFILE_ROOT),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-restricted-core-logsearch.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-try1.csv"),
 }
 
 # Just some notes on the Draco runs and analysis.

@@ -1,7 +1,5 @@
 # ========================================================================================================================
-
 # ========================================================================================================================
-
 module OSPMPhysicsSpherical
 # This file is becoming very large and may need to be split into support and weights
 @info "OSPMPhysicsSpherical Karl-style loaded from" @__FILE__
@@ -298,6 +296,7 @@ function _balanced_launch_order(planned_indices::Vector{Int}, shells::Vector{Flo
 
     return launch_order
 end
+
 function _build_orbit_shells(R_star_m::Vector{Float64}, light_edges::Vector{Float64})
     shells = Float64[]
     sizehint!(shells, length(R_star_m) + length(light_edges))
