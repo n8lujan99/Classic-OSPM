@@ -1,84 +1,92 @@
 # OSPM_Config_Center — Carina
-# Only place that should have Galaxy-specific configuration variables
+# Karl-style Carina config.
+# Observational inputs will be supplied once the Carina tracer and LOSVD products are finalized.
+# The 3D light grid will be derived from the observed surface-density profile.
+# It is not an additional observational data set.
+# Shared solver, orbit-library, AI, deck, and runtime defaults are supplied by
+# OSPM/load_config.py. This file contains only Carina-specific authority.
 
 from pathlib import Path
 from Data.Data_Prep.Data_Paths import build_data_paths
 
-Galaxy = "Carina"
+LOCAL_DEBUG = False  # True for local debugging, False for production runs
 
-OSPM_ROOT    = Path(__file__).resolve().parent
-PROFILE_ROOT = OSPM_ROOT
+PROFILE_ROOT = Path(__file__).resolve().parent
+if not PROFILE_ROOT.exists(): raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
+
+INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
+FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
 CONFIG = {
-    # =========================================================
-    # Galaxy geometry (declared, never fitted)
-    # =========================================================
-    "RA0_DEG":          100.4029,
-    "DEC0_DEG":         -50.9661,
-    "DISTANCE_PC":      105000.0,
+    # Local debug control
+    "LOCAL_DEBUG": LOCAL_DEBUG, "FIXED_THETA": FIXED_THETA,
 
-    "PA_DEG":           65.0,
-    "AXIS_RATIO_Q":     1.0,
-    "R_HALF_LIGHT_PC":  250,
-    "R_MAX_STARS_PC":   1250.0,
-
-    "INCLINATION_DEG":  90.0,
-
-    # =========================================================
-    # Parameter space
-    # =========================================================
-    "PARAMETER_NAMES": ["rho_s", "r_s", "MBH"],
-    "INITIAL_THETA":   [1.0, 500.0, 0.0],
+    # Halo model and parameterization
+    "HALO_TYPE": "nonsingular_isothermal", "HALO_PARAMETERIZATION": "v0_rc",
+    "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"], "INITIAL_THETA": INITIAL_THETA,
     "THETA_BOUNDS": [
-        (1e-1, 1e6),
-        (200, 1e5),
-        (1.0, 2e6),
+        (0.0, 200.0),       # v0, km/s
+        (1.0, 5000.0),      # r_c, pc
+        (0.0, 5.0e6),       # MBH, Msun
+        (0.2, 20.0),        # M/L
     ],
 
-    ################################################################
-    # THE FOLLOWING IS ONLY FOR DATA GENERATION — DO NOT CHANGE
-    ################################################################
-    "RADIUS_DEG":   0.6,
-    "RUWE_MAX":     1.4,
-    "PAR_SNR_MIN":  5.0,
+    # Galaxy geometry
+    "RA0_DEG": 100.4029,
+    "DEC0_DEG": -50.9661,
+    "DISTANCE_PC": 105000.0,
+    "PA_DEG": 65.0,
+    "AXIS_RATIO_Q": 1.0,
+    "R_HALF_LIGHT_PC": 250.0,
+    "R_MAX_STARS_PC": 1250.0,
+    "INCLINATION_DEG": 90.0,
+    "V_SYS_KMS": None,  # TODO: set from prepared Carina velocity catalog.
 
-    "STAR_R_COL":    "r_pc",
-    "STAR_V_COL":    "vlos",
-    "STAR_VERR_COL": "vlos_err",
-    "RA_COL":        "ra",
-    "DEC_COL":       "dec",
-    "VLOS_COL":      "vlos",
-
-    ################################################################
-    # GLOBAL — IDENTICAL FOR ALL GALAXIES
-    ################################################################
-    "MODE":      "stellar",
-    "GALAXY":    Galaxy,
-    "HALO_TYPE": "nfw",
-
-    "NORBIT": 1000,
-
-    "BINNING": {
-        "MIN_BINS":         5,
-        "N_TARGET_CIRC":    5,
-        "MIN_PER_BIN_CIRC": 6,
+    # Stellar tracer and light model
+    "TRACER_CONSTRAINT_MODE": "density_3d",
+    "STELLAR_MODEL": {
+        "type": "karl_light_grid",
+        "grid_csv": str(PROFILE_ROOT / "carina_axisymmetric_light_grid_full.csv"),
+        "tracer_grid_csv": str(PROFILE_ROOT / "carina_axisymmetric_light_grid_abel_full.csv"),
+        "Ltot": 2.7e5,  # TODO: replace with adopted Carina luminosity.
+        "geometry": "axisymmetric_density_grid",
+        "q_axis_ratio": 1.0,  # TODO: replace with adopted intrinsic tracer flattening.
+        "R_cyl_col": "R_cyl_pc",
+        "z_col": "z_pc",
+        "nu_col": "nu_Lsun_pc3",
+        "volume_col": "cell_volume_pc3",
+        "luminosity_col": "cell_luminosity_Lsun",
+        "force_softening_pc": 0.2,
+        "force_nR": 96,
+        "force_nZ": 96,
+        "force_nphi": 32,
+        "source": "Carina_surface_brightness_TBD",
     },
 
-    "PEN_SPHERE_STRENGTH": 200,
-    "PEN_SPHERE_POWER":   2.0,
-    "PEN_SLOPE_STRENGTH": 5000,
+    # Data harvesting and quality
+    "RADIUS_DEG": 0.6,
+    "RUWE_MAX": 1.4,
+    "PAR_SNR_MIN": 5.0,
 
-    "REQUIRE_COLUMNS": ["rho_s","r_s","MBH","chi2","reward","status","proposal_id"],
-    "ALLOWED_STATUSES": ["todo","seed","pass","orbit_fail","numeric_fail","unknown_fail","forbidden"],
-    "FILL_DEFAULT_STATUS": "todo",
+    # Data-column authority
+    "STAR_R_COL": "r_pc",
+    "STAR_V_COL": "vlos",
+    "STAR_VERR_COL": "vlos_err",
+    "RA_COL": "ra",
+    "DEC_COL": "dec",
+    "VLOS_COL": "vlos",
 
-    "BATCH_SIZE": 250,
-    "MAX_RUNS":   100000,
+    # Observed products
+    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "carina_surface_brightness_profile.csv"),
+    "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "carina_kinematic_bins.csv"),
+    "DATA_CSV": str(PROFILE_ROOT / "carina_stars.csv"),
 
-    "N_WORKERS": 4,
+    # Galaxy-scale numerical domain
+    "MAX_DISTANCE": 5e3,
+    "MBH_LOG_FLOOR": 1.0e3,
+    "MBH_ZERO_FRACTION": 0.10,
 
-    "G":    6.67430e-11,
-    "Msun": 1.98847e30,
-
+    # Paths and run identity
     **build_data_paths(PROFILE_ROOT),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "carina-try1-density3d-abel.csv"),
 }
