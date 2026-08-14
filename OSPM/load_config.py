@@ -107,7 +107,7 @@ def _build_general_defaults(local_debug):
             "ORBIT_WARN_REGIONAL_FLOOR": 0.80,
             "ORBIT_WARN_MAX_REGIONAL_GAP": 0.15,
             "MODEL_OWNER_LIMIT": 0,
-            "THREADS_PER_MODEL": 8,
+            "THREADS_PER_MODEL": 20,
             "KARL_ALPHAT": 1.0,
             "KARL_LIGHT_REL_TOL": 0.01,
             "KARL_LIGHT_SIGMA_TOL": 2.0,
@@ -159,7 +159,7 @@ def _build_general_defaults(local_debug):
         "AI_RESET_ON_FLAT": True,
 
         # Search cadence
-        "FEEDBACK_BATCH_SIZE": 0,
+        "FEEDBACK_BATCH_SIZE": 12,
         "SEARCH_MIN_DISTANCE": 5e-4,
         "FILL_MIN_DISTANCE": 1.25e-4,
         "PROPOSAL_MAX_ATTEMPTS": 5000,
