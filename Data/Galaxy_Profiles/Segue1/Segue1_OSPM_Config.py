@@ -75,5 +75,5 @@ CONFIG = {
     # Paths and run identity
     **build_data_paths(PROFILE_ROOT),
     "DATA_CSV": str(PROFILE_ROOT/"Segue1_Simon_stars_v2.csv"),
-    "CSV_PATH": str(PROFILE_ROOT/"default"/"segue1-paper-bounds-expanded-mbh-phasevolume-try7-density3d-abel.csv"),
+    "CSV_PATH": str(PROFILE_ROOT/"default"/"segue1-paper-bounds-expanded-mbh-phasevolume-try8-density3d-abel.csv"),
 }

@@ -5,7 +5,7 @@
 from pathlib import Path
 from Data.Data_Prep.Data_Paths import build_data_paths
 
-LOCAL_DEBUG = False
+LOCAL_DEBUG = True
 
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
