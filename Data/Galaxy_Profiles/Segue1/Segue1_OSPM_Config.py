@@ -10,7 +10,7 @@
 
 from pathlib import Path
 from Data.Data_Prep.Data_Paths import build_data_paths
-LOCAL_DEBUG = True  # True for local debugging, False for production runs
+LOCAL_DEBUG = False  # True for local debugging, False for production runs
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists(): raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
 
