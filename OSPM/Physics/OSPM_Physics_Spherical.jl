@@ -396,14 +396,20 @@ function _balanced_launch_order(planned_indices::Vector{Int}, shells::Vector{Flo
     return launch_order
 end
 
-function _build_orbit_shells(R_star_m::Vector{Float64}, light_edges::Vector{Float64})
+# editting the following 2 to work with Draco and not just segue1
+
+function _build_orbit_shells(R_star_m::Vector{Float64}, light_edges::Vector{Float64}, spatial_edges::Vector{Float64}, max_shells::Int)
+    max_shells > 0 || error("Orbit shell budget must be positive; got max_shells=$max_shells")
+
     shells = Float64[]
     sizehint!(shells, length(R_star_m) + length(light_edges))
+
     @inbounds for r in R_star_m
         if isfinite(r) && r > 0.0
             push!(shells, r)
         end
     end
+
     @inbounds for j in 1:(length(light_edges) - 1)
         rlo = light_edges[j]
         rhi = light_edges[j + 1]
@@ -412,11 +418,86 @@ function _build_orbit_shells(R_star_m::Vector{Float64}, light_edges::Vector{Floa
             isfinite(rmid) && rmid > 0.0 && push!(shells, rmid)
         end
     end
+
     rlight_max = light_edges[end]
     isfinite(rlight_max) && rlight_max > 0.0 && push!(shells, rlight_max)
+
     sort!(shells)
     unique!(shells)
-    return shells
+
+    isempty(shells) && return shells
+
+    candidate_count = length(shells)
+
+    # Preserve the existing sparse-galaxy behavior exactly whenever it fits.
+    candidate_count <= max_shells && return shells
+
+    rmin = shells[1]
+    rmax = shells[end]
+
+    adaptive_shells = Float64[]
+    sizehint!(adaptive_shells, max_shells)
+
+    # Preserve the radial locations of the actual observational constraints.
+    for edges in (light_edges, spatial_edges)
+        @inbounds for j in 1:(length(edges) - 1)
+            rlo = edges[j]
+            rhi = edges[j + 1]
+
+            if isfinite(rlo) && isfinite(rhi) && rhi > max(rlo, 0.0)
+                rmid = rlo > 0.0 ? sqrt(rlo * rhi) : 0.5 * rhi
+
+                if isfinite(rmid) && rmid >= rmin && rmid <= rmax
+                    push!(adaptive_shells, rmid)
+                end
+            end
+        end
+
+        redge_max = edges[end]
+
+        if isfinite(redge_max) && redge_max >= rmin && redge_max <= rmax
+            push!(adaptive_shells, redge_max)
+        end
+    end
+
+    # Always preserve the radial extent of the original shell construction.
+    push!(adaptive_shells, rmin)
+    push!(adaptive_shells, rmax)
+
+    sort!(adaptive_shells)
+    unique!(adaptive_shells)
+
+    length(adaptive_shells) <= max_shells || error("Orbit shell budget $max_shells is too small to preserve $(length(adaptive_shells)) observational radial anchors; increase Norbit")
+
+    # Fill all remaining shell slots logarithmically so the inner galaxy keeps
+    # finer absolute radial resolution without tying shell count to Nstar.
+    nfill = max_shells - length(adaptive_shells)
+
+    if nfill > 0 && rmax > rmin
+        log_rmin = log(rmin)
+        log_span = log(rmax) - log_rmin
+
+        @inbounds for k in 1:nfill
+            frac = k / (nfill + 1)
+            push!(adaptive_shells, exp(log_rmin + frac * log_span))
+        end
+    end
+
+    sort!(adaptive_shells)
+    unique!(adaptive_shells)
+
+    println("[ORBIT SHELL GRID]",
+        " candidate=", candidate_count,
+        " budget=", max_shells,
+        " used=", length(adaptive_shells),
+        " compressed=true",
+        " N_light=", length(light_edges) - 1,
+        " N_kin=", length(spatial_edges) - 1,
+        " rmin_pc=", adaptive_shells[1] / pc,
+        " rmax_pc=", adaptive_shells[end] / pc,
+    )
+
+    return adaptive_shells
 end
 
 function _init_orbit_work(
@@ -456,13 +537,41 @@ function _init_orbit_work(
     Nvbin_eff = length(velocity_edges_use) - 1
     Nlosvd = Nspatial * Nvbin_eff
 
-    shells = _build_orbit_shells(R_star_m, light_edges)
+    force_geometry = haskey(ctx.halo, :stellar_model) ?
+        stellar_model_geometry(ctx.halo[:stellar_model]) :
+        :spherical_shell_grid
+    tracer_mode = _normalize_tracer_constraint_mode(tracer_constraint_mode)
+    stellar_model_state = haskey(ctx.halo, :stellar_model) ? normalize_stellar_model(ctx.halo[:stellar_model]) : nothing
+    tracer_axis_ratio = stellar_model_state === nothing ? 1.0 : max(abs(f64(get(stellar_model_state, :q_axis_ratio, 1.0))), 1.0e-6)
+    tracer_mode === :density_3d && stellar_model_state === nothing && error("density_3d tracer constraint requires a 3-D stellar model")
+    tracer_mode === :density_3d && force_geometry !== :axisymmetric_density_grid && error("density_3d tracer constraint requires geometry=axisymmetric_density_grid")
+
+    third_launches = force_geometry === :axisymmetric_density_grid ?
+        collect(range(0.0, 1.0; length=max(3, Ntheta_launch))) :
+        [1.0]
+
+    families_per_shell = (length(Lfrac) - 1) * length(third_launches) + 1
+    families_per_shell > 0 || error("Karl family grid requires at least one family per radial shell")
+
+    max_shells = Nbase_orbit ÷ families_per_shell
+    max_shells > 0 || error("Orbit library has only $Nbase_orbit base slots but requires $families_per_shell base slots per radial shell; increase Norbit")
+
+    shells = _build_orbit_shells(R_star_m, light_edges, spatial_edges, max_shells)
     isempty(shells) && error("Orbit shell grid has no finite positive radii")
     ctx.R[end] > shells[end] || error("Force grid does not cover orbit shell grid: force_rmax=$(ctx.R[end] / pc) pc shell_rmax=$(shells[end] / pc) pc")
 
     Nshells = length(shells)
 
     Nbase_orbit >= Nshells || error("Orbit library has $Nbase_orbit base slots for $Nshells required radial shells; increase Norbit")
+
+    full_phase_grid = Nshells * families_per_shell
+
+    Nbase_orbit >= full_phase_grid || error(
+        "Karl normalized family grid requires at least $full_phase_grid base orbits " *
+        "for Nshells=$Nshells, NLfrac=$(length(Lfrac)), and " *
+        "Nthird=$(length(third_launches)); got Nbase_orbit=$Nbase_orbit. " *
+        "Increase Norbit to at least $(2 * full_phase_grid).",
+    )
 
     A_losvd = zeros(Float64, Nlosvd, Norbit)
     A_light = zeros(Float64, Nlight, Norbit)
@@ -484,28 +593,6 @@ function _init_orbit_work(
     max_relative_energy_drift = fill(NaN, Nbase_orbit)
 
     phase_volume_state = init_karl_phase_volume_state(Nbase_orbit)
-
-    force_geometry = haskey(ctx.halo, :stellar_model) ?
-        stellar_model_geometry(ctx.halo[:stellar_model]) :
-        :spherical_shell_grid
-    tracer_mode = _normalize_tracer_constraint_mode(tracer_constraint_mode)
-    stellar_model_state = haskey(ctx.halo, :stellar_model) ? normalize_stellar_model(ctx.halo[:stellar_model]) : nothing
-    tracer_axis_ratio = stellar_model_state === nothing ? 1.0 : max(abs(f64(get(stellar_model_state, :q_axis_ratio, 1.0))), 1.0e-6)
-    tracer_mode === :density_3d && stellar_model_state === nothing && error("density_3d tracer constraint requires a 3-D stellar model")
-    tracer_mode === :density_3d && force_geometry !== :axisymmetric_density_grid && error("density_3d tracer constraint requires geometry=axisymmetric_density_grid")
-
-    third_launches = force_geometry === :axisymmetric_density_grid ?
-        collect(range(0.0, 1.0; length=max(3, Ntheta_launch))) :
-        [1.0]
-
-    full_phase_grid = Nshells * ((length(Lfrac) - 1) * length(third_launches) + 1)
-
-    Nbase_orbit >= full_phase_grid || error(
-        "Karl normalized family grid requires at least $full_phase_grid base orbits " *
-        "for Nshells=$Nshells, NLfrac=$(length(Lfrac)), and " *
-        "Nthird=$(length(third_launches)); got Nbase_orbit=$Nbase_orbit. " *
-        "Increase Norbit to at least $(2 * full_phase_grid).",
-    )
 
     family_grid = _build_family_launch_grid(Nbase_orbit, shells, Lfrac, third_launches, ctx.pot, ctx.frc, force_geometry)
     launch_order = _balanced_launch_order(family_grid.planned_indices, shells, Lfrac, third_launches, shell_band_count)
