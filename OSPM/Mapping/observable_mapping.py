@@ -135,7 +135,7 @@ def validate_light_grid(out, ltot):
     if unique_lenc.size == 0 or np.any(np.diff(unique_lenc) < -1e-12):
         raise ValueError("Lenc_frac must be monotonic non-decreasing")
     if not np.isclose(np.nanmax(lenc), 1.0, rtol=1e-8, atol=1e-10):
-        raise ValueError(f"Lenc_frac should end at 1; got {np.nanmax(lenc):.16g}")I 
+        raise ValueError(f"Lenc_frac should end at 1; got {np.nanmax(lenc):.16g}")
     return True
 
 
@@ -183,45 +183,32 @@ def cmd_plot_bins(args):
     sb_path = Path(args.surface_brightness)
     star_path = Path(args.stars)
     out_path = Path(args.out)
-
     sb = pd.read_csv(sb_path)
     stars = pd.read_csv(star_path)
-
     required_sb = {"R_inner_pc", "R_outer_pc", "q_axis_ratio"}
     required_stars = {"x_pc", "y_pc", "r_pc", "has_vlos"}
-
     missing_sb = required_sb - set(sb.columns)
     missing_stars = required_stars - set(stars.columns)
-
     if missing_sb:
         raise KeyError(f"Surface brightness file missing columns: {sorted(missing_sb)}")
     if missing_stars:
         raise KeyError(f"Star file missing columns: {sorted(missing_stars)}")
-
     q = float(sb["q_axis_ratio"].dropna().iloc[0])
-
     has_vlos = stars["has_vlos"].map(as_bool).to_numpy()
     vstars = stars.loc[has_vlos].copy()
-
     if len(vstars) == 0:
         raise ValueError("No stars with has_vlos=True.")
-
     x = vstars["x_pc"].to_numpy(float)
     y = vstars["y_pc"].to_numpy(float)
     r = vstars["r_pc"].to_numpy(float)
-
     kin_edges, kin_bins = make_min_count_bins( r, min_per_bin=args.min_stars, drop_partial=args.drop_partial_bins)
-
     r_keep_max = kin_edges[-1]
     keep = r <= r_keep_max
-
     x_plot = x[keep]
     y_plot = y[keep]
     r_plot = r[keep]
-
     sb_edges = np.unique(np.r_[sb["R_inner_pc"].to_numpy(float), sb["R_outer_pc"].to_numpy(float)])
     sb_edges = sb_edges[np.isfinite(sb_edges)]
-
     if args.bins_out is not None:
         bins_out = Path(args.bins_out)
         bins_out.parent.mkdir(parents=True, exist_ok=True)
@@ -513,57 +500,29 @@ def abel_grid_from_surface_brightness(sb, ltot, radius_col="R_pc", sigma_col="Si
 
     return R_inner, R_outer, Rg, Sg, nu, L_shell, light_frac, Lenc_frac, "spherical_abel_enclosed_light_grid"
 
-
 def cmd_build_light_grid(args):
     sb_path = Path(args.surface_brightness)
     out_path = Path(args.out)
-
     sb = pd.read_csv(sb_path)
-
-    shell = shell_grid_from_surface_brightness(sb, args.ltot)
-
-    if shell is None:
-        shell = abel_grid_from_surface_brightness(sb, args.ltot, radius_col=args.radius_col, sigma_col=args.sigma_col, n_radial=args.n_radial)
-
+    shell = abel_grid_from_surface_brightness(sb, args.ltot, radius_col=args.radius_col, sigma_col=args.sigma_col, n_radial=args.n_radial)
     R_inner, R_outer, Rg, Sg, nu, L_shell, light_frac, Lenc_frac, grid_geometry = shell
-
     theta = np.linspace(0.0, 0.5 * np.pi, args.n_theta)
-
     rows = []
     for r, rin, rout, sig, nval, lraw, lfrac, lenc in zip(Rg, R_inner, R_outer, Sg, nu, L_shell, light_frac, Lenc_frac):
         for th in theta:
-            rows.append({
-                "r_pc": r,
-                "R_inner_pc": rin,
-                "R_outer_pc": rout,
-                "theta_rad": th,
-                "nu_Lsun_pc3": nval,
-                "Sigma_Lsun_pc2": sig,
-                "cell_luminosity_Lsun": lraw / len(theta),
-                "light_frac": lfrac,
-                "Lenc_frac": lenc,
-                "geometry": grid_geometry,
-                "force_model": "spherical_enclosed_light",
-                "flattened_geometry": "metadata_only",
-                "density_coordinate": "r_pc",
-                "source_surface_brightness_csv": str(sb_path),
-            })
-
+            rows.append({"r_pc": r, "R_inner_pc": rin, "R_outer_pc": rout, "theta_rad": th, "nu_Lsun_pc3": nval, "Sigma_Lsun_pc2": sig, "cell_luminosity_Lsun": lraw / len(theta),
+                "light_frac": lfrac, "Lenc_frac": lenc, "geometry": grid_geometry, "force_model": "spherical_enclosed_light", "flattened_geometry": "metadata_only", "density_coordinate": "r_pc",
+                "source_surface_brightness_csv": str(sb_path)})
     out = pd.DataFrame(rows)
-
     for col in ["galaxy", "source", "preferred_profile", "radius_type", "q_axis_ratio", "ellipticity"]:
         if col in sb.columns:
             out[col] = sb[col].iloc[0]
-
     out["Ltot_Lsun"] = float(args.ltot)
     out["n_radial"] = int(len(Rg))
     out["n_theta"] = int(args.n_theta)
-
     validate_light_grid(out, args.ltot)
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
-
     print(f"Saved: {out_path}")
     print(f"N rows: {len(out)}")
     print(f"N radial: {len(Rg)}")
@@ -574,17 +533,13 @@ def cmd_build_light_grid(args):
     print(f"nu_Lsun_pc3 min/max: {out['nu_Lsun_pc3'].min()} {out['nu_Lsun_pc3'].max()}")
     print("validation: passed")
 
-
 def cmd_build_axisymmetric_light_grid(args):
     sb_path = Path(args.surface_brightness)
     out_path = Path(args.out)
 
     sb = pd.read_csv(sb_path)
 
-    shell = shell_grid_from_surface_brightness(sb, args.ltot)
-
-    if shell is None:
-        shell = abel_grid_from_surface_brightness( sb, args.ltot, radius_col=args.radius_col, sigma_col=args.sigma_col, n_radial=args.n_radial)
+    shell = abel_grid_from_surface_brightness(sb, args.ltot, radius_col=args.radius_col, sigma_col=args.sigma_col, n_radial=args.n_radial)
 
     R_inner, R_outer, Rg, Sg, nu_sph, L_shell, light_frac, Lenc_frac, source_geometry = shell
 
@@ -599,11 +554,10 @@ def cmd_build_axisymmetric_light_grid(args):
         raise ValueError("q_axis_ratio must be positive and finite")
 
     theta_edges = np.linspace(0.0, np.pi, args.n_theta + 1)
-    phi_full = 2.0 * np.pi
 
     rows = []
 
-    for ir, (rin, rout, rmid, sig, Lsh, lfrac, lenc) in enumerate( zip(R_inner, R_outer, Rg, Sg, L_shell, light_frac, Lenc_frac)):
+    for ir, (rin, rout, rmid, sig, Lsh, lfrac, lenc) in enumerate(zip(R_inner, R_outer, Rg, Sg, L_shell, light_frac, Lenc_frac)):
         if not (np.isfinite(rin) and np.isfinite(rout) and rout > rin and np.isfinite(Lsh) and Lsh >= 0.0):
             continue
 
@@ -631,7 +585,6 @@ def cmd_build_axisymmetric_light_grid(args):
             rows.append({
                 "shell_id": ir,
                 "theta_id": it,
-
                 "R_cyl_pc": R_cyl,
                 "z_pc": z,
                 "r_pc": r_spherical,
@@ -639,20 +592,16 @@ def cmd_build_axisymmetric_light_grid(args):
                 "theta_rad": th,
                 "theta_inner_rad": th0,
                 "theta_outer_rad": th1,
-
                 "R_inner_pc": rin,
                 "R_outer_pc": rout,
                 "Sigma_Lsun_pc2": sig,
-
                 "q_axis_ratio": q,
                 "nu_Lsun_pc3": nu_cell,
                 "cell_volume_pc3": cell_volume,
                 "cell_luminosity_Lsun": cell_luminosity,
-
                 "shell_luminosity_Lsun": Lsh,
                 "light_frac": lfrac,
                 "Lenc_frac": lenc,
-
                 "geometry": "axisymmetric_density_grid",
                 "flattened_geometry": "oblate_homeoid",
                 "density_coordinate": "m_pc",

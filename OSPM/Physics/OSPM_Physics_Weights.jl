@@ -10,6 +10,7 @@
 #   - standard LOSVD χ² block scoring
 #   - xmu / M-L helper functions
 # ========================================================================================================================
+
 function _prepare_wphase(wphase, n::Int; require_paired::Bool=true, pair_rtol::Float64=1.0e-12,)
     n > 0 || error("Norbit must be positive before preparing Karl phase volumes")
     wphase === nothing && error("Karl inverse phase volumes are required. Build and compact wphase " * "with OSPM_Physics_PhaseVolume.jl before calling the weight solver.")
@@ -147,8 +148,6 @@ end
     return (isfinite(x) && x > floor) ? x : floor
 end
 
-# ========================================================================================================================
-
 function losvd_width_at_fraction(v::Vector{Float64}, f::Vector{Float64}, frac::Float64)
     length(v) == length(f) || error("velocity and LOSVD arrays must match")
     length(v) >= 2 || return NaN
@@ -238,6 +237,7 @@ end
 # §3c  SHARED SPEAR LINEAR-ALGEBRA PRIMITIVES
 # ========================================================================================================================
 # Used by the expanded-Cm solver below.
+
 @inline function _spear_safe_ddS(x::Float64; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     isfinite(x) || return -floor
     x < 0.0 || error("SPEAR requires a strictly negative entropy Hessian")
@@ -254,6 +254,7 @@ end
 # The orbit solver returns only the orbit-weight part.  Slack variables are
 # internal SPEAR variables that carry the LOSVD residual term the way Karl's
 # entropy.f / spear.f system does.
+
 function _expanded_light_implies_normalization(A_light::Matrix{Float64}, light_target::Vector{Float64}; tol::Float64=1e-12)
     size(A_light, 1) == length(light_target) || return false
     isempty(light_target) && return false
@@ -290,16 +291,6 @@ function build_expanded_weights_initial(w_orbit::Vector{Float64}, A_losvd::Matri
     slack = losvd_target .- A_losvd * w_orbit
     return vcat(w_orbit, slack)
 end
-
-
-
-# ========================================================================================================================
-
-# ================================================================================================================================================================================================================================================
-
-# ================================================================================================================================================================================================================================================
-
-
 
 function karl_spear_build_Am(Cm::Matrix{Float64}, ddS::Vector{Float64}; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     Narr, nvar = size(Cm)
@@ -349,8 +340,6 @@ function _solve_spear_system(Am::Matrix{Float64}, rhs::Vector{Float64})
     all(isfinite, lambda) || error("Karl-like SPEAR solve produced nonfinite multipliers")
     return Vector{Float64}(lambda)
 end
-
-# ================================================================================================================================================================================================================================================
 
 function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, light_sigma::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64};
     Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, wphase=nothing, 
@@ -771,8 +760,6 @@ function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Mat
 
     return (w=Vector{Float64}(wnew), dw=Vector{Float64}(dw), lambda=Vector{Float64}(lambda), Am=Matrix{Float64}(Am), rhs=Vector{Float64}(rhs), active_bound=falses(Norbit), active_set_stabilized=true, active_set_failure_reason=:none, active_passes=1, recovery_locked_final=0, recovery_lock_peak=0, multi_release_recovery_total=0, n_active_bound=0, n_free_orbits_final=Norbit, n_activated_total=0, activated_events_total=0, boundary_events_total=0, max_batch_activated=0, last_batch_activated=0, last_boundary_batch_size=0, last_boundary_idx=0, last_boundary_candidate=Inf, n_release_candidates=0, max_release_candidates_seen=0, released_total=0, last_released_idx=0, last_released_multiplier=NaN, min_bound_multiplier=NaN, max_bound_multiplier=NaN, most_negative_bound_multiplier=0.0, bound_kkt_tolerance=bound_kkt_tol, weight_moved_to_floor=0.0, initial_min_trial_weight=initial_min_trial_weight, initial_min_trial_idx=initial_min_trial_idx, n_initial_violators=n_initial_violators, initial_n_negative_dw=initial_n_negative_dw, limiting_idx=limiting_idx, limiting_candidate=limiting_candidate, rcond_est=rcond_est, rcond_min=rcond_est, rcond_warn=rcond_warn, near_singular_spear_matrix=near_singular_spear_matrix, near_singular_seen=near_singular_spear_matrix, reduced_Am_rank=Narr, minimum_reduced_Am_rank=Narr, weak_constraint_row=0, svd_fallback_used=false, svd_fallback_count=0, svd_relative_residual=spear_system_relative_residual, max_svd_relative_residual=spear_system_relative_residual, svd_residual_tol=NaN, model=model, delY=base_delY, max_abs_dw=maximum(abs, dw), spear_rhs_l2=spear_rhs_l2, spear_system_residual_l2=spear_system_residual_l2, spear_system_relative_residual=spear_system_relative_residual, requested_step=apfac, stepfac=stepfac, step_safety=step_safety, step_limited=step_limited, limiting_weight=limiting_weight, limiting_dw=limiting_dw, min_orbit_weight=min_orbit_weight, min_updated_orbit_weight=min_updated_orbit_weight, min_updated_orbit_idx=min_updated_orbit_idx, n_nonpositive_orbits=n_nonpositive_orbits, n_below_floor=n_below_floor, n_at_floor=count(x -> x <= entropy_floor, orbit_after), n_at_floor_before=count(x -> x <= entropy_floor, orbit_before), n_at_floor_after=count(x -> x <= entropy_floor, orbit_after), n_negative_dw=count(<(0.0), orbit_dw), strict_cycle_visits=0, cycle_break_release_total=0, locked_release_candidates=0, release_trial_count=0, release_locked_count=0, degenerate_rebinds_total=0, release_locks_total=0, linearized_constraint_error_l2=linearized_constraint_error_l2, post_step_constraint_l2=post_step_constraint_l2)
 end
-
-
 
 function _svd_rank_info(Am::Matrix{Float64})
     F = svd(Am)
@@ -1427,10 +1414,10 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
     )
 end
 
-# ================================================================================================================================================================================================================================================
-# ================================================================================================================================================================================================================================================
+# ========================================================================================================================
 # CHI
 # ========================================================================================================================
+
 function karl_raw_spear_consistency_diagnostic(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     model = Cm * w_all
     rhs = target .- model

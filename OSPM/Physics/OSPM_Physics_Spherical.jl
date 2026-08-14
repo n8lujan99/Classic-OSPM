@@ -8,7 +8,6 @@ export build_R_halo_physical, halo_from_theta, tables_spherical, make_potential_
 include("OSPM_Physics_Support.jl")
 include("OSPM_Physics_PhaseVolume.jl")
 @info "OSPMPhysicsSpherical supports spherical frc(r,theta)->(fr,0) and axisymmetric frc(r,theta)->(fr,ftheta)"
-# ========================================================================================================================
 const DEFAULT_ORBIT_FILL_PCT = 0.85
 const DEFAULT_ORBIT_REGIONAL_FLOOR = 0.80
 const DEFAULT_ORBIT_MAX_REGIONAL_GAP = 0.25 
@@ -19,9 +18,51 @@ const DEFAULT_ORBIT_WARN_SUCCESS_PCT = 0.99
 const DEFAULT_ORBIT_WARN_REGIONAL_FLOOR = 0.80
 const DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP = 0.15
 
-# ========================================================================================================================
+@inline function _normalize_tracer_constraint_mode(mode)
+    mode_sym = Symbol(lowercase(String(mode)))
+    mode_sym in (:projected_light, :density_3d) || error("Unknown tracer_constraint_mode=$(mode). Use projected_light or density_3d")
+    return mode_sym
+end
+
+function _build_density_3d_target(stellar_model, constraint_edges::Vector{Float64})
+    stellar_model === nothing && error("density_3d tracer constraint requires STELLAR_MODEL")
+    tracer_model = copy(stellar_model)
+    if haskey(tracer_model, "tracer_grid_csv")
+        tracer_model["grid_csv"] = tracer_model["tracer_grid_csv"]
+    elseif haskey(tracer_model, :tracer_grid_csv)
+        tracer_model[:grid_csv] = tracer_model[:tracer_grid_csv]
+    end
+    grid = build_axisymmetric_light_grid_model(tracer_model)
+    q = max(abs(f64(grid.q)), 1.0e-6)
+    target = zeros(Float64, length(constraint_edges) - 1)
+    @inbounds for i in eachindex(grid.L_cell)
+        R = f64(grid.R_m[i])
+        z = f64(grid.z_m[i])
+        L = f64(grid.L_cell[i])
+        m = sqrt(R * R + (z / q) * (z / q))
+        ibin = _bin_index(constraint_edges, m)
+        ibin > 0 && isfinite(L) && L >= 0.0 && (target[ibin] += L)
+    end
+    total = sum(target)
+    isfinite(total) && total > 0.0 || error("density_3d tracer target has no luminosity inside the constraint grid")
+    target ./= total
+    return target
+end
+
+function _resolve_tracer_constraint_targets(mode::Symbol, stellar_model, projected_target::Vector{Float64}, projected_sigma::Vector{Float64}, constraint_edges::Vector{Float64})
+    if mode === :projected_light
+        return projected_target, projected_sigma
+    end
+    mode === :density_3d || error("Unsupported tracer constraint mode: $mode")
+    density_target = _build_density_3d_target(stellar_model, constraint_edges)
+    length(density_target) == length(projected_target) || error("density_3d target length does not match projected-light target length")
+    projected_sigma_safe = max.(abs.(projected_sigma), 1.0e-12)
+    fractional_sigma = projected_sigma_safe ./ max.(abs.(projected_target), 1.0e-12)
+    density_sigma = max.(abs.(density_target) .* fractional_sigma, projected_sigma_safe)
+    return density_target, density_sigma
+end
+
 # Work state
-# ========================================================================================================================
 mutable struct OrbitWorkState
     Norbit::Int
     Nbase_orbit::Int
@@ -58,6 +99,8 @@ mutable struct OrbitWorkState
     frc
     Lfrac
     force_geometry::Symbol
+    tracer_constraint_mode::Symbol
+    tracer_axis_ratio::Float64
 
     dt_frac_orbit::Float64
     t_deadline::UInt64
@@ -330,7 +373,8 @@ function _init_orbit_work(
     regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR,
     max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP,
     shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS,
-    coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY)
+    coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY,
+    tracer_constraint_mode="projected_light")
     iseven(Norbit) || error("Karl prograde/retrograde orbit pairing requires even Norbit because " * "Norbit is the final A-matrix column count")
 
     max_attempts_factor > 0 || error("max_attempts_factor must be positive")
@@ -388,6 +432,11 @@ function _init_orbit_work(
     force_geometry = haskey(ctx.halo, :stellar_model) ?
         stellar_model_geometry(ctx.halo[:stellar_model]) :
         :spherical_shell_grid
+    tracer_mode = _normalize_tracer_constraint_mode(tracer_constraint_mode)
+    stellar_model_state = haskey(ctx.halo, :stellar_model) ? normalize_stellar_model(ctx.halo[:stellar_model]) : nothing
+    tracer_axis_ratio = stellar_model_state === nothing ? 1.0 : max(abs(f64(get(stellar_model_state, :q_axis_ratio, 1.0))), 1.0e-6)
+    tracer_mode === :density_3d && stellar_model_state === nothing && error("density_3d tracer constraint requires a 3-D stellar model")
+    tracer_mode === :density_3d && force_geometry !== :axisymmetric_density_grid && error("density_3d tracer constraint requires geometry=axisymmetric_density_grid")
 
     third_launches = force_geometry === :axisymmetric_density_grid ?
         collect(range(0.0, 1.0; length=max(3, Ntheta_launch))) :
@@ -413,7 +462,7 @@ function _init_orbit_work(
         third_launches, family_grid.launch_r0, family_grid.launch_theta0, family_grid.launch_energy, family_grid.launch_lz,
         sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps,
         spatial_edges, light_edges, velocity_edges_use, shells, launch_order,
-        orbit_ctx, ctx.pot, ctx.frc, Lfrac, force_geometry,
+        orbit_ctx, ctx.pot, ctx.frc, Lfrac, force_geometry, tracer_mode, tracer_axis_ratio,
         dt_frac_orbit, t_deadline, fill_pct, regional_floor, max_regional_gap, shell_band_count, max(1, coverage_check_every), Threads.Atomic{Int}(first_coverage_check),
         A_losvd, A_light,
         success_flags, attempts_used, min_r_reached, rapo_list, failure_stage, launch_failure_state, sos_points, integration_points, integration_termination,
@@ -849,8 +898,8 @@ function _orbit_library_usable(st::OrbitWorkState, successful_columns::Vector{In
             println(
                 "[ORBIT LIBRARY BAD LIGHT ROW]",
                 " row=", row,
-                " R_inner_pc=", st.light_edges[row] / pc,
-                " R_outer_pc=", st.light_edges[row + 1] / pc,
+                " constraint_inner_pc=", st.light_edges[row] / pc,
+                " constraint_outer_pc=", st.light_edges[row + 1] / pc,
                 " activity=", activity,
             )
         end
@@ -878,8 +927,7 @@ function _build_compact_karl_wphase(st::OrbitWorkState, successful_columns::Vect
         error("compacted Karl wphase length does not match successful orbit columns")
     return wphase_use, phase_diag
 end
-# ========================================================================================================================
-# ========================================================================================================================
+
 # This is the main worker function that runs in a thread to compute orbits and fill the A-matrix.
 function _orbit_worker!(st::OrbitWorkState)
 
@@ -1138,7 +1186,15 @@ function _orbit_worker!(st::OrbitWorkState)
         fill!(col_light, 0.0)
 
         @inbounds for k in 1:Nhits
-            il = _bin_index(st.light_edges, s_arr[k])
+            constraint_radius = s_arr[k]
+            if st.tracer_constraint_mode === :density_3d
+                rk = f64(r[k])
+                sk, ck = _sincos_safe(f64(theta[k]))
+                R_intrinsic = rk * sk
+                z_intrinsic = rk * ck
+                constraint_radius = sqrt(R_intrinsic * R_intrinsic + (z_intrinsic / st.tracer_axis_ratio) * (z_intrinsic / st.tracer_axis_ratio))
+            end
+            il = _bin_index(st.light_edges, constraint_radius)
             ik = _bin_index(st.spatial_edges, s_arr[k])
             il > 0 && (col_light[il] += 1.0)
             ik == 0 && continue
@@ -1180,8 +1236,6 @@ function _orbit_worker!(st::OrbitWorkState)
     return nothing
 end
 
-# ========================================================================================================================
-# ========================================================================================================================
 function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, helper::Bool=false)
     admitted = false
     lock(st.worker_gate)
@@ -1241,10 +1295,8 @@ function _close_orbit_phase!(st::OrbitWorkState; next_phase::Int=2)
     return nothing
 end
 
-# ========================================================================================================================
-# ========================================================================================================================
 # Main A-matrix builder: maps orbital weights → Karl observables.
-function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
+function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
     Nstar = length(R_star_m)
     @assert length(has_vlos) == Nstar
     @assert length(v_star_mps) == Nstar
@@ -1253,6 +1305,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     Nstar == 0 && return zeros(Float64, 0, Norbit)
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
+    tracer_constraint_mode_sym = _normalize_tracer_constraint_mode(tracer_constraint_mode)
     prewarm_stellar_force_cache(stellar_model_jl)
     light_edges_force = light_bin_edges === nothing ? resolve_karl_spatial_edges(kinematic_bin_edges) : resolve_karl_light_edges(light_bin_edges)
     required_force_rmax_m = 1.5 * light_edges_force[end]
@@ -1265,7 +1318,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     end
     st = _init_orbit_work(Norbit, R_star_m, has_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=nsteps, Lfrac=Lfrac, dt_frac_orbit=dt_frac_orbit, max_attempts_factor=max_attempts_factor,
         t_deadline=t_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch,
-        fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count)
+        fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, tracer_constraint_mode=tracer_constraint_mode_sym)
     Threads.atomic_xchg!(st.phase, 1)
     nworkers = threaded ? Threads.nthreads() : 1
     if threaded && nworkers > 1
@@ -1290,7 +1343,8 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     wphase_use, phase_diag = _build_compact_karl_wphase(st, coverage.successful_columns)
     A = vcat(A_losvd, A_light)
     if diag
-        losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial = observed_targets_karl(R_star_m, has_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl, light_edges=st.light_edges)
+        losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = observed_targets_karl(R_star_m, has_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl, light_edges=st.light_edges)
+        light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, stellar_model_jl, projected_light_target, projected_light_sigma, st.light_edges)
         return (
             A,
             Dict(
@@ -1332,6 +1386,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
                 "light_sigma" => light_sigma,
                 "counts_by_spatial" => counts_by_spatial,
                 "force_geometry" => String(st.force_geometry),
+                "tracer_constraint_mode" => String(tracer_constraint_mode_sym),
                 "wphase" => wphase_use,
                 "phase_volume_convention" => string(phase_diag.convention),
                 "phase_volume_normalization" => string(phase_diag.normalization),
@@ -1355,10 +1410,10 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     return A
 end
 
-# Batch evaluator: Karl-style binned LOSVD + projected-light fit.
+# Batch evaluator: Karl-style binned LOSVD + selectable projected-light or 3-D tracer-density constraint.
 # This is the Heart of the whole Pipeline 
 # and is where all the parallelism is implemented
-function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
+function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
     nrow, nbatch = size(thetas)
     surface_brightness_profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     light_rel_tol > 0.0 || error("light_rel_tol must be positive")
@@ -1384,6 +1439,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     )
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
+    tracer_constraint_mode_sym = _normalize_tracer_constraint_mode(tracer_constraint_mode)
     prewarm_stellar_force_cache(stellar_model_jl)
     light_edges_force = light_bin_edges === nothing ? resolve_karl_spatial_edges(kinematic_bin_edges) : resolve_karl_light_edges(light_bin_edges)
     required_force_rmax_m = 1.5 * light_edges_force[end]
@@ -1575,11 +1631,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         continue
                     end
                     ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, required_rmax_m=required_force_rmax_m, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
-                    ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every)
+                    ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every, tracer_constraint_mode=tracer_constraint_mode_sym)
                     work_states[i] = ws
                     planned_base_orbits[i] = length(ws.launch_order)
                     if i == 1
-                        println("[KARL BIN DIAG] N_light=", ws.Nlight, " N_kin=", ws.Nspatial, " Nvbin=", ws.Nvbin, " A_light_rows=", size(ws.A_light, 1), " A_losvd_rows=", size(ws.A_losvd, 1), " R_light_max_pc=", ws.light_edges[end] / pc, " R_kin_max_pc=", ws.spatial_edges[end] / pc, " R_shell_max_pc=", ws.shells[end] / pc, " N_shells=", ws.Nshells, " N_constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin)
+                        println("[KARL BIN DIAG] tracer_constraint_mode=", tracer_constraint_mode_sym, " N_constraint=", ws.Nlight, " N_kin=", ws.Nspatial, " Nvbin=", ws.Nvbin, " A_constraint_rows=", size(ws.A_light, 1), " A_losvd_rows=", size(ws.A_losvd, 1), " R_constraint_max_pc=", ws.light_edges[end] / pc, " R_kin_max_pc=", ws.spatial_edges[end] / pc, " R_shell_max_pc=", ws.shells[end] / pc, " N_shells=", ws.Nshells, " N_constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin)
                     end
                     Threads.atomic_add!(scheduler_counters.orbit_models, 1)
                     try
@@ -1669,23 +1725,26 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
-                    losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial = observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws.spatial_edges, ws.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl, light_edges=ws.light_edges)
+                    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws.spatial_edges, ws.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl, light_edges=ws.light_edges)
+                    light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, stellar_model_jl, projected_light_target, projected_light_sigma, ws.light_edges)
                     light_fit_mask = trues(length(light_target))
-                    any(light_fit_mask) || error("No projected-light bins lie completely inside the kinematic footprint")
+                    any(light_fit_mask) || error("No tracer-constraint bins are available")
                     A_light_fit = A_light
                     light_target_fit = light_target
                     light_sigma_fit = light_sigma
                     if i == 1
                         println(
-                            "[KARL LIGHT FIT DIAG] N_light_full=", length(light_target),
-                            " N_light_fit=", length(light_target_fit),
-                            " R_light_full_max_pc=", ws.light_edges[end] / pc,
-                            " R_light_fit_max_pc=", maximum(ws.light_edges[2:end][light_fit_mask]) / pc,
+                            "[KARL TRACER FIT DIAG] mode=", tracer_constraint_mode_sym,
+                            " N_constraint_full=", length(light_target),
+                            " N_constraint_fit=", length(light_target_fit),
+                            " R_constraint_full_max_pc=", ws.light_edges[end] / pc,
+                            " R_constraint_fit_max_pc=", maximum(ws.light_edges[2:end][light_fit_mask]) / pc,
                             " R_kin_max_pc=", ws.spatial_edges[end] / pc,
                             " target_full_sum=", sum(light_target),
                             " target_fit_sum=", sum(light_target_fit),
-                            " light_sigma_min=", minimum(light_sigma_fit),
-                            " light_sigma_max=", maximum(light_sigma_fit),
+                            " target_vs_projected_l1=", sum(abs.(light_target_fit .- projected_light_target)),
+                            " constraint_sigma_min=", minimum(light_sigma_fit),
+                            " constraint_sigma_max=", maximum(light_sigma_fit),
                         )
                     end
                     Threads.atomic_add!(scheduler_counters.weight_models, 1)
@@ -1736,11 +1795,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         fitted_indices = findall(light_fit_mask)
                         jfull = fitted_indices[jfit]
                         println(
-                            "[KARL LIGHT FAIL BIN]",
+                            "[KARL TRACER FAIL BIN]",
                             " fit_idx=", jfit,
                             " full_idx=", jfull,
-                            " R_inner_pc=", ws.light_edges[jfull] / pc,
-                            " R_outer_pc=", ws.light_edges[jfull + 1] / pc,
+                            " constraint_inner_pc=", ws.light_edges[jfull] / pc,
+                            " constraint_outer_pc=", ws.light_edges[jfull + 1] / pc,
                             " target=", light_target_fit[jfit],
                             " model=", light_model_fit[jfit],
                             " relative_error=", light_relative_fit[jfit],
@@ -1753,7 +1812,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         )
                     else
                         println(
-                            "[KARL LIGHT FAIL BIN] unavailable=true",
+                            "[KARL TRACER FAIL BIN] unavailable=true",
                             " weight_count=", length(w),
                             " expected_weight_count=", size(A_light_fit, 2),
                             " chi2_losvd=", chi2_losvd[i],
@@ -1833,6 +1892,4 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     raw_phase_volume_max, raw_phase_volume_dynamic_range, normalized_phase_volume_min, normalized_phase_volume_max, wphase_min, wphase_max, wphase_dynamic_range, wphase_pair_max_relative_mismatch)
 end
 
-# ========================================================================================================================
-# ========================================================================================================================
 end # module
