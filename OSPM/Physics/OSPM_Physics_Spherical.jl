@@ -62,6 +62,62 @@ function _resolve_tracer_constraint_targets(mode::Symbol, stellar_model, project
     return density_target, density_sigma
 end
 
+function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{Float64}, target::Vector{Float64}, sigma::Vector{Float64}, constraint_edges::Vector{Float64}; model_index::Int=1)
+    size(A_constraint, 1) == length(target) || error("Tracer diagnostic target length mismatch")
+    length(target) == length(sigma) || error("Tracer diagnostic sigma length mismatch")
+    size(A_constraint, 2) == length(w) || error("Tracer diagnostic weight length mismatch")
+    length(constraint_edges) == length(target) + 1 || error("Tracer diagnostic edge length mismatch")
+    iseven(length(w)) || error("Tracer diagnostic requires prograde/retrograde orbit pairs")
+
+    model = A_constraint * w
+    Nbase = length(w) ÷ 2
+
+    @inbounds for ib in eachindex(target)
+        pair_contrib = zeros(Float64, Nbase)
+        n_support = 0
+
+        for c in 1:Nbase
+            jpro = 2 * c - 1
+            jret = 2 * c
+            apro = A_constraint[ib, jpro]
+            aret = A_constraint[ib, jret]
+
+            if apro > 0.0 || aret > 0.0
+                n_support += 1
+            end
+
+            pair_contrib[c] = apro * w[jpro] + aret * w[jret]
+        end
+
+        total_contrib = sum(pair_contrib)
+        effective_support = 0.0
+
+        if isfinite(total_contrib) && total_contrib > 0.0
+            p = pair_contrib ./ total_contrib
+            effective_support = 1.0 / sum(abs2, p)
+        end
+
+        signed_sigma_residual = (model[ib] - target[ib]) / max(abs(sigma[ib]), 1.0e-12)
+
+        println("[TRACER BIN DIAG]",
+            " i=", model_index,
+            " bin=", ib,
+            " R_inner_pc=", constraint_edges[ib] / pc,
+            " R_outer_pc=", constraint_edges[ib + 1] / pc,
+            " target=", target[ib],
+            " model=", model[ib],
+            " sigma=", sigma[ib],
+            " signed_sigma_residual=", signed_sigma_residual,
+            " abs_sigma_residual=", abs(signed_sigma_residual),
+            " N_supporting_base_orbits=", n_support,
+            " support_fraction=", n_support / Nbase,
+            " effective_N_base_orbits=", effective_support,
+        )
+    end
+
+    return nothing
+end
+
 # Work state
 mutable struct OrbitWorkState
     Norbit::Int
@@ -1758,6 +1814,9 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     end
 
                 _store_solver_diagnostics!(i, wdiag)
+                if length(w) == size(A_light_fit, 2) && all(isfinite, w)
+                    _print_tracer_bin_diagnostics(A_light_fit, w, light_target_fit, light_sigma_fit, ws.light_edges; model_index=i)
+                end
                 finite_weight_solution = length(w) == size(A_losvd, 2) && all(isfinite, w)
                 cl = Inf
 
