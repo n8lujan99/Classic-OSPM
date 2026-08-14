@@ -14,7 +14,7 @@ LOCAL_DEBUG = False  # True for local debugging, False for production runs
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists(): raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
 
-INITIAL_THETA = [18, 300, 2.4e6, 3]
+INITIAL_THETA = [9.23, 14.24, 450400.0, 0.415]
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
 CONFIG = {
