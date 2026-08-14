@@ -52,13 +52,14 @@ const DEFAULT_MIN_STARS_PER_BIN = 20       # minimum stars per projected radial 
 const DEFAULT_NVBIN             = 21       # LOSVD velocity bins per radial aperture
 const DEFAULT_KARL_ALPHA        = 1e-4     # legacy value retained only for call compatibility
 const DEFAULT_KARL_ALPHAT       = 1.0      # Karl-style data-mismatch multiplier in entropy mode
-const DEFAULT_KARL_MAXITER      = 60       # Karl SPEAR/Newton iteration cap
-const DEFAULT_KARL_ENTROPY_FLOOR = 1e-30   # floor for log(w_i*wphase_i) entropy
-const DEFAULT_KARL_APFAC         = 0.005      # Karl SPEAR step factor (testing was 1.0)
+
+const DEFAULT_KARL_MAXITER       = 250       # Karl SPEAR/Newton iteration cap
+const DEFAULT_KARL_ENTROPY_FLOOR = 1e-30    # initialization/numerical floor only; not the positivity boundary
+const DEFAULT_KARL_APFAC         = 0.01      # maximum requested SPEAR step
 const DEFAULT_KARL_LIGHT_REL_TOL = 0.01
 const DEFAULT_KARL_DELTA_CHI2_ITER_TOL = 0.3
 const DEFAULT_KARL_INVALID_SIGMA_SENTINEL = -666.0
-const DEFAULT_KARL_STEP_SAFETY = 0.90
+const DEFAULT_KARL_STEP_SAFETY = 0.90        # take 90% of zero-weight boundary when step-limited
 const DEFAULT_KARL_SPEAR_RCOND_WARN = 1.0e-12
 
 
