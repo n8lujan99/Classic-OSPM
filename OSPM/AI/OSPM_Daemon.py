@@ -873,6 +873,7 @@ def run_daemon(config, physics_engine):
     if tracer_constraint_mode not in ("projected_light", "density_3d"):
         raise ValueError("TRACER_CONSTRAINT_MODE must be 'projected_light' or 'density_3d'")
     alphat = float(opt("KARL_ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
+    apfac = float(opt("KARL_APFAC", "apfac", default=0.01))
     light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
     light_sigma_tol = float(opt("KARL_LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
     delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
@@ -964,7 +965,7 @@ def run_daemon(config, physics_engine):
     nstar_vlos = int(np.count_nonzero(valid_vlos))
     print(
         f"[Daemon] Karl batch mode ON — Norbit={Norbit}, Nbase_orbit={Norbit // 2}, Nstar_vlos={nstar_vlos}, "
-        f"Nvbin={nvbin}, Ntheta_launch={ntheta_launch}, tracer_constraint_mode={tracer_constraint_mode}, alphat={alphat}, "
+        f"Nvbin={nvbin}, Ntheta_launch={ntheta_launch}, tracer_constraint_mode={tracer_constraint_mode}, alphat={alphat}, apfac={apfac}, "
         f"light_rel_tol={light_rel_tol}, light_sigma_tol={light_sigma_tol}, delta_chi2_iter_tol={delta_chi2_iter_tol}, "
         f"halo_q={halo_q_axis_ratio}, karl_halo_params_active={karl_halo_params is not None}",
         flush=True,
@@ -1151,6 +1152,7 @@ def run_daemon(config, physics_engine):
                     Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
                     Main.seval("_tracer_constraint_mode_jl = " + json.dumps(tracer_constraint_mode))
                     Main.seval(f"_alphat_jl = {float(alphat)!r}")
+                    Main.seval(f"_apfac_jl = {float(apfac)!r}")
                     Main.seval(f"_light_rel_tol_jl = {float(light_rel_tol)!r}")
                     Main.seval(f"_light_sigma_tol_jl = {float(light_sigma_tol)!r}")
                     Main.seval(f"_delta_chi2_iter_tol_jl = {float(delta_chi2_iter_tol)!r}")
@@ -1186,6 +1188,7 @@ stellar_model=_stellar_model_jl,
 surface_brightness_profile=_sb_profile_jl,
 tracer_constraint_mode=_tracer_constraint_mode_jl,
 alphat=_alphat_jl,
+apfac=_apfac_jl,
 light_rel_tol=_light_rel_tol_jl,
 light_sigma_tol=_light_sigma_tol_jl,
 delta_chi2_iter_tol=_delta_chi2_iter_tol_jl,

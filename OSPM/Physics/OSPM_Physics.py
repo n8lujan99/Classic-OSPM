@@ -460,6 +460,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     Nvbin = int( opt("NVBIN", "Nvbin", "nvbin", default=21))
     Ntheta_launch = int( opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9))
     alphat = float(opt("KARL_ALPHAT", "alphat", default=cfg.get("ALPHAT", 1.0)))
+    apfac = float(opt("KARL_APFAC", "apfac", default=0.01))
     light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
     light_sigma_tol = float(opt("KARL_LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
     delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
@@ -578,6 +579,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     _Main.seval(f"_ospm_Norbit = {int(Norbit)}")
     _Main.seval("_ospm_halo_type = " + json.dumps(str(halo_type)))
     _Main.seval(f"_ospm_alphat = {alphat!r}")
+    _Main.seval(f"_ospm_apfac = {apfac!r}")
     _Main.seval(f"_ospm_light_rel_tol = {light_rel_tol!r}")
     _Main.seval(f"_ospm_light_sigma_tol = {light_sigma_tol!r}")
     _Main.seval(f"_ospm_delta_chi2_iter_tol = {delta_chi2_iter_tol!r}")
@@ -602,7 +604,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     
     out = _Main.seval("""OSPMPhysicsSpherical.evaluate_batch_theta(_ospm_theta, _ospm_R, _ospm_valid, _ospm_v, _ospm_ve, _ospm_sini, _ospm_Norbit, _ospm_halo_type;
             stellar_model=_ospm_stellar_model, surface_brightness_profile=_ospm_sb_profile, tracer_constraint_mode=_ospm_tracer_constraint_mode,
-            alphat=_ospm_alphat, light_rel_tol=_ospm_light_rel_tol, light_sigma_tol=_ospm_light_sigma_tol, delta_chi2_iter_tol=_ospm_delta_chi2_iter_tol,
+            alphat=_ospm_alphat, apfac=_ospm_apfac, light_rel_tol=_ospm_light_rel_tol, light_sigma_tol=_ospm_light_sigma_tol, delta_chi2_iter_tol=_ospm_delta_chi2_iter_tol,
             entropy_floor=_ospm_entropy_floor, maxiter=_ospm_maxiter, timeout_s=_ospm_timeout_s, fill_pct=_ospm_orbit_fill_pct, regional_floor=_ospm_orbit_regional_floor,
             max_regional_gap=_ospm_orbit_max_regional_gap, shell_band_count=_ospm_orbit_shell_bands, coverage_check_every=_ospm_orbit_coverage_check_every,
             warn_fill_pct=_ospm_orbit_warn_fill_pct, warn_success_pct=_ospm_orbit_warn_success_pct, warn_regional_floor=_ospm_orbit_warn_regional_floor,
