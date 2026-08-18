@@ -63,6 +63,7 @@ const DEFAULT_KARL_STEP_SAFETY = 0.90        # take 90% of zero-weight boundary 
 const DEFAULT_KARL_SPEAR_RCOND_WARN = 1.0e-12
 
 
+
 # ========================================================================================================================
 # §2  TYPES, CACHES, INLINE HELPERS
 # ========================================================================================================================
@@ -84,7 +85,6 @@ end
 
 const _HALO_CTX_CACHE = Dict{Tuple{Float64,Float64,Float64,Float64,UInt64,Symbol,Float64,Int,Float64,Float64},HaloContext}()
 const _HALO_LOCK = ReentrantLock()
-
 # ========================================================================================================================
 # §3  SMALL UTILITIES
 # ========================================================================================================================
@@ -98,6 +98,7 @@ const _HALO_LOCK = ReentrantLock()
     end
     h
 end
+
 logspace10(a,b,n)=n==1 ? [10.0^a] : (da=(b-a)/(n-1); [10.0^(a+(i-1)*da) for i in 1:n])
 build_R_halo_physical(n; rmin=1e-3, rmax=300.0)=logspace10(log10(rmin), log10(rmax), n)
 @inline function _quant(x::Float64; digits::Int=10)
@@ -518,9 +519,6 @@ end
 include("OSPM_Physics_Weights.jl")
 include("OSPM_Physics_Force.jl")
 
-# ========================================================================================================================
-# §5  ORBIT INTEGRATION (THIS IS THE CURRENT PLACE FOR EDITS)
-# ========================================================================================================================
 @inline function derivs(s::SVector{4,Float64}, Lz::Float64, frc, R)
     invalid = SVector(NaN, NaN, NaN, NaN)
     Rcyl, z, vR, vz = s

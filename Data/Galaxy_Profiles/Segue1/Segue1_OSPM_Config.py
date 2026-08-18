@@ -10,7 +10,9 @@
 
 from pathlib import Path
 from Data.Data_Prep.Data_Paths import build_data_paths
+
 LOCAL_DEBUG = False  # True for local debugging, False for production runs
+
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists(): raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
 
@@ -39,13 +41,13 @@ CONFIG = {
     "R_HALF_LIGHT_PC": 29.4,
     "R_MAX_STARS_PC": 120.0,
     "INCLINATION_DEG": 90.0,
-    "V_SYS_KMS": 208.419339,  # Systemic velocity from Segue1_Simon_stars_v2.csv preparation.
+    "V_SYS_KMS": 208.5667270167265,  # Systemic velocity from rebuilt Simon+2011 Table 3 sample.
     # Stellar tracer and light model
     "TRACER_CONSTRAINT_MODE": "density_3d",  # Use "projected_light" to restore the current baseline.
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
-        "grid_csv": str(PROFILE_ROOT / "segue1_NO09_axisymmetric_light_grid_full.csv"),
-        "tracer_grid_csv": str(PROFILE_ROOT / "segue1_NO09_axisymmetric_light_grid_abel_full.csv"),
+        "grid_csv": str(PROFILE_ROOT / "Segue1_stellar_force_grid.csv"),
+        "tracer_grid_csv": str(PROFILE_ROOT / "Segue1_tracer_density_3d.csv"),
         "Ltot": 340.0,
         "geometry": "axisymmetric_density_grid",
         "q_axis_ratio": 1.0,
@@ -60,20 +62,28 @@ CONFIG = {
         "force_nphi": 32,
         "source": "Niederste-Ostholt2009_Fig7_digitized",
     },
+    # Segue 1 data contract
+    "STAR_R_COL": "r_pc",
+    "STAR_V_COL": "vlos",
+    "STAR_VERR_COL": "vlos_err",
+    "RA_COL": "ra_deg",
+    "DEC_COL": "dec_deg",
+    "VLOS_COL": "vlos",
+    
     # Data harvesting and quality
     "RADIUS_DEG": 0.6,
     "RUWE_MAX": 1.4,
     "PAR_SNR_MIN": 5.0,
     # Observed products
-    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "segue1_NO09_surface_brightness_full.csv"),
-    "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "segue1_simon_kinematic_bins_16.csv"),
-    "DATA_CSV": str(PROFILE_ROOT / "Segue1_Simon_stars_v2.csv"),
+    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Segue1_surface_brightness.csv"),
+    "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Segue1_losvd_bins.csv"),
+    "DATA_CSV": str(PROFILE_ROOT / "Segue1_stars.csv"),
     # Galaxy-scale numerical domain
     "MAX_DISTANCE": 2e3,
     "MBH_LOG_FLOOR": 1.0e3,
     "MBH_ZERO_FRACTION": 0.10,
     # Paths and run identity
     **build_data_paths(PROFILE_ROOT),
-    "DATA_CSV": str(PROFILE_ROOT/"Segue1_Simon_stars_v2.csv"),
-    "CSV_PATH": str(PROFILE_ROOT/"default"/"segue1-paper-bounds-expanded-mbh-phasevolume-try9-density3d-abel.csv"),
+    "DATA_CSV": str(PROFILE_ROOT/"Segue1_stars.csv"),
+    "CSV_PATH": str(PROFILE_ROOT/"default"/"Segue1-try1-density3d-abel.csv"),
 }

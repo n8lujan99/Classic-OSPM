@@ -15,12 +15,14 @@ INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None 
 
 CONFIG = { 
+    # Local debug control
     "LOCAL_DEBUG": LOCAL_DEBUG, "FIXED_THETA": FIXED_THETA, 
-    # Halo and search space 
+    # Halo model and parameterization 
     "HALO_TYPE": "nonsingular_isothermal", 
     "HALO_PARAMETERIZATION": "v0_rc", 
     "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"], 
     "INITIAL_THETA": INITIAL_THETA, 
+    
     "THETA_BOUNDS": [ 
         (0.0, 200.0), 
         (1.0, 5000.0), 
@@ -32,7 +34,7 @@ CONFIG = {
     "DEC0_DEG": 57.9153, 
     "DISTANCE_PC": 76000.0, 
     "PA_DEG": 90.0, 
-    "AXIS_RATIO_Q": 0.70, 
+    "AXIS_RATIO_Q": 0.69, 
     "R_HALF_LIGHT_PC": 221.0, 
     "R_MAX_STARS_PC": 1500.0, 
     "INCLINATION_DEG": 78.0, 
@@ -40,11 +42,12 @@ CONFIG = {
     # Intrinsic tracer constraint. 
     # Keep the old grid for the stellar force so this isolates the tracer change, 
     # exactly as in the Segue 1 density_3d test. 
+    # Stellar tracer and light model
     "TRACER_CONSTRAINT_MODE": "density_3d", 
     "STELLAR_MODEL": { 
         "type": "karl_light_grid", 
-        "grid_csv": str(PROFILE_ROOT / "draco_oden_kirchen2001_axisymmetric_light_grid_full.csv"), 
-        "tracer_grid_csv": str(PROFILE_ROOT / "draco_oden_kirchen2001_axisymmetric_light_grid_abel_full.csv"), 
+        "grid_csv": str(PROFILE_ROOT / "Draco_stellar_force_grid.csv"),
+        "tracer_grid_csv": str(PROFILE_ROOT / "Draco_tracer_density_3d.csv"), #large 3d profile
         "Ltot": 2.7e5, 
         "geometry": "axisymmetric_density_grid", 
         "q_axis_ratio": 0.69, 
@@ -71,9 +74,9 @@ CONFIG = {
     "VLOS_COL": "vlos", 
 
     # Observed products 
-    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "draco_oden_kirchen2001_surface_brightness_profile.csv"), 
-    "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "draco_walker2023_kinematic_bins_20.csv"), 
-    "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"), 
+    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Draco_surface_brightness.csv"), # binned  surface brightness profile
+    "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Draco_losvd_bins.csv"), 
+    "DATA_CSV": str(PROFILE_ROOT / "Draco_stars.csv"), 
 
     # Draco needs the longer weight solve. 
     "OBSERVABLES": {"KARL_MAXITER": 4000, "KARL_APFAC": 1.0}, 
@@ -94,5 +97,5 @@ CONFIG = {
     "PEN_SPHERE_STRENGTH": 200, 
 
     # Run identity 
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-try3-density3d-abel.csv"), 
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-try1-density3d-abel.csv"), 
     } 

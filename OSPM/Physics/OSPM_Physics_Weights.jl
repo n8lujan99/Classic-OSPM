@@ -144,6 +144,7 @@ function karl_initial_weights_from_wphase(wphase::Vector{Float64}; paired::Bool=
     return w
 end
 
+
 @inline function _safe_positive(x::Float64; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     return (isfinite(x) && x > floor) ? x : floor
 end

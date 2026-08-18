@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
-#######################################################################################################################
-#
-#
-#
-#######################################################################################################################
-
 import argparse
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.optimize import LinearConstraint, minimize
-from scipy.interpolate import PchipInterpolator
 
 def as_bool(x):
     if isinstance(x, bool):
@@ -54,27 +46,20 @@ def make_min_count_bins(r_pc, min_per_bin=20, drop_partial=False):
     r = r[np.isfinite(r)]
     if len(r) == 0:
         raise ValueError("No finite radii for kinematic bins.")
-
     groups = [r[i:i + min_per_bin] for i in range(0, len(r), min_per_bin)]
-
     if len(groups) > 1 and len(groups[-1]) < min_per_bin:
         if drop_partial:
             groups.pop()
         else:
             groups[-2] = np.concatenate((groups[-2], groups[-1]))
             groups.pop()
-
     if not groups:
         raise ValueError("No complete kinematic bins.")
-
     edges = np.empty(len(groups) + 1, dtype=float)
     edges[0] = 0.0
-
     for i in range(1, len(groups)):
         edges[i] = 0.5 * (groups[i - 1][-1] + groups[i][0])
-
     edges[-1] = np.nextafter(groups[-1][-1], np.inf)
-
     rows = []
     for i, group in enumerate(groups):
         rows.append({
@@ -103,10 +88,7 @@ def warn_if_extrapolating(R_old, R_new, label="R_pc"):
     below = int(np.count_nonzero(new_good < lo))
     above = int(np.count_nonzero(new_good > hi))
     if below or above:
-        print(
-            f"WARNING: {below + above} target {label} values fall outside the source surface-brightness range "
-            f"[{lo:.6g}, {hi:.6g}]. Edge extrapolation will be used."
-        )
+        print(f"WARNING: {below + above} target {label} values fall outside the source surface-brightness range " f"[{lo:.6g}, {hi:.6g}]. Edge extrapolation will be used.")
 
 def validate_surface_brightness_bins(out, bins):
     required = {"R_inner_pc", "R_outer_pc", "R_pc", "light_frac", "area_pc2"}
@@ -153,25 +135,18 @@ def validate_light_grid(out, ltot):
     return True
 
 def validate_axisymmetric_grid(out, ltot):
-    required = {
-        "R_cyl_pc", "z_pc", "r_pc", "m_pc", "theta_rad", "q_axis_ratio",
-        "nu_Lsun_pc3", "cell_volume_pc3", "cell_luminosity_Lsun",
-        "geometry", "flattened_geometry", "density_coordinate",
-    }
+    required = {"R_cyl_pc", "z_pc", "r_pc", "m_pc", "theta_rad", "q_axis_ratio","nu_Lsun_pc3", "cell_volume_pc3", "cell_luminosity_Lsun","geometry", "flattened_geometry", "density_coordinate"}
     missing = required - set(out.columns)
     if missing:
         raise KeyError(f"axisymmetric light grid missing columns: {sorted(missing)}")
-
     if not (out["geometry"].astype(str) == "axisymmetric_density_grid").all():
         raise ValueError("axisymmetric grid geometry must be axisymmetric_density_grid")
-
     q = out["q_axis_ratio"].to_numpy(float)
     R = out["R_cyl_pc"].to_numpy(float)
     z = out["z_pc"].to_numpy(float)
     vol = out["cell_volume_pc3"].to_numpy(float)
     lum = out["cell_luminosity_Lsun"].to_numpy(float)
     nu = out["nu_Lsun_pc3"].to_numpy(float)
-
     if not np.all(np.isfinite(q)) or np.any(q <= 0.0):
         raise ValueError("q_axis_ratio must be positive and finite")
     if not np.all(np.isfinite(R)) or np.any(R < 0.0):
@@ -184,11 +159,9 @@ def validate_axisymmetric_grid(out, ltot):
         raise ValueError("cell_luminosity_Lsun must be finite and non-negative")
     if not np.all(np.isfinite(nu)) or np.any(nu < 0.0):
         raise ValueError("nu_Lsun_pc3 must be finite and non-negative")
-
     Lsum = float(np.sum(lum))
     if not np.isclose(Lsum, float(ltot), rtol=1e-8, atol=max(1e-8, 1e-10 * abs(float(ltot)))):
         raise ValueError(f"axisymmetric light grid luminosity sum {Lsum:.16g} does not match Ltot {float(ltot):.16g}")
-
     return True
 
 def cmd_plot_bins(args):
@@ -228,24 +201,18 @@ def cmd_plot_bins(args):
         print(f"Saved bins: {bins_out}")
 
     fig, ax = plt.subplots(figsize=(8, 8))
-
     ax.scatter(x_plot, y_plot, s=12, alpha=0.75, label="vlos stars in full bins")
-
     for k, rr in enumerate(kin_edges):
         plot_ellipse( ax, rr, q, linewidth=1.8, linestyle="-", label=f"kinematic bins ({args.min_stars} stars)" if k == 0 else None)
-
     for k, rr in enumerate(sb_edges):
         plot_ellipse( ax, rr, q, linewidth=1.1, linestyle="--", label="surface-brightness bins" if k == 0 else None)
-
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x [pc]")
     ax.set_ylabel("y [pc]")
     ax.set_title(args.title or "Projected stars with kinematic and surface-brightness bins")
     ax.legend(loc="best")
-
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)
-
     print(f"Saved: {out_path}")
     print(f"N vlos stars total: {len(vstars)}")
     print(f"N vlos stars plotted: {len(r_plot)}")
@@ -256,69 +223,51 @@ def cmd_rebin_sb(args):
     sb_path = Path(args.surface_brightness)
     bins_path = Path(args.target_bins)
     out_path = Path(args.out)
-
     sb = pd.read_csv(sb_path)
     bins = pd.read_csv(bins_path)
-
     required_sb = {"R_pc", "Sigma"}
     required_bins = {"R_inner_pc", "R_outer_pc"}
-
     missing_sb = required_sb - set(sb.columns)
     missing_bins = required_bins - set(bins.columns)
-
     if missing_sb:
         raise KeyError(f"surface brightness file missing columns: {sorted(missing_sb)}")
     if missing_bins:
         raise KeyError(f"target bin file missing columns: {sorted(missing_bins)}")
-
     R_inner = bins["R_inner_pc"].to_numpy(float)
     R_outer = bins["R_outer_pc"].to_numpy(float)
-
     if "R_mid_pc" in bins.columns:
         R_mid = bins["R_mid_pc"].to_numpy(float)
     else:
         R_mid = 0.5 * (R_inner + R_outer)
-
     if not np.all(np.isfinite(R_inner)) or not np.all(np.isfinite(R_outer)):
         raise ValueError("target bin edges contain non-finite values")
     if not np.all(R_outer > R_inner):
         raise ValueError("target bins require R_outer_pc > R_inner_pc for every row")
-
     R_old = sb["R_pc"].to_numpy(float)
     Sigma_old = sb["Sigma"].to_numpy(float)
-
     warn_if_extrapolating(R_old, R_mid, label="R_mid_pc")
-
     if args.method == "loglog":
         Sigma_new = interp_loglog(R_old, Sigma_old, R_mid)
     elif args.method == "linear":
         Sigma_new = interp_linear(R_old, Sigma_old, R_mid)
     else:
         raise ValueError("method must be 'loglog' or 'linear'")
-
     if "Sigma_err" in sb.columns:
         Sigma_err_new = interp_linear(R_old, sb["Sigma_err"].to_numpy(float), R_mid)
     else:
         Sigma_err_new = np.full_like(Sigma_new, np.nan)
-
     q = first_finite(sb["q_axis_ratio"], 1.0) if "q_axis_ratio" in sb.columns else 1.0
     ellipticity = 1.0 - q if np.isfinite(q) else np.nan
-
     area_pc2 = np.pi * q * (R_outer**2 - R_inner**2)
     light = Sigma_new * area_pc2
-
     good_light = np.isfinite(light) & (light >= 0.0)
     if not np.any(good_light):
         raise ValueError("rebinned light is zero or non-finite everywhere")
-
     light = np.where(good_light, light, 0.0)
     light_sum = light.sum()
-
     if not np.isfinite(light_sum) or light_sum <= 0.0:
         raise ValueError("rebinned light sum is not positive")
-
     light_frac = light / light_sum
-
     out = pd.DataFrame({
         "R_inner_pc": R_inner,
         "R_outer_pc": R_outer,
@@ -334,22 +283,16 @@ def cmd_rebin_sb(args):
         "source_target_bins_csv": str(bins_path),
         "rebin_method": args.method,
     })
-
     for col in ["galaxy", "source", "preferred_profile", "radius_type", "pc_per_arcmin_assumed", "note"]:
         if col in sb.columns:
             out[col] = sb[col].iloc[0]
-
     if "bin_id" in bins.columns:
         out.insert(0, "bin_id", bins["bin_id"].to_numpy(int))
-
     if "N_vlos" in bins.columns:
         out["N_vlos"] = bins["N_vlos"].to_numpy(int)
-
     validate_surface_brightness_bins(out, bins)
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
-
     print(f"Saved: {out_path}")
     print(f"N target bins: {len(bins)}")
     print(f"N output bins: {len(out)}")
@@ -357,180 +300,15 @@ def cmd_rebin_sb(args):
     print(f"q_axis_ratio: {q}")
     print(f"method: {args.method}")
     print("validation: passed")
-
-def fit_monotonic_log_profile(R, S, E):
-    x = np.log(R)
-    y = np.log(S)
-    sigma_log = np.maximum(E / S, 1e-3)
-    n = len(R)
-    dx = np.diff(x)
-
-    A = np.zeros((n - 1, n))
-    for i in range(n - 1):
-        A[i, i] = 1.0
-        A[i, i + 1] = -1.0
-    monotonic_constraint = LinearConstraint(A, 0.0, np.inf)
-
-    if n > 2:
-        D = np.zeros((n - 2, n))
-        for i in range(n - 2):
-            D[i, i] = 1.0 / dx[i]
-            D[i, i + 1] = -(1.0 / dx[i] + 1.0 / dx[i + 1])
-            D[i, i + 2] = 1.0 / dx[i + 1]
-    else:
-        D = np.zeros((0, n))
-
-    def objective(z, lam):
-        chi = np.mean(((z - y) / sigma_log)**2)
-        rough = np.mean((D @ z)**2) if len(D) else 0.0
-        return float(chi + lam * rough)
-
-    def gradient(z, lam):
-        grad = 2.0 * (z - y) / (sigma_log**2 * n)
-        if len(D):
-            grad += 2.0 * lam * (D.T @ (D @ z)) / len(D)
-        return grad
-
-    def hessian(lam):
-        H = 2.0 * np.diag(1.0 / (sigma_log**2 * n))
-        if len(D):
-            H += 2.0 * lam * (D.T @ D) / len(D)
-        return H
-
-    def solve(lam, start):
-        result = minimize(
-            lambda z: objective(z, lam),
-            start,
-            jac=lambda z: gradient(z, lam),
-            method="SLSQP",
-            constraints=[monotonic_constraint],
-            options={"ftol": 1e-12, "maxiter": 20000},
-        )
-
-        if result.success and np.max(np.diff(result.x)) <= 1e-8:
-            return result.x
-
-        print(f"[ABEL MONO RETRY] lambda={lam:.6g} SLSQP={result.message}")
-
-        H = hessian(lam)
-        result = minimize(
-            lambda z: objective(z, lam),
-            start,
-            jac=lambda z: gradient(z, lam),
-            hess=lambda z: H,
-            method="trust-constr",
-            constraints=[monotonic_constraint],
-            options={
-                "maxiter": 5000,
-                "gtol": 1e-10,
-                "xtol": 1e-12,
-                "barrier_tol": 1e-12,
-                "verbose": 0,
-            },
-        )
-
-        max_up = float(np.max(np.diff(result.x)))
-        if not result.success and max_up > 1e-8:
-            raise RuntimeError(f"Monotonic surface-brightness fit failed: {result.message}")
-
-        return result.x
-
-    def diagnostics(z):
-        Sfit = np.exp(z)
-        resid = (Sfit - S) / E
-        rms = float(np.sqrt(np.mean(resid**2)))
-        maxabs = float(np.max(np.abs(resid)))
-        return rms, maxabs, resid
-
-    z0 = np.minimum.accumulate(y.copy())
-    z0 = solve(0.0, z0)
-    rms0, max0, _ = diagnostics(z0)
-
-    if rms0 > 1.0 or max0 > 2.0:
-        print(
-            f"[ABEL MONO WARNING] monotonic fit alone exceeds tolerance: "
-            f"rms_sigma={rms0:.3f} max_sigma={max0:.3f}"
-        )
-        zfit = z0
-        lam_fit = 0.0
-    else:
-        lam_lo = 0.0
-        z_lo = z0
-        lam_hi = 1e-8
-
-        while lam_hi <= 1e12:
-            z_trial = solve(lam_hi, z_lo)
-            rms_trial, max_trial, _ = diagnostics(z_trial)
-
-            if rms_trial > 1.0 or max_trial > 2.0:
-                break
-
-            lam_lo = lam_hi
-            z_lo = z_trial
-            lam_hi *= 3.0
-        else:
-            lam_fit = lam_lo
-            zfit = z_lo
-            rms_fit, max_fit, resid_fit = diagnostics(zfit)
-            print(
-                f"[ABEL MONO] N={len(R)} lambda={lam_fit:.6g} "
-                f"chi2={np.sum(resid_fit**2):.3f} "
-                f"rms_sigma={rms_fit:.3f} max_sigma={max_fit:.3f} "
-                f"max_upward_step={np.max(np.diff(zfit)):.3e}"
-            )
-            return zfit
-
-        for _ in range(40):
-            if lam_lo == 0.0:
-                lam_mid = 0.5 * lam_hi
-            else:
-                lam_mid = np.sqrt(lam_lo * lam_hi)
-
-            z_mid = solve(lam_mid, z_lo)
-            rms_mid, max_mid, _ = diagnostics(z_mid)
-
-            if rms_mid <= 1.0 and max_mid <= 2.0:
-                lam_lo = lam_mid
-                z_lo = z_mid
-            else:
-                lam_hi = lam_mid
-
-        lam_fit = lam_lo
-        zfit = z_lo
-
-    rms_fit, max_fit, resid_fit = diagnostics(zfit)
-
-    print(
-        f"[ABEL MONO] N={len(R)} lambda={lam_fit:.6g} "
-        f"chi2={np.sum(resid_fit**2):.3f} "
-        f"rms_sigma={rms_fit:.3f} max_sigma={max_fit:.3f} "
-        f"max_upward_step={np.max(np.diff(zfit)):.3e}"
-    )
-
-    return zfit
-
-def smooth_log_profile(R_pc, Sigma, Sigma_err=None, n_grid=512):
+##################################################################################################################################################
+##################################################################################################################################################
+def smooth_log_profile(R_pc, Sigma, n_grid=512):
     R_pc = np.asarray(R_pc, float)
     Sigma = np.asarray(Sigma, float)
 
-    if Sigma_err is None:
-        Sigma_err = 0.1 * Sigma
-        print("[ABEL MONO WARNING] Sigma_err unavailable; using 10% fractional errors.")
-    else:
-        Sigma_err = np.asarray(Sigma_err, float)
-
-    good = (
-        np.isfinite(R_pc)
-        & np.isfinite(Sigma)
-        & np.isfinite(Sigma_err)
-        & (R_pc > 0.0)
-        & (Sigma > 0.0)
-        & (Sigma_err > 0.0)
-    )
-
+    good = np.isfinite(R_pc) & np.isfinite(Sigma) & (R_pc > 0) & (Sigma > 0)
     R = R_pc[good]
     S = Sigma[good]
-    E = Sigma_err[good]
 
     if len(R) < 4:
         raise ValueError("Need at least four finite positive surface-brightness points.")
@@ -538,31 +316,27 @@ def smooth_log_profile(R_pc, Sigma, Sigma_err=None, n_grid=512):
     order = np.argsort(R)
     R = R[order]
     S = S[order]
-    E = E[order]
-
-    x = np.log(R)
-    zfit = fit_monotonic_log_profile(R, S, E)
-    Sfit = np.exp(zfit)
-    profile = PchipInterpolator(x, zfit, extrapolate=False)
 
     rmin = max(R[0] * 0.1, 1e-3)
     rmax = R[-1] * 2.0
     Rg = np.geomspace(rmin, rmax, n_grid)
+
     Sg = np.empty_like(Rg)
 
     inner = Rg < R[0]
     middle = (Rg >= R[0]) & (Rg <= R[-1])
     outer = Rg > R[-1]
 
-    dS_dR2 = (Sfit[1] - Sfit[0]) / (R[1]**2 - R[0]**2)
-    dS_dR2 = min(float(dS_dR2), 0.0)
-    S_center = Sfit[0] - dS_dR2 * R[0]**2
+    dS_dR2 = (S[1] - S[0]) / (R[1]**2 - R[0]**2)
+    if dS_dR2 > 0.0:
+        dS_dR2 = 0.0
+    S_center = S[0] - dS_dR2 * R[0]**2
     Sg[inner] = S_center + dS_dR2 * Rg[inner]**2
 
-    Sg[middle] = np.exp(profile(np.log(Rg[middle])))
+    Sg[middle] = interp_loglog(R, S, Rg[middle])
 
     n_tail = min(6, len(R))
-    outer_slope = np.polyfit(x[-n_tail:], zfit[-n_tail:], 1)[0]
+    outer_slope = np.polyfit(np.log(R[-n_tail:]), np.log(S[-n_tail:]), 1)[0]
     outer_slope = min(float(outer_slope), 0.0)
 
     if np.any(outer):
@@ -570,44 +344,40 @@ def smooth_log_profile(R_pc, Sigma, Sigma_err=None, n_grid=512):
         t = (Rout - R[-1]) / (rmax - R[-1])
         t = np.clip(t, 0.0, 1.0)
         taper = 1.0 - 10.0 * t**3 + 15.0 * t**4 - 6.0 * t**5
-        powerlaw = Sfit[-1] * (Rout / R[-1])**outer_slope
+        powerlaw = S[-1] * (Rout / R[-1])**outer_slope
         Sg[outer] = powerlaw * taper
 
     Sg = np.maximum(Sg, 0.0)
 
     return Rg, Sg
 
+##################################################################################################################################################
+##################################################################################################################################################
 def abel_deproject_spherical(R_grid_pc, Sigma_grid):
     R = np.asarray(R_grid_pc, float)
     S = np.asarray(Sigma_grid, float)
-
     if not np.all(np.diff(R) > 0):
         raise ValueError("R_grid_pc must be strictly increasing.")
-
     dSdR = np.gradient(S, R)
     nu = np.zeros_like(R)
-
     for i, r in enumerate(R):
         Rp = R[i:].copy()
         dS = dSdR[i:].copy()
-
         if len(Rp) < 2:
             nu[i] = nu[i - 1] if i > 0 else 0.0
             continue
-
         u = np.sqrt(np.maximum(Rp**2 - r**2, 0.0))
         integrand = -dS / Rp
         val = np.trapezoid(integrand, u) / np.pi
         nu[i] = max(val, 0.0) if np.isfinite(val) else 0.0
-
     good = np.isfinite(nu) & (nu > 0)
     if np.count_nonzero(good) < 3:
         raise ValueError("Abel deprojection produced too few positive density points.")
-
     nu_clean = np.interp(np.log(R), np.log(R[good]), np.log(nu[good]), left=np.log(nu[good][0]), right=np.log(nu[good][-1]))
-
     return np.exp(nu_clean)
 
+##################################################################################################################################################
+##################################################################################################################################################
 def cumulative_luminosity_from_nu(r_pc, nu):
     r = np.asarray(r_pc, float)
     n = np.asarray(nu, float)
@@ -615,12 +385,16 @@ def cumulative_luminosity_from_nu(r_pc, nu):
         raise ValueError("r_pc and nu must be non-empty arrays of equal length.")
     r_ext = np.r_[0.0, r]
     n_ext = np.r_[n[0], n]
-    x_ext = r_ext**3
     Lenc_ext = np.zeros_like(r_ext)
     for i in range(1, len(r_ext)):
-        dx = x_ext[i] - x_ext[i - 1]
-        Lenc_ext[i] = Lenc_ext[i - 1] + (4.0 * np.pi / 3.0) * 0.5 * dx * (n_ext[i - 1] + n_ext[i])
+        dr = r_ext[i] - r_ext[i - 1]
+        shell0 = 4.0 * np.pi * r_ext[i - 1]**2 * n_ext[i - 1]
+        shell1 = 4.0 * np.pi * r_ext[i]**2 * n_ext[i]
+        Lenc_ext[i] = Lenc_ext[i - 1] + 0.5 * dr * (shell0 + shell1)
     return Lenc_ext[1:]
+
+##################################################################################################################################################
+##################################################################################################################################################
 
 def shell_grid_from_surface_brightness(sb, ltot):
     using_shell_bins = {"R_inner_pc", "R_outer_pc", "light_frac"}.issubset(sb.columns)
@@ -632,15 +406,7 @@ def shell_grid_from_surface_brightness(sb, ltot):
         else:
             Rg = 0.5 * (R_inner + R_outer)
         light_frac = sb["light_frac"].to_numpy(float)
-        good = (
-            np.isfinite(R_inner)
-            & np.isfinite(R_outer)
-            & np.isfinite(Rg)
-            & np.isfinite(light_frac)
-            & (R_outer > R_inner)
-            & (light_frac >= 0.0)
-        )
-
+        good = (np.isfinite(R_inner) & np.isfinite(R_outer) & np.isfinite(Rg) & np.isfinite(light_frac) & (R_outer > R_inner) & (light_frac >= 0.0))
         R_inner = R_inner[good]
         R_outer = R_outer[good]
         Rg = Rg[good]
@@ -667,27 +433,22 @@ def abel_grid_from_surface_brightness(sb, ltot, radius_col="R_pc", sigma_col="Si
             raise KeyError(f"surface-brightness CSV missing column: {col}")
     R_raw = sb[radius_col].to_numpy(float)
     Sigma_raw = sb[sigma_col].to_numpy(float)
-    Sigma_err_raw = None
-    if "Sigma_err" in sb.columns:
-        Sigma_err_raw = sb["Sigma_err"].to_numpy(float)
-    Rg, Sg = smooth_log_profile(R_raw, Sigma_raw, Sigma_err=Sigma_err_raw, n_grid=n_radial)
+    Rg, Sg = smooth_log_profile(R_raw, Sigma_raw, n_grid=n_radial)
     nu_raw = abel_deproject_spherical(Rg, Sg)
-    R_inner = np.r_[0.0, 0.5 * (Rg[1:] + Rg[:-1])]
-    R_outer = np.r_[0.5 * (Rg[1:] + Rg[:-1]), Rg[-1]]
-    nu_inner = np.interp(R_inner, Rg, nu_raw, left=nu_raw[0], right=nu_raw[-1])
-    nu_outer = np.interp(R_outer, Rg, nu_raw, left=nu_raw[0], right=nu_raw[-1])
-    shell_volume_sph = (4.0 * np.pi / 3.0) * (R_outer**3 - R_inner**3)
-    nu_shell = 0.5 * (nu_inner + nu_outer)
-    L_shell_raw = nu_shell * shell_volume_sph
-    Ltot_raw = np.sum(L_shell_raw)
+    Lenc_raw = cumulative_luminosity_from_nu(Rg, nu_raw)
+    Ltot_raw = Lenc_raw[-1]
     if not np.isfinite(Ltot_raw) or Ltot_raw <= 0:
-        raise ValueError("Integrated luminosity from deprojected profile is not positive.")
+        raise ValueError("Cumulative luminosity from deprojected profile is not positive.")
     scale = float(ltot) / Ltot_raw
     nu = nu_raw * scale
-    L_shell = L_shell_raw * scale
-    light_frac = L_shell / np.sum(L_shell)
-    Lenc = np.cumsum(L_shell)
+    Lenc = Lenc_raw * scale
     Lenc_frac = Lenc / Lenc[-1]
+    
+    R_inner = np.r_[0.0, 0.5 * (Rg[1:] + Rg[:-1])]
+    R_outer = np.r_[0.5 * (Rg[1:] + Rg[:-1]), Rg[-1]]
+    
+    L_shell = np.diff(np.r_[0.0, Lenc])
+    light_frac = L_shell / np.sum(L_shell)
     return R_inner, R_outer, Rg, Sg, nu, L_shell, light_frac, Lenc_frac, "spherical_abel_enclosed_light_grid"
 
 def cmd_build_light_grid(args):
@@ -726,9 +487,7 @@ def cmd_build_light_grid(args):
 def cmd_build_axisymmetric_light_grid(args):
     sb_path = Path(args.surface_brightness)
     out_path = Path(args.out)
-
     sb = pd.read_csv(sb_path)
-
     if args.radial_model == "shell":
         shell = shell_grid_from_surface_brightness(sb, args.ltot)
         if shell is None:
@@ -737,48 +496,36 @@ def cmd_build_axisymmetric_light_grid(args):
         shell = abel_grid_from_surface_brightness(sb, args.ltot, radius_col=args.radius_col, sigma_col=args.sigma_col, n_radial=args.n_radial)
     else:
         raise ValueError("radial_model must be 'shell' or 'abel'")
-
     R_inner, R_outer, Rg, Sg, nu_sph, L_shell, light_frac, Lenc_frac, source_geometry = shell
-
     if args.q_axis_ratio is not None:
         q = float(args.q_axis_ratio)
     elif "q_axis_ratio" in sb.columns:
         q = first_finite(sb["q_axis_ratio"], 1.0)
     else:
         q = 1.0
-
     if not np.isfinite(q) or q <= 0.0:
         raise ValueError("q_axis_ratio must be positive and finite")
-
     theta_edges = np.linspace(0.0, np.pi, args.n_theta + 1)
-
     rows = []
 
     for ir, (rin, rout, rmid, sig, Lsh, lfrac, lenc) in enumerate(zip(R_inner, R_outer, Rg, Sg, L_shell, light_frac, Lenc_frac)):
         if not (np.isfinite(rin) and np.isfinite(rout) and rout > rin and np.isfinite(Lsh) and Lsh >= 0.0):
             continue
-
         shell_volume_oblate = (4.0 * np.pi / 3.0) * q * (rout**3 - rin**3)
-
         for it in range(args.n_theta):
             th0 = theta_edges[it]
             th1 = theta_edges[it + 1]
             th = 0.5 * (th0 + th1)
-
             cos0 = np.cos(th0)
             cos1 = np.cos(th1)
             theta_fraction = abs(cos0 - cos1) / 2.0
-
             cell_volume = shell_volume_oblate * theta_fraction
             cell_luminosity = Lsh * theta_fraction
-
             m_pc = rmid
             R_cyl = m_pc * np.sin(th)
             z = q * m_pc * np.cos(th)
-            r_spherical = np.sqrt(R_cyl * R_cyl + z * z)
-
+            r_spherical = np.sqrt(R_cyl * R_cyl + z * z
             nu_cell = cell_luminosity / cell_volume if cell_volume > 0.0 else 0.0
-
             rows.append({
                 "shell_id": ir,
                 "theta_id": it,
@@ -858,6 +605,7 @@ def _require_columns(df, required, label):
     if missing:
         raise KeyError(f"{label} missing columns: {sorted(missing)}")
 
+
 def _halo_density_msun_pc3_from_args(R_cyl_pc, z_pc, args):
     R = np.asarray(R_cyl_pc, float)
     z = np.asarray(z_pc, float)
@@ -928,6 +676,7 @@ def _halo_density_msun_pc3_from_args(R_cyl_pc, z_pc, args):
 
     raise ValueError(f"Unknown halo_type: {args.halo_type}")
 
+
 def validate_gden_products(out, args):
     required = {
         "shell_id", "theta_id", "R_cyl_pc", "z_pc", "r_pc", "m_pc",
@@ -963,6 +712,7 @@ def validate_gden_products(out, args):
         raise ValueError(f"gden stellar mass sum {msum:.16g} does not match ML*Ltot {expected_mstar:.16g}")
 
     return True
+
 
 def cmd_build_gden_products(args):
     grid_path = Path(args.light_grid)
@@ -1058,6 +808,7 @@ def cmd_build_gden_products(args):
     print(f"total dMhalo [Msun]: {out['dMhalo_Msun'].sum():.12g}")
     print("validation: passed")
 
+
 def build_parser():
     p = argparse.ArgumentParser(description="OSPM observable mapping utilities.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1136,10 +887,12 @@ def build_parser():
 
     return p
 
+
 def main():
     p = build_parser()
     args = p.parse_args()
     args.func(args)
+
 
 if __name__ == "__main__":
     main()
