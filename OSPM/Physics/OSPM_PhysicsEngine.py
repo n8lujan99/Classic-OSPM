@@ -130,6 +130,14 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     min_stars_per_bin = int(_cfg_get(cfg, "MIN_STARS_PER_BIN", "min_stars_per_bin", 20))
     Nvbin = int(_cfg_get(cfg, "NVBIN", "Nvbin", 21))
     Ntheta_launch = int(_cfg_get(cfg, "NTHETA_LAUNCH", "Ntheta_launch", 9))
+    losvd_target_mode = str(_cfg_get(cfg, "LOSVD_TARGET_MODE", "losvd_target_mode", "current")).strip().lower()
+    if losvd_target_mode not in ("current", "karl_resolved_stars", "karl_mode0_observables"):
+        raise ValueError("LOSVD_TARGET_MODE must be 'current', 'karl_resolved_stars', or 'karl_mode0_observables'")
+    karl_observables_csv = _cfg_get(cfg, "KARL_OBSERVABLES_CSV", "karl_observables_csv", None)
+    if losvd_target_mode == "karl_mode0_observables":
+        if karl_observables_csv is None or not str(karl_observables_csv).strip():
+            raise ValueError("KARL_OBSERVABLES_CSV is required for LOSVD_TARGET_MODE='karl_mode0_observables'")
+        karl_observables_csv = str(karl_observables_csv)
     lambda_light = float( cfg.get("LAMBDA_LIGHT", cfg.get("lambda_light", cfg.get("LAMBDA_OCC", cfg.get("lambda_occ", 1.0)))))
     if min_stars_per_bin <= 0:
         raise ValueError("MIN_STARS_PER_BIN/min_stars_per_bin must be positive")
@@ -166,5 +174,6 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     engine.__kinematic_bin_edges_pc__ = kinematic_bin_edges_pc
     engine.__velocity_edges__ = velocity_edges
     engine.__karl_config__ = { "surface_brightness_profile": surface_brightness_profile, "light_bin_edges_pc": light_bin_edges_pc, "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
-                                "velocity_edges": velocity_edges, "min_stars_per_bin": min_stars_per_bin, "Nvbin": Nvbin, "Ntheta_launch": Ntheta_launch, "lambda_light": lambda_light}
+                                "velocity_edges": velocity_edges, "min_stars_per_bin": min_stars_per_bin, "Nvbin": Nvbin, "Ntheta_launch": Ntheta_launch, "lambda_light": lambda_light,
+                                "losvd_target_mode": losvd_target_mode, "karl_observables_csv": karl_observables_csv}
     return engine

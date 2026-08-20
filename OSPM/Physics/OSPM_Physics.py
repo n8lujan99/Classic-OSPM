@@ -137,6 +137,19 @@ def _halo_parameter_names(halo_parameterization):
 def normalize_halo_parameterization(halo_parameterization=None):
     return _normalize_halo_parameterization(halo_parameterization)
 
+def _normalize_losvd_target_mode(mode=None):
+    value = "current" if mode is None else str(mode).strip().lower()
+    if value not in ("current", "karl_resolved_stars", "karl_mode0_observables"):
+        raise ValueError("LOSVD_TARGET_MODE must be 'current', 'karl_resolved_stars', or 'karl_mode0_observables'")
+    return value
+
+def _require_karl_observables_csv(mode, observables_csv=None):
+    if mode != "karl_mode0_observables":
+        return observables_csv
+    if observables_csv is None or not str(observables_csv).strip():
+        raise ValueError("KARL_OBSERVABLES_CSV is required for LOSVD_TARGET_MODE='karl_mode0_observables'")
+    return str(observables_csv)
+
 def nfw_vcirc_rs_to_rho_s(vcirc_kms, r_s_pc):
     vcirc_mps = float(vcirc_kms) * kms
     r_s_m = float(r_s_pc) * pc
@@ -288,6 +301,8 @@ def _get_karl_options(obs=None, config=None):
     velocity_edges = grab("velocity_edges", None)
     light_bin_edges_pc = grab("light_bin_edges_pc", None)
     kinematic_bin_edges_pc = grab("kinematic_bin_edges_pc", None)
+    losvd_target_mode = _normalize_losvd_target_mode(grab("losvd_target_mode", "current"))
+    karl_observables_csv = _require_karl_observables_csv(losvd_target_mode, grab("karl_observables_csv", None))
     return {
         "Nvbin": int(grab("Nvbin", 21)),
         "Ntheta_launch": int(grab("Ntheta_launch", 9)),
@@ -295,6 +310,14 @@ def _get_karl_options(obs=None, config=None):
         "light_bin_edges_pc": light_bin_edges_pc,
         "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
         "tracer_constraint_mode": str(grab("tracer_constraint_mode", "projected_light")).strip().lower(),
+        "losvd_target_mode": losvd_target_mode,
+        "karl_resolved_kde_grid": int(grab("karl_resolved_kde_grid", 17)),
+        "karl_resolved_kde_width_bins": float(grab("karl_resolved_kde_width_bins", 3.0)),
+        "karl_resolved_vmin_kms": float(grab("karl_resolved_vmin_kms", -25.0)),
+        "karl_resolved_vmax_kms": float(grab("karl_resolved_vmax_kms", 25.0)),
+        "karl_resolved_bootstraps": int(grab("karl_resolved_bootstraps", 300)),
+        "karl_resolved_envelope_floor": float(grab("karl_resolved_envelope_floor", 0.003)),
+        "karl_observables_csv": karl_observables_csv,
         "halo_q_axis_ratio": float(grab("halo_q_axis_ratio", 1.0)),
         "karl_halo_params": grab("karl_halo_params", None),
         "fill_pct": float(grab("orbit_fill_pct", 0.85)),
@@ -339,6 +362,8 @@ def halo_kwargs_from_ctx(ctx):
 
 def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, Norbit, theta, halo_type, stellar_model=None, surface_brightness_profile=None, halo_parameterization=None,
     tracer_constraint_mode="projected_light", diag=False, velocity_edges=None, light_bin_edges_pc=None, kinematic_bin_edges_pc=None, Nvbin=21, Ntheta_launch=9, halo_q_axis_ratio=1.0, karl_halo_params=None,
+    losvd_target_mode="current", karl_resolved_kde_grid=17, karl_resolved_kde_width_bins=3.0, karl_resolved_vmin_kms=-25.0, karl_resolved_vmax_kms=25.0,
+    karl_resolved_bootstraps=300, karl_resolved_envelope_floor=0.003, karl_observables_csv=None,
     fill_pct=0.85, regional_floor=0.80, max_regional_gap=0.10, shell_band_count=8):
     if not USE_JULIA:
         raise RuntimeError("Karl A-matrix mode requires Julia")
@@ -362,8 +387,14 @@ def build_A_matrix_karl_julia(*, R_star_m, valid_vlos, v_star_mps, verr_star_mps
     tracer_constraint_mode = str(tracer_constraint_mode).strip().lower()
     if tracer_constraint_mode not in ("projected_light", "density_3d"):
         raise ValueError("tracer_constraint_mode must be 'projected_light' or 'density_3d'")
-    kwargs = dict( stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, tracer_constraint_mode=tracer_constraint_mode, diag=bool(diag), Nvbin=int(Nvbin), Ntheta_launch=int(Ntheta_launch), halo_q_axis_ratio=float(halo_q_axis_ratio), 
-        karl_halo_params=karl_halo_params, fill_pct=float(fill_pct), regional_floor=float(regional_floor), max_regional_gap=float(max_regional_gap), shell_band_count=int(shell_band_count))
+    losvd_target_mode = _normalize_losvd_target_mode(losvd_target_mode)
+    karl_observables_csv = _require_karl_observables_csv(losvd_target_mode, karl_observables_csv)
+    kwargs = dict( stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, tracer_constraint_mode=tracer_constraint_mode, diag=bool(diag), Nvbin=int(Nvbin), Ntheta_launch=int(Ntheta_launch), halo_q_axis_ratio=float(halo_q_axis_ratio),
+        karl_halo_params=karl_halo_params, losvd_target_mode=losvd_target_mode, karl_resolved_kde_grid=int(karl_resolved_kde_grid), karl_resolved_kde_width_bins=float(karl_resolved_kde_width_bins),
+        karl_resolved_vmin_kms=float(karl_resolved_vmin_kms), karl_resolved_vmax_kms=float(karl_resolved_vmax_kms), karl_resolved_bootstraps=int(karl_resolved_bootstraps),
+        karl_resolved_envelope_floor=float(karl_resolved_envelope_floor), fill_pct=float(fill_pct), regional_floor=float(regional_floor), max_regional_gap=float(max_regional_gap), shell_band_count=int(shell_band_count))
+    if karl_observables_csv is not None:
+        kwargs["karl_observables_csv"] = karl_observables_csv
     if velocity_edges is not None:
         kwargs["velocity_edges"] = PC.pyconvert(VecF, np.asarray(velocity_edges, dtype=float).ravel())
     if light_bin_edges_pc is not None:
@@ -395,6 +426,9 @@ def build_A_matrix(obs, ctx, *, diag=False, config=None):
         stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, halo_parameterization=canonical_parameterization, tracer_constraint_mode=opts["tracer_constraint_mode"],
         diag=bool(diag), velocity_edges=opts["velocity_edges"], light_bin_edges_pc=opts["light_bin_edges_pc"], kinematic_bin_edges_pc=opts["kinematic_bin_edges_pc"],
         Nvbin=opts["Nvbin"], Ntheta_launch=opts["Ntheta_launch"], halo_q_axis_ratio=opts["halo_q_axis_ratio"], karl_halo_params=opts["karl_halo_params"],
+        losvd_target_mode=opts["losvd_target_mode"], karl_resolved_kde_grid=opts["karl_resolved_kde_grid"], karl_resolved_kde_width_bins=opts["karl_resolved_kde_width_bins"],
+        karl_resolved_vmin_kms=opts["karl_resolved_vmin_kms"], karl_resolved_vmax_kms=opts["karl_resolved_vmax_kms"], karl_resolved_bootstraps=opts["karl_resolved_bootstraps"],
+        karl_resolved_envelope_floor=opts["karl_resolved_envelope_floor"], karl_observables_csv=opts["karl_observables_csv"],
         fill_pct=opts["fill_pct"], regional_floor=opts["regional_floor"], max_regional_gap=opts["max_regional_gap"], shell_band_count=opts["shell_band_count"])
 
 def build_A_matrix_from_theta(obs, theta, *, halo_type="nfw", diag=False, config=None):
@@ -457,7 +491,29 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
         raise RuntimeError("light_bin_edges_pc is required")
     if kinematic_bin_edges_pc is None:
         raise RuntimeError("kinematic_bin_edges_pc is required")
-    Nvbin = int( opt("NVBIN", "Nvbin", "nvbin", default=21))
+    losvd_target_mode = _normalize_losvd_target_mode(opt("LOSVD_TARGET_MODE", "losvd_target_mode", default="current"))
+    karl_resolved_kde_grid = int(opt("KARL_RESOLVED_KDE_GRID", "karl_resolved_kde_grid", default=17))
+    karl_resolved_kde_width_bins = float(opt("KARL_RESOLVED_KDE_WIDTH_BINS", "karl_resolved_kde_width_bins", default=3.0))
+    karl_resolved_vmin_kms = float(opt("KARL_RESOLVED_VMIN_KMS", "karl_resolved_vmin_kms", default=-25.0))
+    karl_resolved_vmax_kms = float(opt("KARL_RESOLVED_VMAX_KMS", "karl_resolved_vmax_kms", default=25.0))
+    karl_resolved_bootstraps = int(opt("KARL_RESOLVED_BOOTSTRAPS", "karl_resolved_bootstraps", default=300))
+    karl_resolved_envelope_floor = float(opt("KARL_RESOLVED_ENVELOPE_FLOOR", "karl_resolved_envelope_floor", default=0.003))
+    karl_observables_csv = _require_karl_observables_csv(
+        losvd_target_mode,
+        opt("KARL_OBSERVABLES_CSV", "karl_observables_csv", default=None),
+    )
+    if losvd_target_mode == "karl_resolved_stars":
+        if karl_resolved_kde_grid <= 1:
+            raise ValueError("KARL_RESOLVED_KDE_GRID must exceed one")
+        if not np.isfinite(karl_resolved_kde_width_bins) or karl_resolved_kde_width_bins <= 0.0:
+            raise ValueError("KARL_RESOLVED_KDE_WIDTH_BINS must be finite and positive")
+        if not np.isfinite(karl_resolved_vmin_kms) or not np.isfinite(karl_resolved_vmax_kms) or karl_resolved_vmax_kms <= karl_resolved_vmin_kms:
+            raise ValueError("KARL_RESOLVED_VMIN_KMS/KARL_RESOLVED_VMAX_KMS define an invalid velocity range")
+        if karl_resolved_bootstraps <= 1:
+            raise ValueError("KARL_RESOLVED_BOOTSTRAPS must exceed one")
+        if not np.isfinite(karl_resolved_envelope_floor) or karl_resolved_envelope_floor < 0.0:
+            raise ValueError("KARL_RESOLVED_ENVELOPE_FLOOR must be finite and nonnegative")
+    Nvbin = int(opt("NVBIN", "Nvbin", "nvbin", default=21))
     Ntheta_launch = int( opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9))
     alphat = float(opt("KARL_ALPHAT", "alphat", default=cfg.get("ALPHAT", 1.0)))
     apfac = float(opt("KARL_APFAC", "apfac", default=0.01))
@@ -576,6 +632,14 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     _Main._ospm_sb_profile = jl_surface_brightness_profile( surface_brightness_profile )
     _Main.seval(f"_ospm_sini = {float(obs.sini)!r}")
     _Main.seval("_ospm_tracer_constraint_mode = " + json.dumps(tracer_constraint_mode))
+    _Main.seval("_ospm_losvd_target_mode = " + json.dumps(losvd_target_mode))
+    _Main.seval(f"_ospm_karl_resolved_kde_grid = {karl_resolved_kde_grid}")
+    _Main.seval(f"_ospm_karl_resolved_kde_width_bins = {karl_resolved_kde_width_bins!r}")
+    _Main.seval(f"_ospm_karl_resolved_vmin_kms = {karl_resolved_vmin_kms!r}")
+    _Main.seval(f"_ospm_karl_resolved_vmax_kms = {karl_resolved_vmax_kms!r}")
+    _Main.seval(f"_ospm_karl_resolved_bootstraps = {karl_resolved_bootstraps}")
+    _Main.seval(f"_ospm_karl_resolved_envelope_floor = {karl_resolved_envelope_floor!r}")
+    _Main.seval("_ospm_karl_observables_csv = " + ("nothing" if karl_observables_csv is None else json.dumps(karl_observables_csv)))
     _Main.seval(f"_ospm_Norbit = {int(Norbit)}")
     _Main.seval("_ospm_halo_type = " + json.dumps(str(halo_type)))
     _Main.seval(f"_ospm_alphat = {alphat!r}")
@@ -604,6 +668,9 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     
     out = _Main.seval("""OSPMPhysicsSpherical.evaluate_batch_theta(_ospm_theta, _ospm_R, _ospm_valid, _ospm_v, _ospm_ve, _ospm_sini, _ospm_Norbit, _ospm_halo_type;
             stellar_model=_ospm_stellar_model, surface_brightness_profile=_ospm_sb_profile, tracer_constraint_mode=_ospm_tracer_constraint_mode,
+            losvd_target_mode=_ospm_losvd_target_mode, karl_resolved_kde_grid=_ospm_karl_resolved_kde_grid, karl_resolved_kde_width_bins=_ospm_karl_resolved_kde_width_bins,
+            karl_resolved_vmin_kms=_ospm_karl_resolved_vmin_kms, karl_resolved_vmax_kms=_ospm_karl_resolved_vmax_kms, karl_resolved_bootstraps=_ospm_karl_resolved_bootstraps,
+            karl_resolved_envelope_floor=_ospm_karl_resolved_envelope_floor, karl_observables_csv=_ospm_karl_observables_csv,
             alphat=_ospm_alphat, apfac=_ospm_apfac, light_rel_tol=_ospm_light_rel_tol, light_sigma_tol=_ospm_light_sigma_tol, delta_chi2_iter_tol=_ospm_delta_chi2_iter_tol,
             entropy_floor=_ospm_entropy_floor, maxiter=_ospm_maxiter, timeout_s=_ospm_timeout_s, fill_pct=_ospm_orbit_fill_pct, regional_floor=_ospm_orbit_regional_floor,
             max_regional_gap=_ospm_orbit_max_regional_gap, shell_band_count=_ospm_orbit_shell_bands, coverage_check_every=_ospm_orbit_coverage_check_every,
@@ -621,4 +688,3 @@ def force_at_rtheta_julia(*, r_m, theta_rad, theta, halo_type, stellar_model=Non
     rho_s, r_s, MBH, ML, ht = assert_theta_contract( theta, halo_type=halo_type, halo_parameterization=halo_parameterization, require_mbh=True, require_ml=True)
     fr, ftheta, FR, FZ = _Main.OSPMPhysicsSpherical.force_at_rtheta( float(r_m), float(theta_rad), float(rho_s), float(r_s), float(MBH), float(ML), str(ht), stellar_model=stellar_model)
     return { "fr": float(fr), "ftheta": float(ftheta), "FR": float(FR), "FZ": float(FZ)}
-

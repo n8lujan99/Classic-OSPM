@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+
 def as_bool(x):
     if isinstance(x, bool):
         return x
@@ -524,7 +525,7 @@ def cmd_build_axisymmetric_light_grid(args):
             m_pc = rmid
             R_cyl = m_pc * np.sin(th)
             z = q * m_pc * np.cos(th)
-            r_spherical = np.sqrt(R_cyl * R_cyl + z * z
+            r_spherical = np.sqrt(R_cyl * R_cyl + z * z)
             nu_cell = cell_luminosity / cell_volume if cell_volume > 0.0 else 0.0
             rows.append({
                 "shell_id": ir,
@@ -883,7 +884,6 @@ def build_parser():
     p_gden.add_argument("--dis", type=float, default=1.0)
 
     p_gden.set_defaults(func=cmd_build_gden_products)
-
 
     return p
 

@@ -1,7 +1,54 @@
 """
-OSPM_Observables_Stellar / Karl-style observable container.
-Loads observed stars, surface-brightness profile, and optional precomputed
-kinematic radial bins. This file does not do gravity or solve weights.
+OSPM runtime staging for stellar observables.
+
+ROLE
+----
+Load, validate, center, convert, and package the already prepared galaxy
+inputs needed by the OSPM runtime.
+
+This module is NOT Data Prep. It does not create the galaxy's static derived
+products. Those are generated beforehand by the reusable tools under
+OSPM/Data_Prep/.
+
+EXPECTED PREPARED INPUTS
+------------------------
+The galaxy config supplies the active paths for:
+    <Galaxy>_stars.csv
+    <Galaxy>_surface_brightness.csv
+    <Galaxy>_losvd_bins.csv
+
+The consolidated Karl observational representation is prepared separately as:
+    <Galaxy>_karl_observables.csv
+
+The stellar force/tracer products are also prepared separately as:
+    <Galaxy>_stellar_force_grid.csv
+    <Galaxy>_tracer_density_3d.csv
+
+RESPONSIBILITIES
+----------------
+This module:
+    - reads the stellar catalog;
+    - reads the prepared surface-brightness profile;
+    - reads the prepared kinematic radial bins;
+    - validates their runtime contracts;
+    - centers LOS velocities into the model frame;
+    - converts pc -> m and km/s -> m/s;
+    - packages arrays and metadata for the Julia OSPM backend.
+
+This module does NOT:
+    - choose or construct radial bins;
+    - rebin or deproject surface brightness;
+    - build stellar-force or tracer-density grids;
+    - build Karl LOSVD targets;
+    - apply M/L to construct stellar mass;
+    - construct halo density or gravity;
+    - integrate orbits;
+    - solve orbit weights.
+
+Rule of ownership:
+    if a quantity changes only when the adopted galaxy data/geometry changes,
+    it belongs in Data Prep;
+    if it changes with theta, it belongs in the runtime physics/model solve.
 """
 import numpy as np
 import pandas as pd
@@ -173,7 +220,8 @@ def _apply_motion_model(df, *, v_col, config=None):
     raise ValueError(f"Unknown MOTION_MODEL mode: {motion.get('mode')}")
 
 class OSPMObservablesStellar:
-    def __init__(self, *, R_star_pc, v_star_kms, verr_star_kms, has_vlos, inclination_deg, Norbit, stellar_model=None, surface_brightness_profile=None, kinematic_bins=None, dynamical_mode=None, motion_model=None, v_star_raw_kms=None, v_motion_model_kms=None):
+    def __init__(self, *, R_star_pc, v_star_kms, verr_star_kms, has_vlos, inclination_deg, Norbit, stellar_model=None, 
+                 surface_brightness_profile=None, kinematic_bins=None, dynamical_mode=None, motion_model=None, v_star_raw_kms=None, v_motion_model_kms=None):
         self.mode = "karl"
         self.dynamical_mode = dynamical_mode
         self.motion_model = motion_model
@@ -217,7 +265,8 @@ class OSPMObservablesStellar:
         self.Nstar_vlos = int(self.valid_vlos.sum())
 
     @classmethod
-    def from_star_table(cls, csv_path, *, r_col="r_pc", v_col="vlos", verr_col="vlos_err", has_vlos_col="has_vlos", inclination_deg, Norbit, stellar_model=None, surface_brightness_path=None, kinematic_bins_path=None, config=None):
+    def from_star_table(cls, csv_path, *, r_col="r_pc", v_col="vlos", verr_col="vlos_err", has_vlos_col="has_vlos", inclination_deg, 
+                        Norbit, stellar_model=None, surface_brightness_path=None, kinematic_bins_path=None, config=None):
         df = pd.read_csv(csv_path)
         needed = [r_col, v_col, verr_col]
         missing = [c for c in needed if c not in df.columns]
@@ -240,4 +289,7 @@ class OSPMObservablesStellar:
         _validate_surface_brightness_against_kinematic_bins(surface_brightness_profile, kinematic_bins)
         _validate_stellar_model_geometry(stellar_model)
         v_used, v_raw, v_model = _apply_motion_model(df, v_col=v_col, config=config)
-        return cls(R_star_pc=df[r_col].values, v_star_kms=v_used, verr_star_kms=df[verr_col].values, has_vlos=has_vlos, inclination_deg=inclination_deg, Norbit=Norbit, stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, kinematic_bins=kinematic_bins, dynamical_mode=None if config is None else config.get("DYNAMICAL_MODE"), motion_model=None if config is None else config.get("MOTION_MODEL"), v_star_raw_kms=v_raw, v_motion_model_kms=v_model)
+        return cls(R_star_pc=df[r_col].values, v_star_kms=v_used, verr_star_kms=df[verr_col].values, has_vlos=has_vlos, 
+                   inclination_deg=inclination_deg, Norbit=Norbit, stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, 
+                   kinematic_bins=kinematic_bins, dynamical_mode=None if config is None else config.get("DYNAMICAL_MODE"),
+                   motion_model=None if config is None else config.get("MOTION_MODEL"), v_star_raw_kms=v_raw, v_motion_model_kms=v_model)

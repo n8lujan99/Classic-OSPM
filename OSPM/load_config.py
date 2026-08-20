@@ -9,8 +9,6 @@ from importlib import import_module
 import copy
 import multiprocessing as mp
 import os
-from .AI_defaults import CONFIG as AI_DEFAULTS
-
 # --------------------------------------------------
 # Repository and galaxy authority
 # --------------------------------------------------
@@ -260,7 +258,6 @@ def load_config():
     galaxy_config = dict(mod.CONFIG)
     local_debug = bool(galaxy_config.get("LOCAL_DEBUG", getattr(mod, "LOCAL_DEBUG", False)))
     cfg = _build_general_defaults(local_debug)
-    cfg = _deep_merge(cfg, AI_DEFAULTS)
     cfg = _deep_merge(cfg, galaxy_config)
     cfg["GALAXY"] = galaxy
     cfg["LOCAL_DEBUG"] = local_debug

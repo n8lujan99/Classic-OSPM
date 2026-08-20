@@ -7,8 +7,39 @@
 # weight/SPEAR and force machinery.
 # Applied new karl fixes on 04/06/26 @1600
 # Legacy star-level likelihood code and old back-compat sigma2 paths removed.
+# NOTES ON THIS FILE:
+# This is the shared Julia support layer used by OSPM_Physics_Spherical.jl.
+#
+# It has four main jobs:
+#   1. define physical constants and shared numerical defaults,
+#   2. turn the observed light and stellar velocities into model targets,
+#   3. provide generic force/orbit helpers,
+#   4. launch and integrate orbit families.
+#
+# The actual weight/SPEAR solver lives in OSPM_Physics_Weights.jl.
+# The halo and stellar-force construction lives in OSPM_Physics_Force.jl.
 # ========================================================================================================================
 # §1  CONSTANTS
+# ---------------------------------------------------------------------------
+# PHYSICAL CONSTANTS
+# ---------------------------------------------------------------------------
+#
+# NTHREADS:
+#   Number of Julia threads available to this process.
+#
+# G:
+#   Newton's gravitational constant in SI units.
+#
+# c:
+#   Speed of light in m/s. Kept here as a shared physical constant even though
+#   the functions in this file do not directly use it.
+#
+# pc and Msun:
+#   Conversion factors from parsecs and solar masses into SI units.
+#
+# IMPORTANT:
+# Much of the outer configuration is expressed in pc, km/s, and Msun. The Julia
+# force/orbit machinery commonly converts those values into meters, m/s, and kg.
 const NTHREADS = Threads.nthreads()
 const G    = 6.67430e-11
 const c    = 2.99792458e8
@@ -16,6 +47,26 @@ const pc   = 3.0856775814913673e16
 const Msun = 1.98847e30
 
 # machine floors
+# ---------------------------------------------------------------------------
+# MACHINE / GEOMETRY SAFETY FLOORS
+# ---------------------------------------------------------------------------
+#
+# These are numerical guards. They are not physical parameters of a galaxy.
+#
+# EPS_FORCE:
+#   Tiny force scale used to avoid classifying roundoff-level values as a
+#   meaningful outward force.
+#
+# EPS_VEL:
+#   Tiny positive velocity scale used when checking circular-speed calculations.
+#
+# EPS_ARG:
+#   Tolerance for expressions that should physically be non-negative before
+#   taking a square root.
+#
+# EPS_SIN:
+#   Rejects launch angles too close to the symmetry axis when expressions contain
+#   1/sin(theta). This avoids singular cylindrical/angular-momentum terms.
 const EPS_FORCE = 1e-14
 const EPS_VEL   = 1e-14
 const EPS_ARG   = 1e-14
@@ -26,11 +77,70 @@ const EPS_SIN = 1e-6
 # scale-aware force gate
 const REL_FORCE    = 1e-10   # loosen to 1e-9 if needed
 const BRACKET_FRAC = 1e-6    # MUST be >> eps(Float64)
+# ---------------------------------------------------------------------------
+# FORCE-SCALE / ROOT-BRACKETING CONTROLS
+# ---------------------------------------------------------------------------
+#
+# REL_FORCE:
+#   Scale-aware tolerance used when deciding whether the local force has the
+#   expected inward sign.
+#
+# BRACKET_FRAC:
+#   Small fractional displacement around a reference radius when sampling the
+#   force on both sides of that point.
+#
+# IMPORTANT:
+# BRACKET_FRAC must remain much larger than floating-point epsilon so the two
+# sample radii are numerically distinct.
 
 # TUNABLE KNOBS — adjust these to control resolution, accuracy, and parallelism.
 # -- Halo potential grid --
 const DEFAULT_NR              = 256       # radial grid points for potential table
 const DEFAULT_RMAX_FACTOR     = 300.0     # max radius in units of r_s
+# ---------------------------------------------------------------------------
+# SHARED TUNABLE DEFAULTS
+# ---------------------------------------------------------------------------
+#
+# These are generic defaults. Galaxy configs or higher-level calls may override
+# some of them.
+#
+# Halo grid:
+#   DEFAULT_NR          = number of radial points in the spherical force/potential table.
+#   DEFAULT_RMAX_FACTOR = how far the default halo table extends in units of its scale radius.
+#
+# Orbit integration:
+#   DEFAULT_NSTEPS           = requested top-level RK4 steps.
+#   DEFAULT_STOP_RMIN_FACTOR = safety factor outside the innermost halo radius.
+#   DEFAULT_DT_FRAC          = converts a local orbital frequency into a timestep.
+#   DEFAULT_DT_FLOOR         = denominator floor for that timestep calculation.
+#   DEFAULT_R0_FRAC          = non-circular launches begin just inside the turning radius.
+#
+# Orbit-library/A-matrix:
+#   DEFAULT_LFRAC          = default fractions of circular angular momentum.
+#   DEFAULT_DR_FRAC        = radial matching tolerance.
+#   DEFAULT_NBINS_OCC      = occupancy-histogram resolution.
+#   DEFAULT_MAX_ATTEMPTS   = launch-attempt multiplier.
+#   DEFAULT_DR_FLOOR_FRAC  = fractional radial matching floor.
+#   DEFAULT_DR_FLOOR_PC    = absolute parsec floor on radial matching.
+#
+# Karl observable/weight defaults:
+#   DEFAULT_MIN_STARS_PER_BIN            = adaptive-bin helper target only.
+#   DEFAULT_NVBIN                        = requested LOSVD velocity resolution.
+#   DEFAULT_LOSVD_MIN_HALF_WIDTH_KMS     = minimum LOSVD half-window.
+#   DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION   = accepted outside-window fraction used elsewhere.
+#   DEFAULT_KARL_ALPHAT                  = LOSVD mismatch strength in the entropy objective.
+#   DEFAULT_KARL_MAXITER                 = weight-solver iteration cap.
+#   DEFAULT_KARL_ENTROPY_FLOOR           = tiny positive numerical weight floor.
+#   DEFAULT_KARL_APFAC                   = maximum requested SPEAR correction step.
+#   DEFAULT_KARL_LIGHT_REL_TOL           = hard relative tracer/light tolerance.
+#   DEFAULT_KARL_DELTA_CHI2_ITER_TOL     = LOSVD chi2 iteration-stability tolerance.
+#   DEFAULT_KARL_INVALID_SIGMA_SENTINEL  = marks LOSVD cells that should not carry normal chi2 weight.
+#   DEFAULT_KARL_STEP_SAFETY             = safety fraction for a boundary-limited step helper.
+#   DEFAULT_KARL_SPEAR_RCOND_WARN        = warns when the SPEAR system is nearly singular.
+#
+# NOTE:
+# DEFAULT_KARL_ALPHA is retained only so older call sites still parse. The active
+# entropy-mode mismatch multiplier is DEFAULT_KARL_ALPHAT.
 
 # -- Orbit integration --
 const DEFAULT_NSTEPS          = 4000      # RK4 steps per orbit
@@ -52,16 +162,6 @@ const DEFAULT_MIN_STARS_PER_BIN = 20       # minimum stars per projected radial 
 const DEFAULT_NVBIN             = 21       # requested LOSVD resolution; auto support may add bins at the same width
 const DEFAULT_LOSVD_MIN_HALF_WIDTH_KMS = 100.0
 const DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION = 0.01
-const DEFAULT_KARL_RESOLVED_KDE_GRID = 17
-const DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS = 3.0
-const DEFAULT_KARL_RESOLVED_VMIN_KMS = -25.0
-const DEFAULT_KARL_RESOLVED_VMAX_KMS = 25.0
-const DEFAULT_KARL_RESOLVED_BOOTSTRAPS = 300
-const DEFAULT_KARL_RESOLVED_TRANSVD_SAMPLES = 1000
-const DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR = 0.003
-
-# -- Consolidated Karl observables CSV runtime --
-const DEFAULT_KARL_OBSERVABLES_SCHEMA_VERSION = 1
 const DEFAULT_KARL_ALPHA        = 1e-4     # legacy value retained only for call compatibility
 const DEFAULT_KARL_ALPHAT       = 1.0      # Karl-style data-mismatch multiplier in entropy mode
 
@@ -74,15 +174,60 @@ const DEFAULT_KARL_INVALID_SIGMA_SENTINEL = -666.0
 const DEFAULT_KARL_STEP_SAFETY = 0.90        # take 90% of zero-weight boundary when step-limited
 const DEFAULT_KARL_SPEAR_RCOND_WARN = 1.0e-12
 
+
+
 # ========================================================================================================================
 # §2  TYPES, CACHES, INLINE HELPERS
 # ========================================================================================================================
+# ---------------------------------------------------------------------------
+# VERY SMALL INLINE HELPERS
+# ---------------------------------------------------------------------------
+#
+# f64:
+#   Force a value into Float64.
+#
+# safe_sign:
+#   Return +1, -1, or 0 without relying on a branch elsewhere.
+#
+# _ssin:
+#   Safe sin(theta) used when angular-momentum formulas would divide by sin(theta).
+#
+# _sincos_safe:
+#   Return sin/cos together while preventing an exactly tiny sin(theta) from entering
+#   a later denominator.
+#
+# clamp01:
+#   Clamp a Float64 into the physical fraction interval [0,1].
 @inline f64(x)=Float64(x)
 @inline safe_sign(x)=x>0 ? 1.0 : (x<0 ? -1.0 : 0.0)
 @inline _ssin(theta::Float64)=begin s=sin(theta); abs(s)>1e-12 ? s : safe_sign(s)*1e-12 end
+# WHAT:
+# Returns sin(theta) and cos(theta) together, with a tiny floor on sin(theta).
+#
+# WHY:
+# Cylindrical/spherical conversions and Lz terms can contain division by sin(theta).
+# Near the symmetry axis, an exactly tiny sine would make those expressions unstable.
+#
+# NOTE:
+# Only the sine is protected. The cosine is returned unchanged.
 @inline function _sincos_safe(theta::Float64); s,cc=sincos(theta); abs(s)>1e-12 ? (s,cc) : (safe_sign(s)*1e-12,cc) end
 @inline clamp01(x::Float64)=x<0 ? 0.0 : (x>1 ? 1.0 : x)
 
+# WHAT:
+# Compact container for one fully constructed halo/potential context.
+#
+# CONTENTS:
+#   halo  = normalized parameter dictionary
+#   R     = radial force/potential grid
+#   tabv  = spherical halo potential table
+#   tabfr = spherical halo radial-force table
+#   Menc  = spherical enclosed-mass table
+#   pot   = callable total-potential function
+#   frc   = callable total-force function
+#
+# WHY:
+# Orbit integration needs the same potential and force repeatedly. Keeping the
+# precomputed tables and closures together avoids rebuilding them for each force call.
 struct HaloContext
     halo::Dict{Symbol,Any}
     R::Vector{Float64}
@@ -92,55 +237,26 @@ struct HaloContext
     pot::Function
     frc::Function
 end
-
-struct KarlObservables
-    path::String
-    schema_version::Int
-    galaxy::String
-    distance_pc::Float64
-    axis_ratio_q::Float64
-    seeing_arcsec::Float64
-    nrdat::Int
-    nvdat::Int
-    nrlib::Int
-    nvlib::Int
-    nvel::Int
-    irrat::Int
-    ivrat::Int
-    radial_edges_arcsec::Vector{Float64}
-    radial_edges_m::Vector{Float64}
-    angular_edges::Vector{Float64}
-    light_raw::Matrix{Float64}
-    light_seen::Matrix{Float64}
-    sumb::Matrix{Float64}
-    sumbn::Matrix{Float64}
-    spatial::Matrix{Float64}
-    aperture_ids::Vector{Int}
-    aperture_names::Vector{String}
-    aperture_binsets::Vector{NTuple{4,Int}}
-    aperture_light::Vector{Float64}
-    star_count::Vector{Int}
-    velocity_edges_mps::Vector{Float64}
-    velocity_centers_mps::Vector{Float64}
-    losvd_target::Vector{Float64}
-    losvd_sigma::Vector{Float64}
-    losvd_supported::BitVector
-    losvd_center_kms::Float64
-    losvd_shape::String
-    losvd_sigma_extent::Float64
-    mkherm_nsim::Int
-    mkherm_econt_frac::Float64
-    mkherm_rng::String
-end
-
-const _KARL_OBSERVABLES_CACHE = Dict{String,KarlObservables}()
-const _KARL_OBSERVABLES_LOCK = ReentrantLock()
+# HALO CONTEXT CACHE:
+# Stores already-built HaloContext objects keyed by the physical model parameters,
+# geometry signature, and numerical grid settings.
+#
+# _HALO_LOCK protects this shared cache when several Julia threads request contexts.
 
 const _HALO_CTX_CACHE = Dict{Tuple{Float64,Float64,Float64,Float64,UInt64,Symbol,Float64,Int,Float64,Float64},HaloContext}()
 const _HALO_LOCK = ReentrantLock()
 # ========================================================================================================================
 # §3  SMALL UTILITIES
 # ========================================================================================================================
+# WHAT:
+# Converts a halo dictionary into the Symbol-keyed form expected by the Julia physics code.
+#
+# HOW:
+# String-like keys become Symbols. The :type value is also normalized to a lowercase Symbol.
+#
+# WHY:
+# Config data can arrive from Python or Julia with slightly different key/value types.
+# Normalizing once prevents every downstream force function from handling both forms.
 @inline function normalize_halo(halo)
     h=Dict{Symbol,Any}()
     for (k,v) in halo
@@ -151,9 +267,24 @@ const _HALO_LOCK = ReentrantLock()
     end
     h
 end
+# WHAT:
+# Builds base-10 logarithmically spaced values between 10^a and 10^b.
+#
+# WHAT build_R_halo_physical DOES:
+# Uses logspace10 to construct the physical radial grid for halo tables.
+#
+# WHY LOG SPACING:
+# The force can change rapidly near the center while still needing to extend far into
+# the halo. Log spacing gives much finer relative resolution at small radius.
 
 logspace10(a,b,n)=n==1 ? [10.0^a] : (da=(b-a)/(n-1); [10.0^(a+(i-1)*da) for i in 1:n])
 build_R_halo_physical(n; rmin=1e-3, rmax=300.0)=logspace10(log10(rmin), log10(rmax), n)
+# WHAT:
+# Rounds a Float64 to a fixed number of decimal digits.
+#
+# WHY:
+# Used when constructing cache keys so tiny floating-point noise does not create many
+# duplicate HaloContext entries for what is effectively the same model.
 @inline function _quant(x::Float64; digits::Int=10)
     return round(x, digits=digits)
 end
@@ -165,7 +296,23 @@ end
 # They build projected radial bins, LOSVD velocity bins, observed target vectors,
 # surface-brightness light targets, and WLS/NNLS-style orbit weights.
 # No star-count fallback is allowed for the projected-light target.
-
+# WHAT:
+# Builds adaptive projected radial-bin edges so each bin contains roughly a requested
+# minimum number of stars.
+#
+# HOW:
+# Sort the usable projected radii. Walk outward in groups of min_stars_per_bin.
+# Place boundaries halfway between the last star of one group and the first star of
+# the next.
+#
+# EDGE CASES:
+# Empty data returns a harmless two-edge placeholder. One star gets a narrow bracket.
+# If the total sample is smaller than the requested count, everything becomes one bin.
+#
+# IMPORTANT CURRENT-PIPELINE NOTE:
+# resolve_karl_spatial_edges below explicitly forbids an adaptive fallback for the
+# active Karl LOSVD path. This helper remains available, but supplied kinematic bins
+# are the authority there.
 function build_min_count_radial_edges(R_star_m::Vector{Float64}, valid_idx::Vector{Int}; min_stars_per_bin::Int=DEFAULT_MIN_STARS_PER_BIN)
     R_use = isempty(valid_idx) ? copy(R_star_m) : R_star_m[valid_idx]
     R_use = sort(R_use[isfinite.(R_use)])
@@ -201,6 +348,17 @@ function build_min_count_radial_edges(R_star_m::Vector{Float64}, valid_idx::Vect
     return edges
 end
 
+# WHAT:
+# Validates the supplied LOSVD projected-radius bin edges.
+#
+# IMPORTANT:
+# The first edge is forcibly set to 0 pc so the central aperture really includes the
+# galaxy center. Some prebuilt bin files otherwise begin at the radius of the first
+# observed star, which would silently drop stars interior to that value.
+#
+# WHY:
+# The kinematic-bin CSV is authoritative. There is deliberately no automatic
+# re-binning fallback in this path.
 function resolve_karl_spatial_edges(kinematic_bin_edges)
     kinematic_bin_edges === nothing &&
         error("kinematic_bin_edges is required; no adaptive radial-bin fallback is allowed")
@@ -216,6 +374,15 @@ function resolve_karl_spatial_edges(kinematic_bin_edges)
     return edges
 end
 
+# WHAT:
+# Validates the projected-radius edges used for the light/tracer constraint.
+#
+# HOW:
+# Require finite, strictly increasing edges. Force the first edge to 0 pc.
+#
+# WHY:
+# The projected light target and orbit light matrix must describe exactly the same
+# radial apertures.
 function resolve_karl_light_edges(light_bin_edges)
     light_bin_edges === nothing &&
         error("light_bin_edges is required for Karl-style light constraints")
@@ -227,6 +394,30 @@ function resolve_karl_light_edges(light_bin_edges)
     return edges
 end
 
+# WHAT:
+# Builds the LOSVD velocity grid from the observed stellar velocities and errors.
+#
+# MAIN GOAL:
+# Make the velocity window wide enough that high-velocity model stars cannot simply
+# fall outside the scored grid while preserving approximately the originally
+# requested velocity resolution.
+#
+# HOW:
+#   1. Find the observed velocity range.
+#   2. Pad it using the measurement uncertainties.
+#   3. Measure the bin width implied by requested Nvbin.
+#   4. Enforce at least the configured minimum half-width.
+#   5. If widening the window requires more bins, add bins rather than making each
+#      velocity bin much broader.
+#   6. Force the final number of velocity bins to be odd.
+#
+# WHY THIS MATTERS:
+# A finite LOSVD window is part of the likelihood geometry. If the window is too
+# narrow, fast model stars can disappear from the comparison rather than worsening
+# chi2.
+#
+# UNITS:
+# Inputs and returned edges are in m/s. The diagnostic print converts to km/s.
 function build_velocity_edges_auto(v_mps::Vector{Float64}, verr_mps::Vector{Float64}; Nvbin::Int=DEFAULT_NVBIN, min_half_width_kms::Float64=DEFAULT_LOSVD_MIN_HALF_WIDTH_KMS)
     Nvbin > 0 || error("Nvbin must be positive")
     isfinite(min_half_width_kms) && min_half_width_kms > 0.0 || error("min_half_width_kms must be finite and positive")
@@ -264,6 +455,15 @@ function build_velocity_edges_auto(v_mps::Vector{Float64}, verr_mps::Vector{Floa
     return velocity_edges
 end
 
+# WHAT:
+# Finds which interval of an ordered edge vector contains x.
+#
+# RETURNS:
+# A 1-based Julia bin index, or 0 when x lies outside the usable interval.
+#
+# NOTE:
+# A value on or beyond the final edge is treated as outside because there is no bin
+# beginning at the final edge.
 @inline function _bin_index(edges::Vector{Float64}, x::Float64)
     j = searchsortedlast(edges, x)
     if j < 1 || j >= length(edges)
@@ -275,6 +475,16 @@ end
 # Fast dependency-free normal CDF approximation.
 # We avoid SpecialFunctions.erf here so the hot Julia path does not need an
 # extra package just to smear observed LOSVD targets by measurement error.
+# WHAT:
+# Fast approximation to the standard normal cumulative distribution function.
+#
+# WHY:
+# Observed stellar velocity errors are deposited across LOSVD velocity bins using a
+# Gaussian. The bin probabilities require normal-CDF differences.
+#
+# IMPORTANT:
+# This avoids adding SpecialFunctions.erf to the hot Julia path. It is a numerical
+# approximation used for bin deposition, not a new statistical model.
 @inline function _normal_cdf_unit(x::Float64)
     if !isfinite(x)
         return x > 0.0 ? 1.0 : 0.0
@@ -288,6 +498,16 @@ end
     return x >= 0.0 ? cdf_pos : 1.0 - cdf_pos
 end
 
+# WHAT:
+# Computes the probability that a Gaussian measurement centered on v0 with standard
+# deviation sig falls between velocity edges vlo and vhi.
+#
+# HOW:
+# Subtract the standard-normal CDF evaluated at the two normalized edges.
+#
+# WHY:
+# One observed star contributes probability across several LOSVD bins according to
+# its measurement uncertainty rather than being deposited as a delta function.
 @inline function _gaussian_bin_probability(vlo::Float64, vhi::Float64, v0::Float64, sig::Float64)
     if !(isfinite(v0) && isfinite(sig) && sig > 0.0 && isfinite(vlo) && isfinite(vhi) && vhi > vlo)
         return 0.0
@@ -295,6 +515,16 @@ end
     return max(0.0, _normal_cdf_unit((vhi - v0) / sig) - _normal_cdf_unit((vlo - v0) / sig))
 end
 
+# WHAT:
+# Cleans a vector that represents probabilities or non-negative fractions, then
+# normalizes it to unit sum when possible.
+#
+# HOW:
+# Nonfinite and negative values become zero. Positive finite values are divided by
+# their total.
+#
+# NOTE:
+# The exclamation mark is meaningful here: this function modifies x in place.
 function _normalize_nonnegative!(x::Vector{Float64})
     @inbounds for i in eachindex(x)
         (!isfinite(x[i]) || x[i] < 0.0) && (x[i] = 0.0)
@@ -306,760 +536,16 @@ function _normalize_nonnegative!(x::Vector{Float64})
     return x
 end
 
-@inline function _karl_nint(x::Float64)
-    return x >= 0.0 ? floor(Int, x + 0.5) : ceil(Int, x - 0.5)
-end
-
-mutable struct _KarlRan2State
-    idum::Int64
-    idum2::Int64
-    iv::Vector{Int64}
-    iy::Int64
-end
-
-_KarlRan2State() = _KarlRan2State(-1, 123456789, zeros(Int64, 32), 0)
-
-function _karl_ran2!(state::_KarlRan2State)
-    IM1 = 2147483563
-    IM2 = 2147483399
-    AM = 1.0 / IM1
-    IMM1 = IM1 - 1
-    IA1 = 40014
-    IA2 = 40692
-    IQ1 = 53668
-    IQ2 = 52774
-    IR1 = 12211
-    IR2 = 3791
-    NTAB = 32
-    NDIV = 1 + IMM1 ÷ NTAB
-    EPS = 1.2e-7
-    RNMX = 1.0 - EPS
-
-    if state.idum <= 0
-        state.idum = max(-state.idum, 1)
-        state.idum2 = state.idum
-        @inbounds for j in (NTAB + 8):-1:1
-            k = state.idum ÷ IQ1
-            state.idum = IA1 * (state.idum - k * IQ1) - k * IR1
-            state.idum < 0 && (state.idum += IM1)
-            j <= NTAB && (state.iv[j] = state.idum)
-        end
-        state.iy = state.iv[1]
-    end
-
-    k = state.idum ÷ IQ1
-    state.idum = IA1 * (state.idum - k * IQ1) - k * IR1
-    state.idum < 0 && (state.idum += IM1)
-
-    k = state.idum2 ÷ IQ2
-    state.idum2 = IA2 * (state.idum2 - k * IQ2) - k * IR2
-    state.idum2 < 0 && (state.idum2 += IM2)
-
-    j = 1 + state.iy ÷ NDIV
-    state.iy = state.iv[j] - state.idum2
-    state.iv[j] = state.idum
-    state.iy < 1 && (state.iy += IMM1)
-
-    return min(AM * state.iy, RNMX)
-end
-
-function _karl_accumulate_kernel!(ek::Vector{Float64}, xscaled::Vector{Float64}, widths::Vector{Float64})
-    length(xscaled) == length(widths) || error("Karl adaptive-kernel widths do not match sample length")
-    ngrid = length(ek)
-    fill!(ek, 0.0)
-
-    @inbounds for i in eachindex(xscaled)
-        xi = xscaled[i]
-        h = widths[i]
-        isfinite(h) && h > 0.0 || error("Karl adaptive-kernel width must be finite and positive")
-        jlo = max(1, _karl_nint(xi - h))
-        jhi = min(ngrid, _karl_nint(xi + h))
-        jhi < jlo && continue
-        xp = xi / h
-
-        for j in jlo:jhi
-            x1 = f64(j) - 0.5
-            x2 = x1 + 1.0
-            abs(xi - x1) > h && (x1 = xi - h)
-            abs(xi - x2) > h && (x2 = xi + h)
-            x1 /= h
-            x2 /= h
-            xint = x2 - x1 + ((xp - x2)^3 - (xp - x1)^3) / 3.0
-            ek[j] += xint
-        end
-    end
-
-    return ek
-end
-
-function _karl_adaptive_kde_1d(v_kms::Vector{Float64}; grid_size::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, alpha::Float64=0.5)
-    n = length(v_kms)
-    n > 0 || error("Karl adaptive KDE requires at least one velocity")
-    grid_size > 1 || error("Karl adaptive KDE grid_size must exceed one")
-    isfinite(width_bins) && width_bins > 0.0 || error("Karl adaptive KDE width_bins must be finite and positive")
-    isfinite(vmin_kms) && isfinite(vmax_kms) && vmax_kms > vmin_kms || error("Karl adaptive KDE velocity bounds are invalid")
-    isfinite(alpha) && alpha > 0.0 || error("Karl adaptive KDE alpha must be finite and positive")
-
-    scalx = f64(grid_size) / (vmax_kms - vmin_kms)
-    xscaled = Vector{Float64}(undef, n)
-    @inbounds for i in eachindex(v_kms)
-        vi = v_kms[i]
-        isfinite(vi) || error("Karl adaptive KDE received a nonfinite velocity")
-        xi = scalx * (vi - vmin_kms) + 0.5
-        xi <= 0.5 && (xi = 0.5001)
-        xi >= grid_size + 0.5 && (xi = grid_size + 0.4990)
-        xscaled[i] = xi
-    end
-
-    pilot = zeros(Float64, grid_size)
-    _karl_accumulate_kernel!(pilot, xscaled, fill(width_bins, n))
-
-    log_g_sum = 0.0
-    @inbounds for i in eachindex(xscaled)
-        ix = clamp(_karl_nint(xscaled[i]), 1, grid_size)
-        log_g_sum += log(max(pilot[ix], 1.0e-20))
-    end
-    g = exp(log_g_sum / n)
-    isfinite(g) && g > 0.0 || error("Karl adaptive KDE geometric-mean pilot density is invalid")
-
-    widths = Vector{Float64}(undef, n)
-    @inbounds for i in eachindex(xscaled)
-        ix = clamp(_karl_nint(xscaled[i]), 1, grid_size)
-        clam = (pilot[ix] / g)^(-alpha)
-        widths[i] = width_bins * clam
-    end
-
-    ek = zeros(Float64, grid_size)
-    _karl_accumulate_kernel!(ek, xscaled, widths)
-    con = 3.0 / (4.0 * n)
-    ek .*= con * scalx
-
-    xl = Vector{Float64}(undef, grid_size)
-    @inbounds for j in 1:grid_size
-        xl[j] = (f64(j) - 0.5) / scalx + vmin_kms
-    end
-
-    return xl, ek
-end
-
-function _karl_bootstrap_kde_envelope(v_kms::Vector{Float64}; grid_size::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS)
-    n = length(v_kms)
-    n > 0 || error("Karl bootstrap KDE requires at least one velocity")
-    bootstraps > 1 || error("Karl bootstrap KDE requires at least two bootstrap realizations")
-
-    xl, central = _karl_adaptive_kde_1d(v_kms; grid_size=grid_size, width_bins=width_bins, vmin_kms=vmin_kms, vmax_kms=vmax_kms, alpha=0.5)
-    xsim = Matrix{Float64}(undef, bootstraps, grid_size)
-    sample = Vector{Float64}(undef, n)
-    rng = _KarlRan2State()
-
-    @inbounds for isim in 1:bootstraps
-        for i in 1:n
-            iran = _karl_nint(_karl_ran2!(rng) * (n - 1)) + 1
-            sample[i] = v_kms[iran]
-        end
-        _, sim = _karl_adaptive_kde_1d(sample; grid_size=grid_size, width_bins=width_bins, vmin_kms=vmin_kms, vmax_kms=vmax_kms, alpha=0.5)
-        xsim[isim, :] .= sim
-    end
-
-    # ncont1.f indexes the sorted bootstrap array after its DO variable has
-    # advanced to bootstraps+1. Preserve that historical 16/84 behavior.
-    i16 = clamp(_karl_nint((bootstraps + 1) * 0.16), 1, bootstraps)
-    i84 = clamp(_karl_nint((bootstraps + 1) * 0.84), 1, bootstraps)
-    lower = Vector{Float64}(undef, grid_size)
-    upper = Vector{Float64}(undef, grid_size)
-
-    @inbounds for j in 1:grid_size
-        column = sort!(collect(view(xsim, :, j)))
-        lower[j] = column[i16]
-        upper[j] = column[i84]
-    end
-
-    return xl, central, lower, upper
-end
-
-@inline function _karl_linear_interp(x::Vector{Float64}, y::Vector{Float64}, xp::Float64)
-    length(x) == length(y) || error("Karl interpolation arrays have different lengths")
-    length(x) >= 2 || error("Karl interpolation requires at least two samples")
-    xp <= x[1] && return y[1]
-    xp >= x[end] && return y[end]
-    j = clamp(searchsortedlast(x, xp), 1, length(x) - 1)
-    dx = x[j + 1] - x[j]
-    dx > 0.0 || error("Karl interpolation grid is not strictly increasing")
-    return y[j] + (y[j + 1] - y[j]) * (xp - x[j]) / dx
-end
-
-function _karl_transvd_profile(v_kms::Vector{Float64}, central::Vector{Float64}, lower::Vector{Float64}, upper::Vector{Float64}; ntot::Int=DEFAULT_KARL_RESOLVED_TRANSVD_SAMPLES, envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR)
-    length(v_kms) == length(central) == length(lower) == length(upper) || error("Karl transvd arrays have inconsistent lengths")
-    length(v_kms) >= 2 || error("Karl transvd requires at least two LOSVD samples")
-    ntot > 1 || error("Karl transvd ntot must exceed one")
-    isfinite(envelope_floor) && envelope_floor >= 0.0 || error("Karl transvd envelope floor must be finite and nonnegative")
-
-    sum_central = sum(central)
-    isfinite(sum_central) && sum_central > 0.0 || error("Karl transvd central LOSVD has non-positive normalization")
-
-    y = central ./ sum_central
-    yl = (central .- lower) ./ sum_central
-    yh = (upper .- central) ./ sum_central
-
-    vfine = Vector{Float64}(undef, ntot)
-    yfine = Vector{Float64}(undef, ntot)
-    ylow = Vector{Float64}(undef, ntot)
-    yhigh = Vector{Float64}(undef, ntot)
-    vfirst = v_kms[1]
-
-    @inbounds for i in 1:ntot
-        vp = vfirst - 2.0 * vfirst / (ntot - 1) * (i - 1)
-        yp = _karl_linear_interp(v_kms, y, vp)
-        ylp = _karl_linear_interp(v_kms, yl, vp)
-        yhp = _karl_linear_interp(v_kms, yh, vp)
-        yn = max(0.0, yp)
-        ynl = max(0.0, yn - abs(ylp))
-        ynh = yn + abs(yhp)
-        if ynh < envelope_floor
-            ynl = 0.0
-            ynh = envelope_floor
-        end
-        vfine[i] = vp
-        yfine[i] = yn
-        ylow[i] = ynl
-        yhigh[i] = ynh
-    end
-
-    return vfine, yfine, ylow, yhigh
-end
-
-@inline function _karl_observables_required_field(fields::Vector{String}, columns::Dict{String,Int}, name::AbstractString, path::AbstractString, lineno::Int)
-    haskey(columns, String(name)) || error("Karl observables CSV $path is missing column $name")
-    value = strip(fields[columns[String(name)]])
-    isempty(value) && error("Karl observables CSV $path has an empty $name value at line $lineno")
-    return value
-end
-
-@inline function _karl_observables_parse_float(fields::Vector{String}, columns::Dict{String,Int}, name::AbstractString, path::AbstractString, lineno::Int)
-    value = parse(Float64, _karl_observables_required_field(fields, columns, name, path, lineno))
-    isfinite(value) || error("Karl observables CSV $path has nonfinite $name at line $lineno")
-    return value
-end
-
-@inline function _karl_observables_parse_int(fields::Vector{String}, columns::Dict{String,Int}, name::AbstractString, path::AbstractString, lineno::Int)
-    raw = _karl_observables_required_field(fields, columns, name, path, lineno)
-    try
-        return parse(Int, raw)
-    catch
-        value = parse(Float64, raw)
-        isfinite(value) && isinteger(value) || error("Karl observables CSV $path has non-integer $name=$raw at line $lineno")
-        return Int(value)
-    end
-end
-
-function _karl_observables_set_edge!(edges::Vector{Float64}, index::Int, value::Float64, label::AbstractString, path::AbstractString)
-    1 <= index <= length(edges) || error("Karl observables $label edge index $index is outside 1:$(length(edges)) in $path")
-    isfinite(value) || error("Karl observables $label edge $index is nonfinite in $path")
-    if isnan(edges[index])
-        edges[index] = value
-    else
-        scale = max(abs(edges[index]), abs(value), 1.0)
-        abs(edges[index] - value) <= 1.0e-10 * scale || error("Karl observables $label edge $index is inconsistent in $path")
-    end
-    return nothing
-end
-
-function _load_karl_observables_uncached(path::AbstractString)
-    isfile(path) || error("Karl observables CSV not found: $path")
-    raw_lines = readlines(path)
-    isempty(raw_lines) && error("Karl observables CSV is empty: $path")
-    header = String.(strip.(split(chomp(raw_lines[1]), ","; keepempty=true)))
-    columns = Dict{String,Int}(name => i for (i, name) in pairs(header))
-    required = ("schema_version", "row_type", "galaxy", "distance_pc", "axis_ratio_q", "seeing_arcsec", "nrdat", "nvdat", "nrlib", "nvlib", "nvel", "irrat", "ivrat", "ir", "iv", "r_inner_arcsec", "r_outer_arcsec", "r_inner_pc", "r_outer_pc", "vcoord_inner", "vcoord_outer", "light_raw", "light_seen", "source_ir", "source_iv", "target_ir", "target_iv", "sumb", "sumbn", "aperture_id", "aperture_name", "ir_start", "ir_end", "iv_start", "iv_end", "aperture_light", "star_count", "losvd_center_kms", "losvd_shape", "losvd_sigma_extent", "mkherm_nsim", "mkherm_econt_frac", "mkherm_rng", "velocity_bin", "velocity_low_kms", "velocity_center_kms", "velocity_high_kms", "losvd_target", "losvd_sigma", "losvd_supported")
-    for name in required
-        haskey(columns, name) || error("Karl observables CSV $path is missing required column $name")
-    end
-
-    parsed_rows = Tuple{Int,Vector{String}}[]
-    metadata_rows = Tuple{Int,Vector{String}}[]
-    @inbounds for iline in 2:length(raw_lines)
-        stripped = strip(raw_lines[iline])
-        isempty(stripped) && continue
-        fields = String.(strip.(split(chomp(raw_lines[iline]), ","; keepempty=true)))
-        length(fields) == length(header) || error("Karl observables CSV $path line $iline has $(length(fields)) columns; expected $(length(header))")
-        push!(parsed_rows, (iline, fields))
-        strip(fields[columns["row_type"]]) == "metadata" && push!(metadata_rows, (iline, fields))
-    end
-    length(metadata_rows) == 1 || error("Karl observables CSV $path must contain exactly one metadata row; found $(length(metadata_rows))")
-
-    metadata_lineno, metadata = metadata_rows[1]
-    schema_version = _karl_observables_parse_int(metadata, columns, "schema_version", path, metadata_lineno)
-    schema_version == DEFAULT_KARL_OBSERVABLES_SCHEMA_VERSION || error("Karl observables CSV $path schema_version=$schema_version; expected $DEFAULT_KARL_OBSERVABLES_SCHEMA_VERSION")
-    galaxy = _karl_observables_required_field(metadata, columns, "galaxy", path, metadata_lineno)
-    distance_pc = _karl_observables_parse_float(metadata, columns, "distance_pc", path, metadata_lineno)
-    axis_ratio_q = _karl_observables_parse_float(metadata, columns, "axis_ratio_q", path, metadata_lineno)
-    seeing_arcsec = _karl_observables_parse_float(metadata, columns, "seeing_arcsec", path, metadata_lineno)
-    nrdat = _karl_observables_parse_int(metadata, columns, "nrdat", path, metadata_lineno)
-    nvdat = _karl_observables_parse_int(metadata, columns, "nvdat", path, metadata_lineno)
-    nrlib = _karl_observables_parse_int(metadata, columns, "nrlib", path, metadata_lineno)
-    nvlib = _karl_observables_parse_int(metadata, columns, "nvlib", path, metadata_lineno)
-    nvel = _karl_observables_parse_int(metadata, columns, "nvel", path, metadata_lineno)
-    irrat = _karl_observables_parse_int(metadata, columns, "irrat", path, metadata_lineno)
-    ivrat = _karl_observables_parse_int(metadata, columns, "ivrat", path, metadata_lineno)
-    losvd_center_kms = _karl_observables_parse_float(metadata, columns, "losvd_center_kms", path, metadata_lineno)
-    losvd_shape = lowercase(_karl_observables_required_field(metadata, columns, "losvd_shape", path, metadata_lineno))
-    losvd_sigma_extent = _karl_observables_parse_float(metadata, columns, "losvd_sigma_extent", path, metadata_lineno)
-    mkherm_nsim = _karl_observables_parse_int(metadata, columns, "mkherm_nsim", path, metadata_lineno)
-    mkherm_econt_frac = _karl_observables_parse_float(metadata, columns, "mkherm_econt_frac", path, metadata_lineno)
-    mkherm_rng = _karl_observables_required_field(metadata, columns, "mkherm_rng", path, metadata_lineno)
-
-    distance_pc > 0.0 || error("Karl observables distance_pc must be positive in $path")
-    axis_ratio_q > 0.0 || error("Karl observables axis_ratio_q must be positive in $path")
-    seeing_arcsec >= 0.0 || error("Karl observables seeing_arcsec must be nonnegative in $path")
-    nrdat > 0 && nvdat > 0 && nrlib > 0 && nvlib > 0 && nvel > 1 || error("Karl observables grid dimensions are invalid in $path")
-    nrdat % nrlib == 0 || error("Karl observables nrdat=$nrdat is not divisible by nrlib=$nrlib in $path")
-    nvdat % nvlib == 0 || error("Karl observables nvdat=$nvdat is not divisible by nvlib=$nvlib in $path")
-    irrat == nrdat ÷ nrlib || error("Karl observables irrat=$irrat does not match nrdat/nrlib=$(nrdat ÷ nrlib) in $path")
-    ivrat == nvdat ÷ nvlib || error("Karl observables ivrat=$ivrat does not match nvdat/nvlib=$(nvdat ÷ nvlib) in $path")
-    losvd_shape == "gaussian" || error("Karl observables losvd_shape=$losvd_shape is unsupported; expected gaussian")
-    isfinite(losvd_sigma_extent) && losvd_sigma_extent > 0.0 || error("Karl observables losvd_sigma_extent must be positive in $path")
-    mkherm_nsim > 0 || error("Karl observables mkherm_nsim must be positive in $path")
-    mkherm_econt_frac >= 0.0 || error("Karl observables mkherm_econt_frac must be nonnegative in $path")
-
-    radial_edges_arcsec = fill(NaN, nrlib + 1)
-    radial_edges_pc = fill(NaN, nrlib + 1)
-    angular_edges = fill(NaN, nvlib + 1)
-    light_raw = fill(NaN, nrlib, nvlib)
-    light_seen = fill(NaN, nrlib, nvlib)
-    spatial_seen = falses(nrlib, nvlib)
-
-    Ncell = nrlib * nvlib
-    sumb = zeros(Float64, Ncell, Ncell)
-    sumbn = zeros(Float64, Ncell, Ncell)
-    transfer_seen = falses(Ncell, Ncell)
-
-    aperture_ids_raw = Int[]
-    aperture_names_raw = String[]
-    aperture_binsets_raw = NTuple{4,Int}[]
-    aperture_light_raw = Float64[]
-    star_count_raw = Int[]
-
-    losvd_rows = Tuple{Int,Int,Float64,Float64,Float64,Float64,Float64,Bool,Int}[]
-    spatial_count = 0
-    transfer_count = 0
-
-    @inbounds for (lineno, fields) in parsed_rows
-        row_type = strip(fields[columns["row_type"]])
-        if row_type == "metadata"
-            continue
-        elseif row_type == "spatial_cell"
-            ir = _karl_observables_parse_int(fields, columns, "ir", path, lineno)
-            iv = _karl_observables_parse_int(fields, columns, "iv", path, lineno)
-            1 <= ir <= nrlib || error("Karl observables ir=$ir is outside 1:$nrlib at line $lineno in $path")
-            1 <= iv <= nvlib || error("Karl observables iv=$iv is outside 1:$nvlib at line $lineno in $path")
-            spatial_seen[ir, iv] && error("Karl observables repeats spatial cell ($ir,$iv) in $path")
-            spatial_seen[ir, iv] = true
-            _karl_observables_set_edge!(radial_edges_arcsec, ir, _karl_observables_parse_float(fields, columns, "r_inner_arcsec", path, lineno), "radial arcsec", path)
-            _karl_observables_set_edge!(radial_edges_arcsec, ir + 1, _karl_observables_parse_float(fields, columns, "r_outer_arcsec", path, lineno), "radial arcsec", path)
-            _karl_observables_set_edge!(radial_edges_pc, ir, _karl_observables_parse_float(fields, columns, "r_inner_pc", path, lineno), "radial pc", path)
-            _karl_observables_set_edge!(radial_edges_pc, ir + 1, _karl_observables_parse_float(fields, columns, "r_outer_pc", path, lineno), "radial pc", path)
-            _karl_observables_set_edge!(angular_edges, iv, _karl_observables_parse_float(fields, columns, "vcoord_inner", path, lineno), "angular", path)
-            _karl_observables_set_edge!(angular_edges, iv + 1, _karl_observables_parse_float(fields, columns, "vcoord_outer", path, lineno), "angular", path)
-            light_raw[ir, iv] = _karl_observables_parse_float(fields, columns, "light_raw", path, lineno)
-            light_seen[ir, iv] = _karl_observables_parse_float(fields, columns, "light_seen", path, lineno)
-            light_raw[ir, iv] >= 0.0 || error("Karl observables light_raw is negative at line $lineno in $path")
-            light_seen[ir, iv] >= 0.0 || error("Karl observables light_seen is negative at line $lineno in $path")
-            spatial_count += 1
-        elseif row_type == "seeing_transfer"
-            source_ir = _karl_observables_parse_int(fields, columns, "source_ir", path, lineno)
-            source_iv = _karl_observables_parse_int(fields, columns, "source_iv", path, lineno)
-            target_ir = _karl_observables_parse_int(fields, columns, "target_ir", path, lineno)
-            target_iv = _karl_observables_parse_int(fields, columns, "target_iv", path, lineno)
-            1 <= source_ir <= nrlib || error("Karl observables source_ir=$source_ir is outside 1:$nrlib at line $lineno in $path")
-            1 <= target_ir <= nrlib || error("Karl observables target_ir=$target_ir is outside 1:$nrlib at line $lineno in $path")
-            1 <= source_iv <= nvlib || error("Karl observables source_iv=$source_iv is outside 1:$nvlib at line $lineno in $path")
-            1 <= target_iv <= nvlib || error("Karl observables target_iv=$target_iv is outside 1:$nvlib at line $lineno in $path")
-            source_cell = (source_ir - 1) * nvlib + source_iv
-            target_cell = (target_ir - 1) * nvlib + target_iv
-            transfer_seen[source_cell, target_cell] && error("Karl observables repeats seeing transfer ($source_ir,$source_iv)->($target_ir,$target_iv) in $path")
-            transfer_seen[source_cell, target_cell] = true
-            positive = _karl_observables_parse_float(fields, columns, "sumb", path, lineno)
-            negative = _karl_observables_parse_float(fields, columns, "sumbn", path, lineno)
-            positive >= 0.0 || error("Karl observables sumb is negative at line $lineno in $path")
-            negative >= 0.0 || error("Karl observables sumbn is negative at line $lineno in $path")
-            sumb[source_cell, target_cell] = positive
-            sumbn[source_cell, target_cell] = negative
-            transfer_count += 1
-        elseif row_type == "aperture"
-            aperture_id = _karl_observables_parse_int(fields, columns, "aperture_id", path, lineno)
-            aperture_id > 0 || error("Karl observables aperture_id must be positive at line $lineno in $path")
-            aperture_id in aperture_ids_raw && error("Karl observables repeats aperture_id=$aperture_id in $path")
-            aperture_name = _karl_observables_required_field(fields, columns, "aperture_name", path, lineno)
-            ir_start = _karl_observables_parse_int(fields, columns, "ir_start", path, lineno)
-            ir_end = _karl_observables_parse_int(fields, columns, "ir_end", path, lineno)
-            iv_start = _karl_observables_parse_int(fields, columns, "iv_start", path, lineno)
-            iv_end = _karl_observables_parse_int(fields, columns, "iv_end", path, lineno)
-            1 <= ir_start <= ir_end <= nrlib || error("Karl observables aperture $aperture_id has invalid radial bin range $ir_start:$ir_end in $path")
-            1 <= iv_start <= iv_end <= nvlib || error("Karl observables aperture $aperture_id has invalid angular bin range $iv_start:$iv_end in $path")
-            aperture_light = _karl_observables_parse_float(fields, columns, "aperture_light", path, lineno)
-            aperture_light > 0.0 || error("Karl observables aperture $aperture_id has non-positive light in $path")
-            star_count = _karl_observables_parse_int(fields, columns, "star_count", path, lineno)
-            star_count >= 0 || error("Karl observables aperture $aperture_id has negative star_count in $path")
-            push!(aperture_ids_raw, aperture_id)
-            push!(aperture_names_raw, aperture_name)
-            push!(aperture_binsets_raw, (ir_start, ir_end, iv_start, iv_end))
-            push!(aperture_light_raw, aperture_light)
-            push!(star_count_raw, star_count)
-        elseif row_type == "losvd_bin"
-            aperture_id = _karl_observables_parse_int(fields, columns, "aperture_id", path, lineno)
-            velocity_bin = _karl_observables_parse_int(fields, columns, "velocity_bin", path, lineno)
-            vlo = _karl_observables_parse_float(fields, columns, "velocity_low_kms", path, lineno)
-            vcenter = _karl_observables_parse_float(fields, columns, "velocity_center_kms", path, lineno)
-            vhi = _karl_observables_parse_float(fields, columns, "velocity_high_kms", path, lineno)
-            target = _karl_observables_parse_float(fields, columns, "losvd_target", path, lineno)
-            sigma = _karl_observables_parse_float(fields, columns, "losvd_sigma", path, lineno)
-            supported_int = _karl_observables_parse_int(fields, columns, "losvd_supported", path, lineno)
-            supported_int in (0, 1) || error("Karl observables losvd_supported=$supported_int is not 0 or 1 at line $lineno in $path")
-            target >= 0.0 || error("Karl observables LOSVD target is negative at line $lineno in $path")
-            supported = supported_int == 1
-            if supported
-                sigma >= 0.0 || error("Karl observables supported LOSVD bin has negative sigma=$sigma at line $lineno in $path")
-            else
-                sigma == DEFAULT_KARL_INVALID_SIGMA_SENTINEL || error("Karl observables unsupported LOSVD bin has sigma=$sigma rather than $DEFAULT_KARL_INVALID_SIGMA_SENTINEL at line $lineno in $path")
-            end
-            push!(losvd_rows, (aperture_id, velocity_bin, vlo, vcenter, vhi, target, sigma, supported, lineno))
-        else
-            error("Karl observables CSV $path has unknown row_type=$row_type at line $lineno")
-        end
-    end
-
-    spatial_count == Ncell || error("Karl observables CSV $path has $spatial_count spatial_cell rows; expected $Ncell")
-    all(spatial_seen) || error("Karl observables CSV $path does not contain every spatial cell")
-    transfer_count == Ncell * Ncell || error("Karl observables CSV $path has $transfer_count seeing_transfer rows; expected $(Ncell * Ncell)")
-    all(transfer_seen) || error("Karl observables CSV $path does not contain every seeing source/target pair")
-    all(isfinite, radial_edges_arcsec) || error("Karl observables radial arcsec edges are incomplete in $path")
-    all(isfinite, radial_edges_pc) || error("Karl observables radial pc edges are incomplete in $path")
-    all(isfinite, angular_edges) || error("Karl observables angular edges are incomplete in $path")
-    any(diff(radial_edges_arcsec) .<= 0.0) && error("Karl observables radial arcsec edges are not strictly increasing in $path")
-    any(diff(radial_edges_pc) .<= 0.0) && error("Karl observables radial pc edges are not strictly increasing in $path")
-    any(diff(angular_edges) .<= 0.0) && error("Karl observables angular edges are not strictly increasing in $path")
-
-    raw_light_sum = sum(light_raw)
-    seen_light_sum = sum(light_seen)
-    isapprox(raw_light_sum, 1.0; rtol=1.0e-8, atol=1.0e-10) || error("Karl observables light_raw sum=$raw_light_sum rather than 1 in $path")
-    isapprox(seen_light_sum, 1.0; rtol=1.0e-8, atol=1.0e-10) || error("Karl observables light_seen sum=$seen_light_sum rather than 1 in $path")
-
-    spatial = sumb + sumbn
-    source_retained = vec(sum(spatial, dims=2))
-    all(x -> isfinite(x) && x > 0.0 && x <= 1.0 + 1.0e-10, source_retained) || error("Karl observables seeing-transfer source retention fractions are invalid in $path")
-
-    Naperture = length(aperture_ids_raw)
-    Naperture > 0 || error("Karl observables CSV $path contains no aperture rows")
-    aperture_order = sortperm(aperture_ids_raw)
-    aperture_ids = aperture_ids_raw[aperture_order]
-    aperture_names = aperture_names_raw[aperture_order]
-    aperture_binsets = aperture_binsets_raw[aperture_order]
-    aperture_light = aperture_light_raw[aperture_order]
-    star_count = star_count_raw[aperture_order]
-    aperture_ids == collect(1:Naperture) || error("Karl observables aperture IDs must be contiguous 1:$Naperture in $path; got $aperture_ids")
-    @inbounds for ia in 1:Naperture
-        ir_start, ir_end, iv_start, iv_end = aperture_binsets[ia]
-        expected_light = sum(@view light_seen[ir_start:ir_end, iv_start:iv_end])
-        scale = max(abs(expected_light), abs(aperture_light[ia]), 1.0)
-        abs(expected_light - aperture_light[ia]) <= 1.0e-10 * scale || error("Karl observables aperture $(aperture_ids[ia]) light=$(aperture_light[ia]) does not match summed light_seen=$expected_light in $path")
-    end
-
-    expected_losvd_rows = Naperture * nvel
-    length(losvd_rows) == expected_losvd_rows || error("Karl observables CSV $path has $(length(losvd_rows)) losvd_bin rows; expected $expected_losvd_rows")
-    sort!(losvd_rows; by=row -> (row[1], row[2]))
-    velocity_edges_kms = fill(NaN, nvel + 1)
-    velocity_centers_kms = fill(NaN, nvel)
-    losvd_target = zeros(Float64, expected_losvd_rows)
-    losvd_sigma = fill(DEFAULT_KARL_INVALID_SIGMA_SENTINEL, expected_losvd_rows)
-    losvd_supported = falses(expected_losvd_rows)
-    seen_losvd = falses(Naperture, nvel)
-
-    @inbounds for row_data in losvd_rows
-        aperture_id, velocity_bin, vlo, vcenter, vhi, target, sigma, supported, lineno = row_data
-        1 <= aperture_id <= Naperture || error("Karl observables losvd_bin aperture_id=$aperture_id is outside 1:$Naperture at line $lineno in $path")
-        1 <= velocity_bin <= nvel || error("Karl observables velocity_bin=$velocity_bin is outside 1:$nvel at line $lineno in $path")
-        seen_losvd[aperture_id, velocity_bin] && error("Karl observables repeats LOSVD bin aperture=$aperture_id velocity_bin=$velocity_bin in $path")
-        seen_losvd[aperture_id, velocity_bin] = true
-        _karl_observables_set_edge!(velocity_edges_kms, velocity_bin, vlo, "velocity", path)
-        _karl_observables_set_edge!(velocity_edges_kms, velocity_bin + 1, vhi, "velocity", path)
-        if isnan(velocity_centers_kms[velocity_bin])
-            velocity_centers_kms[velocity_bin] = vcenter
-        else
-            scale = max(abs(velocity_centers_kms[velocity_bin]), abs(vcenter), 1.0)
-            abs(velocity_centers_kms[velocity_bin] - vcenter) <= 1.0e-10 * scale || error("Karl observables velocity center for bin $velocity_bin changes between apertures in $path")
-        end
-        row_index = (aperture_id - 1) * nvel + velocity_bin
-        losvd_target[row_index] = target
-        losvd_sigma[row_index] = sigma
-        losvd_supported[row_index] = supported
-    end
-    all(seen_losvd) || error("Karl observables CSV $path does not contain every aperture/velocity LOSVD bin")
-    any(diff(velocity_edges_kms) .<= 0.0) && error("Karl observables velocity edges are not strictly increasing in $path")
-    @inbounds for j in 1:nvel
-        expected_center = 0.5 * (velocity_edges_kms[j] + velocity_edges_kms[j + 1])
-        scale = max(abs(expected_center), abs(velocity_centers_kms[j]), 1.0)
-        abs(expected_center - velocity_centers_kms[j]) <= 1.0e-10 * scale || error("Karl observables velocity_center_kms is inconsistent with edges for bin $j in $path")
-    end
-    @inbounds for ia in 1:Naperture
-        rows = ((ia - 1) * nvel + 1):(ia * nvel)
-        supported_count = count(@view losvd_supported[rows])
-        supported_count > 0 || error("Karl observables aperture $(aperture_ids[ia]) has no supported LOSVD bins in $path")
-        target_sum = sum(@view losvd_target[rows])
-        target_sum <= aperture_light[ia] + 1.0e-10 * max(aperture_light[ia], 1.0) || error("Karl observables aperture $(aperture_ids[ia]) LOSVD target sum=$target_sum exceeds aperture light=$(aperture_light[ia]) in $path")
-    end
-
-    radial_edges_m = radial_edges_pc .* pc
-    velocity_edges_mps = velocity_edges_kms .* 1.0e3
-    velocity_centers_mps = velocity_centers_kms .* 1.0e3
-    observables = KarlObservables(String(path), schema_version, galaxy, distance_pc, axis_ratio_q, seeing_arcsec, nrdat, nvdat, nrlib, nvlib, nvel, irrat, ivrat, radial_edges_arcsec, radial_edges_m, angular_edges, light_raw, light_seen, sumb, sumbn, spatial, aperture_ids, aperture_names, aperture_binsets, aperture_light, star_count, velocity_edges_mps, velocity_centers_mps, losvd_target, losvd_sigma, losvd_supported, losvd_center_kms, losvd_shape, losvd_sigma_extent, mkherm_nsim, mkherm_econt_frac, mkherm_rng)
-    supported_by_aperture = [count(@view losvd_supported[((ia - 1) * nvel + 1):(ia * nvel)]) for ia in 1:Naperture]
-    println("[KARL OBSERVABLES LOAD]", " path=", path, " galaxy=", galaxy, " Nrlib=", nrlib, " Nvlib=", nvlib, " Naperture=", Naperture, " Nvel=", nvel, " seeing_arcsec=", seeing_arcsec, " supported_by_aperture=", supported_by_aperture, " retained_min=", minimum(source_retained), " retained_max=", maximum(source_retained))
-    return observables
-end
-
-function load_karl_observables(path::AbstractString)
-    key = abspath(String(path))
-    lock(_KARL_OBSERVABLES_LOCK)
-    try
-        haskey(_KARL_OBSERVABLES_CACHE, key) && return _KARL_OBSERVABLES_CACHE[key]
-    finally
-        unlock(_KARL_OBSERVABLES_LOCK)
-    end
-    observables = _load_karl_observables_uncached(key)
-    lock(_KARL_OBSERVABLES_LOCK)
-    try
-        return get!(_KARL_OBSERVABLES_CACHE, key, observables)
-    finally
-        unlock(_KARL_OBSERVABLES_LOCK)
-    end
-end
-
-function karl_observables_aperture_ranges_m(observables::KarlObservables)
-    ranges = Vector{Tuple{Float64,Float64}}(undef, length(observables.aperture_binsets))
-    @inbounds for ia in eachindex(observables.aperture_binsets)
-        ir_start, ir_end, _, _ = observables.aperture_binsets[ia]
-        ranges[ia] = (observables.radial_edges_m[ir_start], observables.radial_edges_m[ir_end + 1])
-    end
-    return ranges
-end
-
-function karl_observables_targets(observables::KarlObservables)
-    Naperture = length(observables.aperture_ids)
-    supported_by_aperture = [count(@view observables.losvd_supported[((ia - 1) * observables.nvel + 1):(ia * observables.nvel)]) for ia in 1:Naperture]
-    return (losvd_target=copy(observables.losvd_target), losvd_sigma=copy(observables.losvd_sigma), velocity_edges_mps=copy(observables.velocity_edges_mps), velocity_centers_mps=copy(observables.velocity_centers_mps), aperture_light=copy(observables.aperture_light), supported_by_aperture=supported_by_aperture)
-end
-
-@inline function karl_observables_projected_cell(observables::KarlObservables, Rproj_m::Float64, yproj_m::Float64)
-    isfinite(Rproj_m) && Rproj_m >= 0.0 || return 0, 0
-    isfinite(yproj_m) || return 0, 0
-    Rproj_m <= observables.radial_edges_m[end] || return 0, 0
-    ir = searchsortedlast(observables.radial_edges_m, Rproj_m)
-    ir < 1 && return 0, 0
-    ir >= length(observables.radial_edges_m) && (ir = observables.nrlib)
-    spatial_v = Rproj_m > 0.0 ? clamp(abs(yproj_m) / Rproj_m, 0.0, 1.0) : 0.0
-    iv = searchsortedlast(observables.angular_edges, spatial_v)
-    iv < 1 && return 0, 0
-    iv >= length(observables.angular_edges) && (iv = observables.nvlib)
-    return ir, iv
-end
-
-function karl_observables_convolve_losvd(raw_losvd::Array{Float64,3}, observables::KarlObservables)
-    size(raw_losvd) == (observables.nvel, observables.nrlib, observables.nvlib) || error("Karl observables raw LOSVD cube must have size ($(observables.nvel),$(observables.nrlib),$(observables.nvlib)); got $(size(raw_losvd))")
-    all(isfinite, raw_losvd) || error("Karl observables raw LOSVD cube contains nonfinite values")
-    all(x -> x >= 0.0, raw_losvd) || error("Karl observables raw LOSVD cube contains negative values")
-    Ncell = observables.nrlib * observables.nvlib
-    raw_flat = zeros(Float64, observables.nvel, Ncell)
-    @inbounds for ir in 1:observables.nrlib
-        for iv in 1:observables.nvlib
-            cell = (ir - 1) * observables.nvlib + iv
-            raw_flat[:, cell] .= @view raw_losvd[:, ir, iv]
-        end
-    end
-    convolved_flat = raw_flat * observables.sumb + reverse(raw_flat; dims=1) * observables.sumbn
-    convolved = zeros(Float64, observables.nvel, observables.nrlib, observables.nvlib)
-    @inbounds for ir in 1:observables.nrlib
-        for iv in 1:observables.nvlib
-            cell = (ir - 1) * observables.nvlib + iv
-            convolved[:, ir, iv] .= @view convolved_flat[:, cell]
-        end
-    end
-    return convolved
-end
-
-function karl_observables_convolve_spatial(raw_spatial::Matrix{Float64}, observables::KarlObservables)
-    size(raw_spatial) == (observables.nrlib, observables.nvlib) || error("Karl observables raw spatial grid must have size ($(observables.nrlib),$(observables.nvlib)); got $(size(raw_spatial))")
-    all(isfinite, raw_spatial) || error("Karl observables raw spatial grid contains nonfinite values")
-    all(x -> x >= 0.0, raw_spatial) || error("Karl observables raw spatial grid contains negative values")
-    Ncell = observables.nrlib * observables.nvlib
-    raw_flat = zeros(Float64, Ncell)
-    @inbounds for ir in 1:observables.nrlib
-        for iv in 1:observables.nvlib
-            raw_flat[(ir - 1) * observables.nvlib + iv] = raw_spatial[ir, iv]
-        end
-    end
-    convolved_flat = transpose(observables.spatial) * raw_flat
-    convolved = zeros(Float64, observables.nrlib, observables.nvlib)
-    @inbounds for ir in 1:observables.nrlib
-        for iv in 1:observables.nvlib
-            convolved[ir, iv] = convolved_flat[(ir - 1) * observables.nvlib + iv]
-        end
-    end
-    return convolved
-end
-
-function karl_observables_collapse_losvd_apertures(convolved_losvd::Array{Float64,3}, observables::KarlObservables)
-    size(convolved_losvd) == (observables.nvel, observables.nrlib, observables.nvlib) || error("Karl observables convolved LOSVD cube has unexpected dimensions")
-    Naperture = length(observables.aperture_binsets)
-    out = zeros(Float64, Naperture * observables.nvel)
-    @inbounds for ia in 1:Naperture
-        ir_start, ir_end, iv_start, iv_end = observables.aperture_binsets[ia]
-        for ir in ir_start:ir_end
-            for iv in iv_start:iv_end
-                for ivel in 1:observables.nvel
-                    out[(ia - 1) * observables.nvel + ivel] += convolved_losvd[ivel, ir, iv]
-                end
-            end
-        end
-    end
-    return out
-end
-
-function karl_observables_collapse_spatial_apertures(convolved_spatial::Matrix{Float64}, observables::KarlObservables)
-    size(convolved_spatial) == (observables.nrlib, observables.nvlib) || error("Karl observables convolved spatial grid has unexpected dimensions")
-    aperture_total = zeros(Float64, length(observables.aperture_binsets))
-    @inbounds for ia in eachindex(observables.aperture_binsets)
-        ir_start, ir_end, iv_start, iv_end = observables.aperture_binsets[ia]
-        for ir in ir_start:ir_end
-            for iv in iv_start:iv_end
-                aperture_total[ia] += convolved_spatial[ir, iv]
-            end
-        end
-    end
-    return aperture_total
-end
-
-function karl_observables_seeing_response(raw_losvd::Array{Float64,3}, raw_spatial::Matrix{Float64}, observables::KarlObservables)
-    convolved_losvd = karl_observables_convolve_losvd(raw_losvd, observables)
-    convolved_spatial = karl_observables_convolve_spatial(raw_spatial, observables)
-    losvd = karl_observables_collapse_losvd_apertures(convolved_losvd, observables)
-    kinematic = karl_observables_collapse_spatial_apertures(convolved_spatial, observables)
-    return (losvd=losvd, kinematic=kinematic)
-end
-
-function _karl_rebin_transvd_to_model(vfine_kms::Vector{Float64}, central::Vector{Float64}, lower::Vector{Float64}, upper::Vector{Float64}, velocity_edges_mps::Vector{Float64}, aperture_light::Float64; invalid_sigma_sentinel::Float64=DEFAULT_KARL_INVALID_SIGMA_SENTINEL)
-    length(vfine_kms) == length(central) == length(lower) == length(upper) || error("Karl model rebin arrays have inconsistent lengths")
-    ndata = length(vfine_kms)
-    ndata >= 2 || error("Karl model rebin requires at least two fine LOSVD samples")
-    Nvbin = length(velocity_edges_mps) - 1
-    Nvbin > 0 || error("Karl model rebin velocity_edges must contain at least two values")
-    any(diff(velocity_edges_mps) .<= 0.0) && error("Karl model rebin velocity_edges must be strictly increasing")
-    isfinite(aperture_light) && aperture_light >= 0.0 || error("Karl model rebin aperture light must be finite and nonnegative")
-
-    suma = sum(central)
-    isfinite(suma) && suma > 0.0 || error("Karl vdataread-equivalent LOSVD normalization is non-positive")
-    ad = central .* (aperture_light / suma)
-    adfer = Vector{Float64}(undef, ndata)
-    @inbounds for k in 1:ndata
-        adfer[k] = max(upper[k] - central[k], (upper[k] - lower[k]) / 2.0) * aperture_light / suma
-    end
-
-    vdata = vfine_kms .* 1.0e3
-    v1 = Vector{Float64}(undef, ndata)
-    v2 = Vector{Float64}(undef, ndata)
-    v1[1] = vdata[1] - (vdata[2] - vdata[1]) / 2.0
-    v2[1] = vdata[1] + (vdata[2] - vdata[1]) / 2.0
-    v1[end] = vdata[end] - (vdata[end] - vdata[end - 1]) / 2.0
-    v2[end] = vdata[end] + (vdata[end] - vdata[end - 1]) / 2.0
-    @inbounds for k in 2:(ndata - 1)
-        v1[k] = vdata[k] - (vdata[k] - vdata[k - 1]) / 2.0
-        v2[k] = vdata[k] + (vdata[k + 1] - vdata[k]) / 2.0
-    end
-
-    target = zeros(Float64, Nvbin)
-    sigma = fill(invalid_sigma_sentinel, Nvbin)
-
-    @inbounds for j in 1:Nvbin
-        vlo = velocity_edges_mps[j]
-        vhi = velocity_edges_mps[j + 1]
-        vcenter = 0.5 * (vlo + vhi)
-        if vcenter < v1[1] || vcenter > v2[end]
-            target[j] = 0.0
-            sigma[j] = invalid_sigma_sentinel
-            continue
-        end
-
-        sum_target = 0.0
-        sum_sigma = 0.0
-        for k in 1:ndata
-            data_width = v2[k] - v1[k]
-            data_width > 0.0 || continue
-            overlap = min(vhi, v2[k]) - max(vlo, v1[k])
-            if overlap > 0.0
-                frac = min(1.0, overlap / data_width)
-                sum_target += frac * ad[k]
-                sum_sigma += frac * adfer[k]
-            end
-        end
-        target[j] = sum_target
-        sigma[j] = sum_sigma
-    end
-
-    return target, sigma
-end
-
-function _observed_targets_karl_resolved(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8, kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, kde_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, kde_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR)
-    kinematic_edges = resolve_karl_spatial_edges(kinematic_edges)
-    light_edges_use = light_edges === nothing ? kinematic_edges : resolve_karl_light_edges(light_edges)
-    velocity_edges = Float64.(velocity_edges)
-    Nspatial = length(kinematic_edges) - 1
-    Nvbin = length(velocity_edges) - 1
-    Nlosvd = Nspatial * Nvbin
-    velocities_by_spatial = [Float64[] for _ in 1:Nspatial]
-    counts_by_spatial = zeros(Float64, Nspatial)
-
-    @inbounds for i in eachindex(valid_vlos)
-        valid_vlos[i] || continue
-        isfinite(R_star_m[i]) || continue
-        isfinite(v_star_mps[i]) || continue
-        ib = _bin_index(kinematic_edges, R_star_m[i])
-        ib == 0 && continue
-        push!(velocities_by_spatial[ib], v_star_mps[i] / 1.0e3)
-        counts_by_spatial[ib] += 1.0
-    end
-
-    light_target = light_target_from_surface_brightness(surface_brightness_profile, light_edges_use; normalize=true)
-    light_sigma = light_sigma_from_surface_brightness(surface_brightness_profile, light_edges_use; normalize=true, sigma_floor=sigma_floor)
-    length(light_sigma) == length(light_target) || error("light_sigma length does not match light_target")
-    losvd_light_target = light_target_from_surface_brightness(surface_brightness_profile, kinematic_edges; normalize=false)
-    losvd_target = zeros(Float64, Nlosvd)
-    losvd_sigma = fill(DEFAULT_KARL_INVALID_SIGMA_SENTINEL, Nlosvd)
-
-    @inbounds for ib in 1:Nspatial
-        velocities = velocities_by_spatial[ib]
-        isempty(velocities) && continue
-        vkde, central, lower, upper = _karl_bootstrap_kde_envelope(velocities; grid_size=kde_grid, width_bins=kde_width_bins, vmin_kms=kde_vmin_kms, vmax_kms=kde_vmax_kms, bootstraps=bootstraps)
-        vfine, yfine, ylow, yhigh = _karl_transvd_profile(vkde, central, lower, upper; ntot=DEFAULT_KARL_RESOLVED_TRANSVD_SAMPLES, envelope_floor=envelope_floor)
-        target_bin, sigma_bin = _karl_rebin_transvd_to_model(vfine, yfine, ylow, yhigh, velocity_edges, max(losvd_light_target[ib], 0.0))
-        rows = ((ib - 1) * Nvbin + 1):(ib * Nvbin)
-        losvd_target[rows] .= target_bin
-        losvd_sigma[rows] .= sigma_bin
-    end
-
-    println("[KARL RESOLVED LOSVD TARGET]",
-        " Nspatial=", Nspatial,
-        " Nvbin=", Nvbin,
-        " kde_grid=", kde_grid,
-        " kde_width_bins=", kde_width_bins,
-        " kde_vmin_kms=", kde_vmin_kms,
-        " kde_vmax_kms=", kde_vmax_kms,
-        " bootstraps=", bootstraps,
-        " envelope_floor=", envelope_floor,
-        " valid_losvd_bins=", count(!=(DEFAULT_KARL_INVALID_SIGMA_SENTINEL), losvd_sigma),
-    )
-
-    return losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial
-end
-
+# WHAT:
+# Normalizes the key and numeric-array types of a surface-brightness/tracer profile.
+#
+# HOW:
+# Keys become Symbols. Known numerical profile columns are converted to Float64 arrays.
+# Other metadata is copied without reinterpretation.
+#
+# WHY:
+# The target-building functions can then use one consistent representation regardless
+# of whether the profile originated in Python or Julia.
 @inline function normalize_surface_brightness_profile(profile)
     profile === nothing && return nothing
     out = Dict{Symbol,Any}()
@@ -1074,6 +560,31 @@ end
     return out
 end
 
+# WHAT:
+# Converts the observed projected stellar profile into the normalized light/tracer
+# target vector used by the orbit-weight solver.
+#
+# PREFERRED PATH:
+# If the data product already contains light_frac, those fractions are authoritative.
+# If their original radial bins differ from the solver bins, the function redistributes
+# each source bin by overlapping annular area.
+#
+# AREA REBINNING:
+# For circular projected annuli, area is proportional to R_outer^2-R_inner^2. The
+# source light is split according to the fraction of that annular area overlapping
+# each destination bin.
+#
+# FALLBACK PATH:
+# If no light_frac exists, sampled R_pc + Sigma values are accumulated into the
+# requested spatial bins.
+#
+# IMPORTANT:
+# There is no fallback to the kinematic star counts. The observed light profile is
+# the authority for the tracer constraint.
+#
+# normalize=true:
+# The resulting target is rescaled to sum to one, matching orbit weights interpreted
+# as fractions of the total tracer light.
 function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{Float64}; normalize::Bool=true)
     profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     p = normalize_surface_brightness_profile(profile)
@@ -1132,6 +643,32 @@ function light_target_from_surface_brightness(profile, spatial_edges_m::Vector{F
     return target
 end
 
+# WHAT:
+# Propagates the observed surface-density uncertainties into uncertainties on the
+# light/tracer target bins.
+#
+# PREFERRED light_frac PATH:
+# Preserve the measured fractional uncertainty from the source surface-density bin:
+#
+#   sigma(L_i)/L_i = sigma(Sigma_i)/Sigma_i
+#
+# This converts each source light fraction into a source light-fraction uncertainty.
+#
+# REBINNING:
+# When source and destination radial bins differ, each source contribution is split
+# by annular overlap. Independent source-bin variances are then added in quadrature.
+#
+# NORMALIZATION:
+# If the light target is normalized, the propagated sigma is divided by the same
+# total-light normalization.
+#
+# FALLBACK:
+# For unbinned R_pc + Sigma data, Sigma_err values falling into one destination bin
+# are added in quadrature.
+#
+# sigma_floor:
+# Prevents a nominally exact zero uncertainty from creating an infinite statistical
+# weight later.
 function light_sigma_from_surface_brightness(profile, spatial_edges_m::Vector{Float64}; normalize::Bool=true, sigma_floor::Float64=1e-12)
     profile === nothing && error("surface_brightness_profile is required for Karl-style light uncertainties")
 
@@ -1267,13 +804,41 @@ function light_sigma_from_surface_brightness(profile, spatial_edges_m::Vector{Fl
     return out_sigma
 end
 
-function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8, target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR)
-    mode = target_mode isa Symbol ? target_mode : Symbol(lowercase(String(target_mode)))
-    if mode === :karl_resolved_stars
-        return _observed_targets_karl_resolved(R_star_m, valid_vlos, v_star_mps, kinematic_edges, velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=light_edges, sigma_floor=sigma_floor, kde_grid=karl_resolved_kde_grid, kde_width_bins=karl_resolved_kde_width_bins, kde_vmin_kms=karl_resolved_vmin_kms, kde_vmax_kms=karl_resolved_vmax_kms, bootstraps=karl_resolved_bootstraps, envelope_floor=karl_resolved_envelope_floor)
-    elseif mode !== :current
-        error("Unsupported LOSVD target_mode=$target_mode; expected :current or :karl_resolved_stars")
-    end
+# WHAT:
+# Builds all observed Karl-style targets needed by the orbit-weight solve:
+#
+#   losvd_target
+#   losvd_sigma
+#   light_target
+#   light_sigma
+#   counts_by_spatial
+#
+# LOSVD CONSTRUCTION:
+# Each valid observed star is assigned to a projected radial bin. Its measured vlos
+# is not placed into one hard velocity cell. Instead its Gaussian measurement error
+# is integrated across all LOSVD velocity bins.
+#
+# The per-star probabilities are renormalized inside the finite velocity grid before
+# being accumulated. This keeps each accepted star contributing total probability 1
+# to its spatial LOSVD histogram.
+#
+# LIGHT COUPLING:
+# The LOSVD in spatial bin i is scaled by the observed projected tracer light L_i:
+#
+#   y_ij = L_i * p_ij
+#
+# This means the LOSVD matrix and light profile share the same spatial normalization.
+#
+# LOSVD UNCERTAINTY:
+# The finite stellar sample supplies uncertainty on the velocity-bin fractions. The
+# code uses a Jeffreys-like Dirichlet pseudocount alpha=0.5 to avoid zero-variance
+# histogram cells. The light L_i is treated structurally here and scales that
+# probability uncertainty.
+#
+# IMPORTANT:
+# light_target/light_sigma may use their own light_edges. LOSVD normalization always
+# uses the kinematic_edges because its rows are organized by the kinematic apertures.
+function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8)
     kinematic_edges = resolve_karl_spatial_edges(kinematic_edges)
     light_edges_use = light_edges === nothing ? kinematic_edges : resolve_karl_light_edges(light_edges)
     velocity_edges = Float64.(velocity_edges)
@@ -1311,9 +876,11 @@ function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVe
             end
         end
     end
+    # STEP: Build the independent projected tracer/light constraint.
     light_target = light_target_from_surface_brightness(surface_brightness_profile, light_edges_use; normalize=true)
     light_sigma = light_sigma_from_surface_brightness(surface_brightness_profile, light_edges_use; normalize=true, sigma_floor=sigma_floor)
     length(light_sigma) == length(light_target) || error("light_sigma length does not match light_target")
+    # STEP: Put the LOSVD histogram onto the observed light normalization of each kinematic aperture.
     losvd_light_target = light_target_from_surface_brightness(surface_brightness_profile, kinematic_edges; normalize=false)
     losvd_target = zeros(Float64, Nlosvd)
     @inbounds for ib in 1:Nspatial
@@ -1328,6 +895,7 @@ function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVe
 
     # The LOSVD target in each row is y_ij = L_i * p_ij. The light profile fixes
     # L_i structurally. Only the finite kinematic sample sets a statistical sigma.
+    # STEP: Convert the finite stellar counts into statistical LOSVD-bin uncertainties.
     losvd_sigma = similar(losvd_target)
     alpha_dirichlet = 0.5
 
@@ -1348,6 +916,18 @@ function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVe
     return losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial
 end
 
+# WHAT:
+# Pulls in the two lower-level modules used by the support layer.
+#
+# OSPM_Physics_Weights.jl:
+#   entropy, phase-volume weights, LOSVD slack variables, SPEAR weight solver.
+#
+# OSPM_Physics_Force.jl:
+#   halo/stellar density, potential and force construction, force caches.
+#
+# WHY HERE:
+# OSPM_Physics_Spherical.jl includes this support file once, then receives all three
+# layers through one include chain.
 # ========================================================================================================================
 # §4  KARL WEIGHT / SPEAR SOLVER
 # ========================================================================================================================
@@ -1356,6 +936,28 @@ end
 include("OSPM_Physics_Weights.jl")
 include("OSPM_Physics_Force.jl")
 
+# WHAT:
+# Returns the time derivatives for one orbit state in cylindrical coordinates.
+#
+# STATE:
+#   s = (R_cyl, z, vR, vz)
+#
+# CONSERVED INPUT:
+#   Lz is the azimuthal angular momentum. vphi is not stored as a state variable;
+#   its centrifugal effect appears as Lz^2/R^3.
+#
+# HOW:
+# Convert cylindrical position to spherical r,theta so the shared frc closure can
+# return radial and polar force components. Convert those forces back to cylindrical
+# FR,Fz. Add the centrifugal term to radial acceleration.
+#
+# RETURNS:
+#   (dR/dt, dz/dt, dvR/dt, dvz/dt)
+#
+# SAFETY:
+# States outside the precomputed force domain, nonfinite states, negative R, or an
+# Lz!=0 orbit reaching the cylindrical axis return an all-NaN derivative. The
+# integrator interprets that as an invalid step rather than extrapolating the force.
 @inline function derivs(s::SVector{4,Float64}, Lz::Float64, frc, R)
     invalid = SVector(NaN, NaN, NaN, NaN)
     Rcyl, z, vR, vz = s
@@ -1388,6 +990,28 @@ include("OSPM_Physics_Force.jl")
     return all(isfinite, result) ? result : invalid
 end
 
+# WHAT:
+# Finds the outer zero-velocity radius for a fixed orbit family (E,Lz) at one theta.
+#
+# PHYSICAL PICTURE:
+# At a turning point in the meridional plane, radial/polar kinetic energy vanishes.
+# The remaining energy budget satisfies:
+#
+#   2(E-Phi) - Lz^2/(r^2 sin^2(theta)) = 0
+#
+# This function finds the outer root of that equation.
+#
+# HOW:
+# Start from rapo_max. If that point is still inside the allowed region, expand
+# outward until the forbidden side is found. If it is already outside, scan inward
+# until the allowed side is found. Once a sign-changing bracket exists, bisect it.
+#
+# WHY:
+# All members of one fixed-(E,|Lz|) orbit family must launch on the same zero-velocity
+# curve. This helper supplies the radius of that curve at each theta.
+#
+# RETURN STATE:
+# Returns the radius plus a Symbol describing success or the exact rejection reason.
 function _karl_outer_zero_velocity_radius(; energy::Float64, lz::Float64, theta0::Float64, rapo_max::Float64, pot, nscan::Int=256, max_expand::Int=32, expand_factor::Float64=1.5)
     ss = _ssin(theta0)
     if !(isfinite(ss) && abs(ss) > EPS_SIN)
@@ -1401,6 +1025,11 @@ function _karl_outer_zero_velocity_radius(; energy::Float64, lz::Float64, theta0
     isfinite(expand_factor) && expand_factor > 1.0 ||
         error("expand_factor must exceed one")
 
+    # WHAT:
+    # Local helper for the zero-velocity-curve root search.
+    #
+    # Positive radial_budget means the chosen (r,theta) lies in the accessible region
+    # for this E,Lz family. Zero is the turning curve. Negative is forbidden.
     function radial_budget(r::Float64)
         P = pot(r, theta0)
         isfinite(P) || return NaN
@@ -1492,6 +1121,31 @@ function _karl_outer_zero_velocity_radius(; energy::Float64, lz::Float64, theta0
     return 0.5 * (r_inner + r_outer), :ok
 end
 
+# WHAT:
+# Builds a sequence of launch points along the outer zero-velocity curve for one
+# fixed-(E,|Lz|) orbit family.
+#
+# PHYSICAL PICTURE:
+# E and |Lz| define a family. Different third-integral orbits are launched from
+# different positions along that family's meridional zero-velocity boundary.
+#
+# HOW:
+#   1. Sample theta from near the axis to the equatorial plane.
+#   2. Find the outer ZVC radius at every sampled theta.
+#   3. Keep only the contiguous valid branch connected to the equator.
+#   4. Convert the curve into cylindrical R,z.
+#   5. Measure arc length along the curve.
+#   6. Place Nlaunch launch points at equal fractions of that arc length.
+#   7. Re-solve the exact ZVC radius at each selected theta.
+#
+# WHY ARC LENGTH:
+# Equal spacing in theta would crowd launches where the ZVC bends sharply or stretch
+# them where it is flat. Arc-length spacing distributes the third-integral launch
+# sequence more uniformly along the actual physical boundary.
+#
+# CIRCULAR BOUNDARY:
+# The circular member is a special one-point family at the equatorial ZVC and has
+# zero arc length.
 function _karl_family_zvc_launches(; energy::Float64, lz::Float64, rapo::Float64, pot, Nlaunch::Int, circular_boundary::Bool=false, theta_floor::Float64=1.0e-4, ncurve::Int=0)
     Nlaunch > 0 || error("Nlaunch must be positive")
     isfinite(theta_floor) && 0.0 < theta_floor < pi / 2 || error("theta_floor must lie strictly between zero and pi/2")
@@ -1596,6 +1250,27 @@ function _karl_family_zvc_launches(; energy::Float64, lz::Float64, rapo::Float64
     return (state=:ok, u=u_launch, r=r_launch, theta=theta_launch, R=R_launch, z=z_launch, arc_length=total_arc)
 end
 
+# WHAT:
+# Defines the conserved E and Lz for one orbit family using an equatorial reference
+# apocenter and a fraction of the local circular angular momentum.
+#
+# HOW:
+# Evaluate the inward force at rapo. From circular balance:
+#
+#   vc^2 = -F_r * rapo
+#
+# Then:
+#
+#   Lz = Lz_frac * rapo * vc
+#   E  = Phi(rapo) + Lz^2/(2 rapo^2)
+#
+# WHY:
+# rapo selects the energy shell. Lz_frac selects how much angular momentum that
+# family has relative to the circular orbit at that shell.
+#
+# IMPORTANT:
+# This family definition is made at theta=pi/2. The off-equatorial launches later
+# reuse exactly this E and |Lz| rather than recomputing a new family at each theta.
 function karl_orbit_family_integrals(; rapo::Float64, Lz_frac::Float64, pot, frc, debug::Bool=true)
     theta_reference = f64(pi / 2)
     if !(isfinite(Lz_frac) && 0.0 <= Lz_frac <= 1.0)
@@ -1633,6 +1308,36 @@ function karl_orbit_family_integrals(; rapo::Float64, Lz_frac::Float64, pot, frc
     return Lz, E, vc, :ok
 end
 
+# WHAT:
+# Converts an orbit-family choice into the actual initial condition used by the
+# integrator.
+#
+# TWO MODES:
+#
+# 1. FREE FAMILY CONSTRUCTION:
+#    Given rapo, theta0, and Lz_frac, compute E and Lz locally. Circular launches
+#    begin at the turning point. Non-circular launches begin slightly inside it at
+#    r0_frac*rapo with inward vr chosen from the energy equation.
+#
+# 2. FIXED-FAMILY LAUNCH:
+#    If fixed_energy and fixed_lz are supplied, preserve those exact family
+#    integrals. Find or accept the corresponding zero-velocity turning radius at
+#    theta0. This is the path needed for the fixed-(E,|Lz|) third-integral sequence.
+#
+# TIMESTEP:
+# Estimate a local orbital frequency from the velocity scale and set:
+#
+#   dt = dt_frac / Omega
+#
+# WHY:
+# Faster inner orbits receive shorter physical timesteps than slower outer orbits.
+#
+# SAFETY:
+# The function rejects invalid geometry, bad forces/potentials, inconsistent fixed
+# family arguments, or a launch point that does not satisfy the energy budget.
+#
+# RETURN:
+# Initial-condition tuple, Lz, E, circular-speed scale, and a status Symbol.
 function launch_orbit_apocenter(; rapo::Float64, theta0::Float64, Lz_frac::Float64, pot, frc, r0_frac::Float64=DEFAULT_R0_FRAC, dt_frac::Float64=DEFAULT_DT_FRAC,
     dt_floor::Float64=DEFAULT_DT_FLOOR, fixed_energy=nothing, fixed_lz=nothing, fixed_rturn=nothing, debug::Bool=true)
     ss = _ssin(theta0)
@@ -1744,6 +1449,55 @@ function launch_orbit_apocenter(; rapo::Float64, theta0::Float64, Lz_frac::Float
     return ((r0, theta0, dt, vr0, 0.0), Lz, E, vc, :ok)
 end
 
+# WHAT:
+# Numerically integrates one orbit through the already-built gravitational potential.
+#
+# STATE REPRESENTATION:
+# Internally the RK4 state is cylindrical:
+#
+#   (R, z, vR, vz)
+#
+# Lz is held separately as a conserved azimuthal angular momentum. Stored output is
+# converted back to:
+#
+#   r, vr, theta, vtheta
+#
+# METHOD:
+# Classical fourth-order Runge-Kutta, but each requested top-level dt can be split
+# into smaller local substeps when the orbit is moving through a fast region.
+#
+# LOCAL STEP CONTROL:
+# Estimate several local frequencies from acceleration, meridional motion, radial
+# cylindrical motion, and azimuthal motion. The largest frequency sets a maximum
+# safe substep:
+#
+#   h_max = local_step_safety / omega_local
+#
+# WHY:
+# A fixed timestep that is fine near apocenter can be far too coarse during a rapid
+# central passage. The local substeps let one orbit keep the same top-level time
+# sampling while resolving those fast portions more carefully.
+#
+# DOMAIN PROTECTION:
+# The orbit is stopped rather than extrapolated when it leaves the precomputed force
+# table, reaches the inner stop radius, crosses an invalid cylindrical-axis state,
+# or develops a nonfinite RK4 stage.
+#
+# ENERGY DIAGNOSTIC:
+# With return_diag=true, the code periodically recomputes
+#
+#   E = Phi + 1/2(vR^2 + vz^2 + vphi^2)
+#
+# and tracks the largest relative drift from the reference energy. Excess drift is a
+# failed integration rather than an accepted orbit.
+#
+# CONTINUATION:
+# continuation_state lets a later integration segment resume from a previous final
+# cylindrical state. reference_energy keeps all segments judged against one energy.
+#
+# IMPORTANT:
+# This is adaptive substepping inside a classical RK4 step. It is not an embedded
+# RK method with a local truncation-error estimate.
 function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_rmin_factor=DEFAULT_STOP_RMIN_FACTOR, return_diag::Bool=false, pot=nothing, energy_check_every::Int=100, dt_scale::Float64=1.0, max_relative_energy_drift_allowed::Float64=Inf, energy_drift_boundary_allowance::Float64=5.0e-4, local_step_safety::Float64=0.10, max_substeps_per_step::Int=256, continuation_state=nothing, reference_energy=nothing)
     isfinite(dt_scale) && dt_scale > 0.0 || error("dt_scale must be finite and positive")
     !isnan(max_relative_energy_drift_allowed) && max_relative_energy_drift_allowed > 0.0 || error("max_relative_energy_drift_allowed must be positive or Inf")
@@ -1776,6 +1530,7 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
     vr0 = length(ic) >= 4 ? f64(ic[4]) : 0.0
     vtheta0 = length(ic) >= 5 ? f64(ic[5]) : 0.0
 
+    # STEP: Build the initial cylindrical phase-space state or resume a prior segment.
     state = if continuation_state === nothing
         st0, ct0 = sincos(theta0)
         R0 = r0 * st0
@@ -1807,6 +1562,13 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
     maximum_substep = 0.0
     completed_duration = 0.0
 
+    # WHAT:
+    # Local gate that decides whether a cylindrical orbit state is still inside the
+    # valid integration domain.
+    #
+    # WHY:
+    # The force closure should never be asked to extrapolate beyond its radial table.
+    # Lz!=0 orbits also cannot pass through R=0 because vphi=Lz/R would diverge.
     function state_exit_reason(s)
         all(isfinite, s) || return :nonfinite_state
         Rcyl, z = s[1], s[2]
@@ -1824,6 +1586,12 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         return :ok
     end
 
+    # WHAT:
+    # Converts the current cylindrical state back into the spherical variables stored
+    # by the orbit library.
+    #
+    # RETURNS:
+    #   r, theta, vr, vtheta
     function spherical_state(s)
         Rcyl, z, vR, vz = s
         rr = hypot(Rcyl, z)
@@ -1839,6 +1607,15 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         return rr, tr, vrr, vtt
     end
 
+    # WHAT:
+    # Evaluates the total specific orbital energy of the current cylindrical state.
+    #
+    # HOW:
+    # Recover vphi=Lz/R, add the meridional kinetic energy, then add the total
+    # gravitational potential from pot(r,theta).
+    #
+    # WHY:
+    # Used only when orbit diagnostics request energy-conservation checks.
     function orbit_energy(s)
         Rcyl, z, vR, vz = s
 
@@ -1861,6 +1638,16 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         return potential + 0.5 * (vR^2 + vz^2 + vphi^2)
     end
 
+    # WHAT:
+    # Estimates the maximum safe RK4 substep from the fastest local dynamical rate.
+    #
+    # FREQUENCY ESTIMATES:
+    #   omega_dyn  from local acceleration
+    #   omega_rad  from total meridional speed / radius
+    #   omega_R    from cylindrical radial crossing rate
+    #   omega_phi  from Lz/R^2
+    #
+    # The largest one controls the local resolution requirement.
     function local_step_limit(s, k1)
         Rcyl, z, vR, vz = s
         rr = hypot(Rcyl, z)
@@ -1883,6 +1670,13 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         return local_step_safety / omega_local
     end
 
+    # WHAT:
+    # Executes one classical RK4 substep of size h.
+    #
+    # SAFETY:
+    # Every intermediate RK stage is checked before its derivative is used. If an
+    # intermediate state leaves the valid domain, the function returns the original
+    # state plus the specific failure reason instead of completing a bad RK4 step.
     function rk4_substep(s, h, k1)
         state2 = s + 0.5 * h * k1
         reason2 = state_exit_reason(state2)
@@ -1918,6 +1712,7 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         termination_reason = :invalid_initial_timestep
     end
 
+    # STEP: Integrate only while the current orbit remains numerically valid.
     if termination_reason === :completed
         initial_state_reason = state_exit_reason(state)
         initial_state_reason !== :ok && (termination_reason = initial_state_reason)
@@ -1945,6 +1740,7 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
         end
     end
 
+    # STEP: Integrate only while the current orbit remains numerically valid.
     if termination_reason === :completed
         @inbounds for step in 1:ns
             current_reason = state_exit_reason(state)
@@ -1988,6 +1784,7 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
                 end
             end
 
+            # STEP: One requested dt may be split into several locally safe RK4 substeps.
             remaining = abs(dt)
             dt_sign = sign(dt)
             substeps_this_step = 0
@@ -2060,11 +1857,13 @@ function integrate_orbit_rk4(; ic, xLz, orbit_ctx, nsteps=DEFAULT_NSTEPS, stop_r
     resize!(theta, actual)
     resize!(vtheta, actual)
 
+    # STEP: Integrate only while the current orbit remains numerically valid.
     if termination_reason === :completed
         final_state_reason = state_exit_reason(state)
         final_state_reason !== :ok && (termination_reason = final_state_reason)
     end
 
+    # STEP: Package the integration-quality information used by orbit diagnostics.
     if return_diag
         if termination_reason === :completed && state_exit_reason(state) === :ok
             checked_final_energy = orbit_energy(state)

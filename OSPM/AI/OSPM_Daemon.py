@@ -1,4 +1,5 @@
 # OSPM_Daemon.py — STAYS IN PYTHON FOREVER.  Parallelism lives in Julia, not here.
+"""
 # ========================================================================================================================
 # WHAT THIS DOES
 # Drives an RL-guided search over dark-matter halo parameters θ.  The first
@@ -46,6 +47,7 @@
 #
 # run_daemon(config,engine)  config,engine → None                — outer loop: propose→eval→record→train
 # ========================================================================================================================
+"""
 
 import os, time, traceback, json
 import numpy as np, pandas as pd
@@ -60,8 +62,10 @@ PHASE_VOLUME_DIAG_COLUMNS = ["phase_volume_valid", "phase_volume_convention", "p
     "phase_volume_valid_base_orbits", "phase_volume_invalid_recorded_orbits", "phase_volume_nested_groups", "phase_volume_duplicate_area_clusters", "phase_volume_duplicate_area_orbits",
     "raw_phase_volume_min", "raw_phase_volume_max", "raw_phase_volume_dynamic_range", "normalized_phase_volume_min", "normalized_phase_volume_max", "wphase_min", "wphase_max",
     "wphase_dynamic_range", "wphase_pair_max_relative_mismatch"]
+
 # ========================================================================================================================
 # ========================================================================================================================
+
 
 def clamp(x, lo, hi): return max(lo, min(hi, x))
 
@@ -122,7 +126,6 @@ def min_dist(theta, arr):
     if len(arr) == 0: return np.inf
     return np.linalg.norm(np.asarray(arr) - np.asarray(theta), axis=1).min()
 
-
 def is_real_pass(status):
     return str(status) == "pass_full"
 
@@ -182,7 +185,6 @@ def _selected_variants(config, variant_map):
 
 def _jl_matrix_f64(mat, Main, juliacall=None, name="mat"):
     arr = np.asarray(mat, dtype=np.float64)
-    print(f"[JL MATRIX DEBUG] {name}: shape={arr.shape}, dtype={arr.dtype}", flush=True)
     if arr.ndim != 2:
         raise ValueError(f"{name} must be 2D, got shape {arr.shape}")
     if not np.isfinite(arr).all():
@@ -409,12 +411,7 @@ class Deck:
         missing = [c for c in self.cols if c not in df.columns]
         if missing: raise KeyError(f"Deck missing required columns: {missing}")
         self.df = df[self.cols].copy()
-        print("DECK LOAD DEBUG")
-        print("path:", self.path)
-        print("params:", self.params)
-        print("columns:", self.df.columns.tolist())
-        print("head:")
-        print(self.df.head().to_string())
+        print(f"[DECK] loaded rows={len(self.df)} path={self.path}", flush=True)
         self._params_arr = self.df[self.params].values.astype(float)
         self._status_arr = self.df["status"].values.astype(str)
     def _flush_buf(self):
@@ -448,7 +445,6 @@ class Deck:
             self._flush_buf()
             self.save()
             self._dirty = 0
-
 
 class Fixer:
     def __init__(self, cfg):
@@ -490,7 +486,6 @@ class FlatDetector:
         self.cnt = self.cnt + 1 if np.std(self.buf) < self.eps and np.isfinite(x) else 0
     def flat(self): return self.cnt >= self.p
 
-
 class ConvergenceDetector:
     def __init__(self, cfg, bounds, cols):
         self.rel_thr = float(cfg.get("CONVERGE_REL_SPREAD", 0.05))
@@ -526,7 +521,6 @@ class ConvergenceDetector:
 # ========================================================================================================================
 # 
 # ========================================================================================================================
-
 
 class Runner:
     def __init__(self, cfg):
@@ -819,16 +813,13 @@ def run_daemon(config, physics_engine):
     actual_halo_names = tuple(config["PARAMETER_NAMES"][:2])
     if actual_halo_names != expected_halo_names: raise ValueError(f"HALO_PARAMETERIZATION={halo_parameterization!r} expects PARAMETER_NAMES to begin with {list(expected_halo_names)!r}, got {list(actual_halo_names)!r}")
     if len(config["THETA_BOUNDS"]) < len(config["PARAMETER_NAMES"]): raise ValueError("THETA_BOUNDS must cover PARAMETER_NAMES")
-    print("CONFIG HALO_PARAMETERIZATION:", halo_parameterization)
-    print("CONFIG PARAMETER_NAMES:", config["PARAMETER_NAMES"])
-    print("CONFIG THETA_BOUNDS:", config["THETA_BOUNDS"])
+    print(f"[OSPM] halo_parameterization={halo_parameterization} parameters={config['PARAMETER_NAMES']} bounds={config['THETA_BOUNDS']}", flush=True)
     if fixed_theta is not None:
-        print("CONFIG FIXED_THETA:", fixed_theta)
+        print(f"[OSPM] fixed_theta={fixed_theta}", flush=True)
     if halo_parameterization == "vcirc_rs":
         vcirc0, rs0 = float(config["INITIAL_THETA"][0]), float(config["INITIAL_THETA"][1])
         rho0 = nfw_vcirc_rs_to_rho_s(vcirc0, rs0)
         print(f"[HALO CONVERSION] vcirc={vcirc0:g} km/s, r_s={rs0:g} pc -> rho_s={rho0:.8g} Msun/pc^3")
-    print("runner.bounds:", runner.bounds)
     flat = FlatDetector(config.get("FLAT_WINDOW", 200), config.get("FLAT_THRESHOLD", 1e-6), config.get("FLAT_PATIENCE", 3))
     converge = ConvergenceDetector(config, config["THETA_BOUNDS"], config["PARAMETER_NAMES"])
     proposal_count, eval_count, full_count = 0, 0, 0
@@ -872,6 +863,36 @@ def run_daemon(config, physics_engine):
     tracer_constraint_mode = str(opt("TRACER_CONSTRAINT_MODE", "tracer_constraint_mode", default="projected_light")).strip().lower()
     if tracer_constraint_mode not in ("projected_light", "density_3d"):
         raise ValueError("TRACER_CONSTRAINT_MODE must be 'projected_light' or 'density_3d'")
+    losvd_target_mode = str(opt("LOSVD_TARGET_MODE", "losvd_target_mode", default="current")).strip().lower()
+    if losvd_target_mode not in ("current", "karl_resolved_stars", "karl_mode0_observables"):
+        raise ValueError("LOSVD_TARGET_MODE must be 'current', 'karl_resolved_stars', or 'karl_mode0_observables'")
+    karl_resolved_kde_grid = int(opt("KARL_RESOLVED_KDE_GRID", "karl_resolved_kde_grid", default=17))
+    karl_resolved_kde_width_bins = float(opt("KARL_RESOLVED_KDE_WIDTH_BINS", "karl_resolved_kde_width_bins", default=3.0))
+    karl_resolved_vmin_kms = float(opt("KARL_RESOLVED_VMIN_KMS", "karl_resolved_vmin_kms", default=-25.0))
+    karl_resolved_vmax_kms = float(opt("KARL_RESOLVED_VMAX_KMS", "karl_resolved_vmax_kms", default=25.0))
+    karl_resolved_bootstraps = int(opt("KARL_RESOLVED_BOOTSTRAPS", "karl_resolved_bootstraps", default=300))
+    karl_resolved_envelope_floor = float(opt("KARL_RESOLVED_ENVELOPE_FLOOR", "karl_resolved_envelope_floor", default=0.003))
+    karl_observables_csv = opt("KARL_OBSERVABLES_CSV", "karl_observables_csv", default=None)
+    if losvd_target_mode == "karl_mode0_observables":
+        if karl_observables_csv is None or not str(karl_observables_csv).strip():
+            raise ValueError("Karl mode-0 observables LOSVD requires KARL_OBSERVABLES_CSV")
+        karl_observables_csv = str(karl_observables_csv)
+        if not os.path.isfile(karl_observables_csv):
+            raise FileNotFoundError(f"KARL_OBSERVABLES_CSV not found: {karl_observables_csv}")
+        karl_observables_cfg = config.get("KARL_OBSERVABLES", {})
+        if isinstance(karl_observables_cfg, dict):
+            nvbin = int(karl_observables_cfg.get("nvel", nvbin))
+    if losvd_target_mode == "karl_resolved_stars":
+        if karl_resolved_kde_grid <= 1:
+            raise ValueError("KARL_RESOLVED_KDE_GRID must exceed one")
+        if not np.isfinite(karl_resolved_kde_width_bins) or karl_resolved_kde_width_bins <= 0.0:
+            raise ValueError("KARL_RESOLVED_KDE_WIDTH_BINS must be finite and positive")
+        if not np.isfinite(karl_resolved_vmin_kms) or not np.isfinite(karl_resolved_vmax_kms) or karl_resolved_vmax_kms <= karl_resolved_vmin_kms:
+            raise ValueError("KARL_RESOLVED_VMIN_KMS/KARL_RESOLVED_VMAX_KMS define an invalid velocity range")
+        if karl_resolved_bootstraps <= 1:
+            raise ValueError("KARL_RESOLVED_BOOTSTRAPS must exceed one")
+        if not np.isfinite(karl_resolved_envelope_floor) or karl_resolved_envelope_floor < 0.0:
+            raise ValueError("KARL_RESOLVED_ENVELOPE_FLOOR must be finite and nonnegative")
     alphat = float(opt("KARL_ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
     apfac = float(opt("KARL_APFAC", "apfac", default=0.01))
     light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
@@ -934,9 +955,19 @@ def run_daemon(config, physics_engine):
     kinematic_bin_edges = np.asarray(kinematic_bin_edges, float).ravel() * 3.0856775814913673e16
     light_bin_edges = np.asarray(light_bin_edges, float).ravel() * 3.0856775814913673e16
     n_light = max(0, len(light_bin_edges) - 1)
-    n_kin = max(0, len(kinematic_bin_edges) - 1)
     r_light_max_pc = float(light_bin_edges[-1] / 3.0856775814913673e16) if len(light_bin_edges) else float("nan")
-    r_kin_max_pc = float(kinematic_bin_edges[-1] / 3.0856775814913673e16) if len(kinematic_bin_edges) else float("nan")
+    if losvd_target_mode == "karl_mode0_observables":
+        observables_rows = pd.read_csv(karl_observables_csv, usecols=["row_type", "ir", "r_outer_pc", "ir_end"])
+        aperture_rows = observables_rows[observables_rows["row_type"].astype(str) == "aperture"].copy()
+        spatial_rows = observables_rows[observables_rows["row_type"].astype(str) == "spatial_cell"].copy()
+        n_kin = int(len(aperture_rows))
+        spatial_rout = spatial_rows.dropna(subset=["ir", "r_outer_pc"]).groupby("ir")["r_outer_pc"].first().to_dict()
+        aperture_ir_end = pd.to_numeric(aperture_rows["ir_end"], errors="coerce").dropna().astype(int).tolist()
+        aperture_rout = [float(spatial_rout[x]) for x in aperture_ir_end if x in spatial_rout]
+        r_kin_max_pc = max(aperture_rout) if aperture_rout else float("nan")
+    else:
+        n_kin = max(0, len(kinematic_bin_edges) - 1)
+        r_kin_max_pc = float(kinematic_bin_edges[-1] / 3.0856775814913673e16) if len(kinematic_bin_edges) else float("nan")
     Main._stellar_model_jl = _jl_primitive_dict(stellar_model, Main, "stellar_model")
     Main._karl_halo_params_jl = _jl_primitive_dict(karl_halo_params, Main, "karl_halo_params")
     _jl_surface_brightness_profile(surface_brightness_profile, Main)
@@ -951,11 +982,9 @@ def run_daemon(config, physics_engine):
             error("karl_halo_params handoff must be nothing or a Julia dictionary")
         (_velocity_edges_jl === nothing || _velocity_edges_jl isa AbstractVector{<:Real}) ||
             error("velocity_edges handoff must be nothing or a real Julia vector")
-        println(
-            "[Daemon] Julia handoff — stellar_model=", typeof(_stellar_model_jl),
-            ", karl_halo_params=", typeof(_karl_halo_params_jl),
-            ", velocity_edges=", typeof(_velocity_edges_jl),
-        )
+        if get(ENV, "OSPM_DIAG_JULIA_HANDOFF", "0") == "1"
+            println("[JULIA HANDOFF] stellar_model=", typeof(_stellar_model_jl), " karl_halo_params=", typeof(_karl_halo_params_jl), " velocity_edges=", typeof(_velocity_edges_jl))
+        end
     """)
 
     sini = float(obs.sini)
@@ -964,24 +993,37 @@ def run_daemon(config, physics_engine):
         raise RuntimeError(f"Karl paired-orbit Spherical path requires even Norbit because Norbit is the final column count; got Norbit={Norbit}")
     nstar_vlos = int(np.count_nonzero(valid_vlos))
     print(
-        f"[Daemon] Karl batch mode ON — Norbit={Norbit}, Nbase_orbit={Norbit // 2}, Nstar_vlos={nstar_vlos}, "
-        f"Nvbin={nvbin}, Ntheta_launch={ntheta_launch}, tracer_constraint_mode={tracer_constraint_mode}, alphat={alphat}, apfac={apfac}, "
-        f"light_rel_tol={light_rel_tol}, light_sigma_tol={light_sigma_tol}, delta_chi2_iter_tol={delta_chi2_iter_tol}, "
-        f"halo_q={halo_q_axis_ratio}, karl_halo_params_active={karl_halo_params is not None}",
+        f"[RUN] Norbit={Norbit} base_orbits={Norbit // 2} Nstar_vlos={nstar_vlos} Ntheta_launch={ntheta_launch} "
+        f"tracer_mode={tracer_constraint_mode} alphat={alphat} apfac={apfac} light_rel_tol={light_rel_tol} "
+        f"delta_chi2_tol={delta_chi2_iter_tol}",
         flush=True,
     )
+    if losvd_target_mode == "karl_resolved_stars":
+        print(
+            f"[OBSERVABLES] mode={losvd_target_mode} apertures={n_kin} Nvbin={nvbin} tracer_bins={n_light} "
+            f"R_tracer_max_pc={r_light_max_pc:.6g} R_aperture_max_pc={r_kin_max_pc:.6g} "
+            f"kde_grid={karl_resolved_kde_grid} kde_width_bins={karl_resolved_kde_width_bins} "
+            f"vmin_kms={karl_resolved_vmin_kms} vmax_kms={karl_resolved_vmax_kms}",
+            flush=True,
+        )
+    elif losvd_target_mode == "karl_mode0_observables":
+        print(
+            f"[OBSERVABLES] mode={losvd_target_mode} apertures={n_kin} Nvbin={nvbin} tracer_bins={n_light} "
+            f"R_tracer_max_pc={r_light_max_pc:.6g} R_aperture_max_pc={r_kin_max_pc:.6g} "
+            f"constraints={n_light + n_kin * nvbin} csv={karl_observables_csv}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[OBSERVABLES] mode=current apertures={n_kin} Nvbin={nvbin} tracer_bins={n_light} "
+            f"R_tracer_max_pc={r_light_max_pc:.6g} R_aperture_max_pc={r_kin_max_pc:.6g} "
+            f"constraints={n_light + n_kin * nvbin}",
+            flush=True,
+        )
     print(
-        f"[Daemon] Karl bin contract — N_light={n_light}, N_kin={n_kin}, "
-        f"R_light_max_pc={r_light_max_pc:.6g}, R_kin_max_pc={r_kin_max_pc:.6g}, "
-        f"N_constraints={n_light + n_kin * nvbin}",
-        flush=True,
-    )
-    print(
-        f"[Daemon] Orbit coverage — strict={orbit_fill_pct:.3f}/{orbit_regional_floor:.3f}/{orbit_max_regional_gap:.3f}, "
-        f"warning={orbit_warn_fill_pct:.3f}/{orbit_warn_success_pct:.3f}/"
-        f"{orbit_warn_regional_floor:.3f}/{orbit_warn_max_regional_gap:.3f}, "
-        f"shell_bands={orbit_shell_bands}, check_every={orbit_coverage_check_every}, "
-        f"model_owner_limit={model_owner_limit or 'auto'}",
+        f"[COVERAGE] strict={orbit_fill_pct:.3f}/{orbit_regional_floor:.3f}/{orbit_max_regional_gap:.3f} "
+        f"warning={orbit_warn_fill_pct:.3f}/{orbit_warn_success_pct:.3f}/{orbit_warn_regional_floor:.3f}/{orbit_warn_max_regional_gap:.3f} "
+        f"shell_bands={orbit_shell_bands} check_every={orbit_coverage_check_every}",
         flush=True,
     )
 
@@ -1128,15 +1170,6 @@ def run_daemon(config, physics_engine):
                 theta_mat = canonicalize_theta_matrix( theta_mat_external, halo_type=halo_type_chunk, halo_parameterization=halo_parameterization, bounds=config["THETA_BOUNDS"] )
                 chunk_t0 = time.perf_counter()
                 try:
-                    print("[JL KWARG DEBUG]", flush=True)
-                    print("stellar_model type:", type(stellar_model), flush=True)
-                    print("stellar_model value:", stellar_model, flush=True)
-                    print("surface_brightness_profile type:", type(surface_brightness_profile), flush=True)
-                    print("surface_brightness_profile value:", surface_brightness_profile, flush=True)
-                    print("karl_halo_params type:", type(karl_halo_params), flush=True)
-                    print("karl_halo_params value:", karl_halo_params, flush=True)
-                    print("velocity_edges type:", type(velocity_edges), flush=True)
-                    print("velocity_edges value:", velocity_edges, flush=True)
                     Main._theta_mat_jl = _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat")
                     Main._R_star_jl = _jl_vector_f64(R_star_m, Main, name="R_star_m")
                     Main._valid_vlos_jl = _jl_vector_bool(valid_vlos, Main, name="valid_vlos")
@@ -1151,6 +1184,14 @@ def run_daemon(config, physics_engine):
                     Main.seval(f"_Norbit_jl = {int(Norbit)}")
                     Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
                     Main.seval("_tracer_constraint_mode_jl = " + json.dumps(tracer_constraint_mode))
+                    Main.seval("_losvd_target_mode_jl = " + json.dumps(losvd_target_mode))
+                    Main.seval(f"_karl_resolved_kde_grid_jl = {int(karl_resolved_kde_grid)}")
+                    Main.seval(f"_karl_resolved_kde_width_bins_jl = {float(karl_resolved_kde_width_bins)!r}")
+                    Main.seval(f"_karl_resolved_vmin_kms_jl = {float(karl_resolved_vmin_kms)!r}")
+                    Main.seval(f"_karl_resolved_vmax_kms_jl = {float(karl_resolved_vmax_kms)!r}")
+                    Main.seval(f"_karl_resolved_bootstraps_jl = {int(karl_resolved_bootstraps)}")
+                    Main.seval(f"_karl_resolved_envelope_floor_jl = {float(karl_resolved_envelope_floor)!r}")
+                    Main.seval("_karl_observables_csv_jl = " + ("nothing" if karl_observables_csv is None else json.dumps(karl_observables_csv)))
                     Main.seval(f"_alphat_jl = {float(alphat)!r}")
                     Main.seval(f"_apfac_jl = {float(apfac)!r}")
                     Main.seval(f"_light_rel_tol_jl = {float(light_rel_tol)!r}")
@@ -1187,6 +1228,14 @@ _halo_type_jl;
 stellar_model=_stellar_model_jl,
 surface_brightness_profile=_sb_profile_jl,
 tracer_constraint_mode=_tracer_constraint_mode_jl,
+losvd_target_mode=_losvd_target_mode_jl,
+karl_resolved_kde_grid=_karl_resolved_kde_grid_jl,
+karl_resolved_kde_width_bins=_karl_resolved_kde_width_bins_jl,
+karl_resolved_vmin_kms=_karl_resolved_vmin_kms_jl,
+karl_resolved_vmax_kms=_karl_resolved_vmax_kms_jl,
+karl_resolved_bootstraps=_karl_resolved_bootstraps_jl,
+karl_resolved_envelope_floor=_karl_resolved_envelope_floor_jl,
+karl_observables_csv=_karl_observables_csv_jl,
 alphat=_alphat_jl,
 apfac=_apfac_jl,
 light_rel_tol=_light_rel_tol_jl,
@@ -1382,7 +1431,7 @@ kinematic_bin_edges=_kin_bins_jl
     fixer.unlock(deck, runner)
     runner.train(deck)
     while full_count < int(config["MAX_RUNS"]):
-        print(f"[Daemon] loop full={full_count} evals={eval_count} proposals={proposal_count}", flush=True)
+        if os.environ.get("OSPM_DIAG_DAEMON_LOOP", "0") == "1": print(f"[DAEMON LOOP] full={full_count} evals={eval_count} proposals={proposal_count}", flush=True)
         t0 = time.perf_counter()
         deck._flush_buf()
         if fixed_theta is not None:
@@ -1402,7 +1451,6 @@ kinematic_bin_edges=_kin_bins_jl
         wave_size = min(feedback_batch, remaining)
         base_props = runner.propose(deck, n=wave_size)
         proposal_count += len(base_props)
-        print("base_props[:3] =", base_props[:3])
         full_props = _dedupe_props([_bounded_prop(theta, pid, "full") for theta, pid in base_props])
         t_acc["propose"] += time.perf_counter() - t0
         t_cnt["propose"] += 1

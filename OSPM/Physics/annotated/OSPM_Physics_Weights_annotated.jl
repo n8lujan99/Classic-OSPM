@@ -4,13 +4,29 @@
 # Owns:
 #   - strict Karl inverse-phase-volume handling
 #   - Karl entropy type 2
-#   - Karl-fidelity uniform fresh-start orbit weights
+#   - paired prograde/retrograde initial weights
 #   - expanded-Cm SPEAR solver
 #   - LOSVD slack variables
 #   - standard LOSVD χ² block scoring
 #   - xmu / M-L helper functions
 # ========================================================================================================================
 
+# WHAT:
+# Validates and converts the inverse-phase-volume vector before the weight solver uses it.
+#
+# HOW:
+#   - Require exactly one wphase value per orbit column.
+#   - Require every value to be finite and positive.
+#   - In paired mode, verify that each prograde/retrograde pair has the same wphase.
+#
+# WHY:
+# wphase enters the entropy term directly. A bad value would change the preferred
+# orbit population rather than merely causing a cosmetic diagnostic problem.
+#
+# IMPORTANT:
+# There is deliberately no fallback to wphase=1 or to the entropy floor. If the
+# phase-volume machinery failed, the weight solve stops instead of silently
+# becoming a different entropy model.
 function _prepare_wphase(wphase, n::Int; require_paired::Bool=true, pair_rtol::Float64=1.0e-12,)
     n > 0 || error("Norbit must be positive before preparing Karl phase volumes")
     wphase === nothing && error("Karl inverse phase volumes are required. Build and compact wphase " * "with OSPM_Physics_PhaseVolume.jl before calling the weight solver.")
@@ -49,6 +65,20 @@ function _prepare_wphase(wphase, n::Int; require_paired::Bool=true, pair_rtol::F
     return wp
 end
 
+# WHAT:
+# Summarizes the numerical range and pairing quality of the inverse phase volumes.
+#
+# HOW:
+# Work in log space so very large dynamic ranges can be measured safely. Convert
+# back only for the reported extrema and geometric mean.
+#
+# PHYSICAL NOTE:
+# Since wphase = 1/phase_volume, the smallest wphase corresponds to the largest
+# phase-space cell. The reported phase-volume extrema are obtained by inversion.
+#
+# WHY:
+# These diagnostics tell us whether entropy is being asked to operate across an
+# extreme phase-volume range or whether prograde/retrograde columns became misaligned.
 function karl_wphase_diagnostics(wphase::Vector{Float64}; paired::Bool=true)
     isempty(wphase) && error("wphase diagnostics require at least one orbit")
     all(isfinite, wphase) || error("wphase diagnostics received nonfinite values")
@@ -90,10 +120,107 @@ function karl_wphase_diagnostics(wphase::Vector{Float64}; paired::Bool=true)
     )
 end
 
+# WHAT:
+# Builds the starting orbit-weight distribution from phase volume.
+#
+# PHYSICAL PICTURE:
+# Before the data-driven SPEAR iterations begin, larger phase-space cells receive
+# more initial probability mass. Since wphase is inverse phase volume, the code
+# reconstructs volume through -log(wphase).
+#
+# PAIRED MODE:
+# Each base orbit has prograde and retrograde columns. Their total initial mass is
+# set by the base orbit phase volume. rotfrac splits that mass between the two signs.
+#
+# WHY rotfrac=0.75:
+# This is an initialization choice. It gives the prograde copy 75% of each pair's
+# starting mass and the retrograde copy 25%. The later solver is free to move them.
+#
+# ENTROPY FLOOR:
+# Every orbit receives at least floor. The remaining probability mass follows the
+# phase-volume prior. The final vector is explicitly checked to sum to one.
+function karl_initial_weights_from_wphase(wphase::Vector{Float64}; paired::Bool=true, rotfrac::Float64=0.75, floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
+    n = length(wphase)
+    n > 0 || return Float64[]
+    all(isfinite, wphase) || error("Karl initial weights received nonfinite wphase")
+    all(>(0.0), wphase) || error("Karl initial weights received non-positive wphase")
+    isfinite(floor) && floor > 0.0 || error("initial-weight floor must be finite and positive")
+    n * floor < 1.0 || error("initial-weight floor is too large for Norbit=$n")
+    q = zeros(Float64, n)
+    if paired
+        iseven(n) || error("paired Karl initial weights require an even number of orbit columns",)
+        isfinite(rotfrac) && 0.0 < rotfrac < 1.0 ||
+            error("rotfrac must lie strictly between 0 and 1")
+        log_volume = Vector{Float64}(undef, n ÷ 2)
+        @inbounds for ibase in eachindex(log_volume)
+            ip = 2 * ibase - 1
+            ir = 2 * ibase
+            scale = max(abs(wphase[ip]), abs(wphase[ir]), floatmin(Float64))
+            abs(wphase[ip] - wphase[ir]) <= 1.0e-12 * scale ||
+                error("paired wphase mismatch at base orbit $ibase")
+            log_volume[ibase] = -0.5 * (log(wphase[ip]) + log(wphase[ir]))
+        end
+        log_volume_max = maximum(log_volume)
+        @inbounds for ibase in eachindex(log_volume)
+            pair_volume = exp(log_volume[ibase] - log_volume_max)
+            ip = 2 * ibase - 1
+            ir = 2 * ibase
+            q[ip] = rotfrac * pair_volume
+            q[ir] = (1.0 - rotfrac) * pair_volume
+        end
+    else
+        log_volume = -log.(wphase)
+        log_volume_max = maximum(log_volume)
+        @inbounds for i in eachindex(q)
+            q[i] = exp(log_volume[i] - log_volume_max)
+        end
+    end
+    qsum = sum(q)
+    isfinite(qsum) && qsum > 0.0 ||
+        error("Karl phase-volume initial distribution has non-positive sum")
+    q ./= qsum
+    # Keep every physical orbit strictly inside the entropy domain while
+    # preserving the phase-volume prior in the remaining probability mass.
+    free_mass = 1.0 - n * floor
+    w = similar(q)
+    @inbounds for i in eachindex(q)
+        w[i] = floor + free_mass * q[i]
+    end
+    abs(sum(w) - 1.0) <= 100.0 * eps(Float64) * max(n, 1) ||
+        error("Karl initial orbit weights failed normalization")
+    minimum(w) >= floor ||
+        error("Karl initial orbit weights fell below the entropy floor")
+    return w
+end
+
+
+# WHAT:
+# Returns x when it is safely positive. Otherwise returns the supplied floor.
+#
+# WHY:
+# This is a small numerical guard for expressions that cannot accept zero,
+# negative, or nonfinite values.
+#
+# NOTE:
+# In this file the helper is currently defined but not called by another function.
 @inline function _safe_positive(x::Float64; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     return (isfinite(x) && x > floor) ? x : floor
 end
 
+# WHAT:
+# Measures the full LOSVD width at a chosen fraction of its peak height.
+#
+# EXAMPLE:
+# frac=0.5 gives a discrete FWHM-style width. frac=0.25 measures the broader
+# quarter-maximum width.
+#
+# HOW:
+# Find every velocity bin whose LOSVD value is at or above frac*fmax. Return the
+# distance between the lowest and highest qualifying velocity centers.
+#
+# NOTE:
+# This is a bin-based width. It does not interpolate the exact crossing points
+# between velocity bins.
 function losvd_width_at_fraction(v::Vector{Float64}, f::Vector{Float64}, frac::Float64)
     length(v) == length(f) || error("velocity and LOSVD arrays must match")
     length(v) >= 2 || return NaN
@@ -105,6 +232,22 @@ function losvd_width_at_fraction(v::Vector{Float64}, f::Vector{Float64}, frac::F
     return maximum(v[inds]) - minimum(v[inds])
 end
 
+# WHAT:
+# Updates Karl's xmu scale by comparing model and observed LOSVD widths.
+#
+# HOW:
+# For every spatial bin, compare the model/data width at the requested peak
+# fractions. Average model_width/data_width over all usable measurements.
+#
+# INTERPRETATION:
+# sxmu > 1 means the model LOSVD is broader than the data on average.
+# sxmu < 1 means it is narrower.
+#
+# The returned pml_xmu is the full suggested correction. xmu_new applies only the
+# fraction controlled by apfacmu.
+#
+# NOTE:
+# This helper is separate from the main expanded-Cm orbit-weight loop shown below.
 function karl_update_xmu_from_fwhm(xmu::Float64, model_losvd_by_bin::Vector{Vector{Float64}}, data_losvd_by_bin::Vector{Vector{Float64}}, velocity_centers_by_bin::Vector{Vector{Float64}}; apfacmu::Float64=1.0, fractions::NTuple{2,Float64}=(0.25, 0.50))
     length(model_losvd_by_bin) == length(data_losvd_by_bin) == length(velocity_centers_by_bin) ||
         error("LOSVD bin collections must have matching lengths")
@@ -131,15 +274,48 @@ function karl_update_xmu_from_fwhm(xmu::Float64, model_losvd_by_bin::Vector{Vect
     return xmu_new, sxmu, pml_xmu
 end
 
+# WHAT:
+# Converts Karl's xmu velocity scale into the corresponding mass-to-light scaling.
+#
+# RELATION:
+#   M/L = 1 / xmu^2
+#
+# NOTE:
+# Non-positive xmu is not physically usable here, so the function returns Inf.
 @inline function karl_ml_from_xmu(xmu::Float64)
     return xmu > 0.0 ? 1.0 / (xmu * xmu) : Inf
 end
 
+# WHAT:
+# Convenience wrapper for the Karl LOSVD scoring state.
+#
+# RETURNS:
+#   - total LOSVD chi-square
+#   - chi-square for each spatial bin
+#   - fracnew for each spatial bin
+#
+# WHY:
+# Keeps callers that only need the score from having to unpack the full LOSVD state.
 function chi2_block_karl_fracnew(A_losvd::Matrix{Float64}, w::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, Nspatial::Int, Nvbin::Int)
     state = karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, Nspatial, Nvbin)
     return state.chi_total, state.chi_by_spatial, state.fracnew
 end
 
+# WHAT:
+# Evaluates the Karl type-2 orbit entropy for a finished weight vector.
+#
+# EQUATION:
+#   S = -sum_i w_i log(w_i * wphase_i)
+#
+# Since wphase_i = 1 / phase_volume_i, this measures occupation relative to the
+# phase-space volume represented by each discrete orbit column.
+#
+# PHYSICAL PICTURE:
+# Two orbit columns with equal numerical weight are not necessarily equally filled
+# in phase space if they represent very different phase volumes.
+#
+# IMPORTANT:
+# Every physical orbit weight and every wphase must be strictly positive.
 @inline function karl_entropy_value(w::Vector{Float64}, wphase::Vector{Float64}; entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     length(w) == length(wphase) || error("weight and wphase lengths do not match")
     all(isfinite, wphase) || error("entropy received nonfinite wphase")
@@ -153,6 +329,21 @@ end
     return S
 end
 
+# WHAT:
+# Measures the worst fractional mismatch between the weighted orbit light model and
+# the required light/tracer target.
+#
+# HOW:
+# Compute A_light*w. For ordinary nonzero target bins, divide the absolute residual
+# by that target value.
+#
+# ZERO-TARGET BINS:
+# A literal division by zero would be meaningless. Very small target bins instead
+# use the smallest resolved nonzero target as a reference scale.
+#
+# WHY:
+# This is the hard relative-light gate used by the main solver. One bad spatial
+# light bin is enough to make the model fail the requested light tolerance.
 function max_light_relative_residual(A_light::Matrix{Float64}, w::Vector{Float64}, light_target::Vector{Float64})
     size(A_light, 1) == length(light_target) || error("light_target length must match A_light rows")
     size(A_light, 2) == length(w) || error("w length must match A_light columns")
@@ -174,6 +365,17 @@ function max_light_relative_residual(A_light::Matrix{Float64}, w::Vector{Float64
 end
 
 ##CHI##
+# WHAT:
+# Generic chi-square calculation for a linear orbit model.
+#
+# EQUATION:
+#   chi2 = sum_i ((A*w - d)_i / sigma_i)^2
+#
+# NOTE:
+# sigma is protected from reaching zero by a 1e-12 floor.
+#
+# This is a simple block scorer. The Karl LOSVD path below has additional fracnew
+# handling before its LOSVD chi-square is evaluated.
 @inline function chi2_block(A::Matrix{Float64}, w::Vector{Float64}, d::Vector{Float64}, sigma::Vector{Float64})
     p = A * w
     s = 0.0
@@ -190,6 +392,16 @@ end
 # ========================================================================================================================
 # Used by the expanded-Cm solver below.
 
+# WHAT:
+# Makes an entropy Hessian element safe for the SPEAR Newton system.
+#
+# WHY:
+# SPEAR expects the second derivative of the objective with respect to each variable
+# to be strictly negative. A zero or nearly zero value would make its inverse blow up.
+#
+# HOW:
+# Nonfinite values become -floor. Valid negative values closer to zero than -floor
+# are clipped to -floor. A non-negative finite Hessian is treated as a real error.
 @inline function _spear_safe_ddS(x::Float64; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     isfinite(x) || return -floor
     x < 0.0 || error("SPEAR requires a strictly negative entropy Hessian")
@@ -207,6 +419,16 @@ end
 # internal SPEAR variables that carry the LOSVD residual term the way Karl's
 # entropy.f / spear.f system does.
 
+# WHAT:
+# Checks whether the light constraints already enforce sum(w)=1.
+#
+# HOW:
+# If every orbit column contributes total light 1 and the complete light target also
+# sums to 1, satisfying the light equations already fixes the total orbit weight.
+#
+# WHY:
+# In that case adding a separate normalization row would be redundant and can make
+# the constraint system unnecessarily dependent.
 function _expanded_light_implies_normalization(A_light::Matrix{Float64}, light_target::Vector{Float64}; tol::Float64=1e-12)
     size(A_light, 1) == length(light_target) || return false
     isempty(light_target) && return false
@@ -214,6 +436,27 @@ function _expanded_light_implies_normalization(A_light::Matrix{Float64}, light_t
     return maximum(abs.(orbit_light_sums .- 1.0)) <= tol && abs(sum(light_target) - 1.0) <= tol
 end
 
+# WHAT:
+# Builds the expanded Karl constraint matrix Cm.
+#
+# MATRIX SHAPE:
+# Rows:
+#   [light constraints]
+#   [LOSVD constraints]
+#   [optional normalization]
+#
+# Columns:
+#   [physical orbit weights]
+#   [one LOSVD slack variable per LOSVD row]
+#
+# HOW LOSVD SLACK WORKS:
+# The LOSVD block receives an identity matrix in the slack columns. This lets the
+# equality system write the LOSVD residual explicitly as solver variables while the
+# residual penalty is handled through the objective derivatives.
+#
+# IMPORTANT:
+# Light rows have no slack columns. The light constraints remain hard constraints
+# inside this expanded system.
 function build_expanded_Cm_with_losvd_slack(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}; enforce_normalization::Bool=true)
     Nlight, Norbit = size(A_light)
     Nlosvd, Norbit2 = size(A_losvd)
@@ -231,10 +474,28 @@ function build_expanded_Cm_with_losvd_slack(A_light::Matrix{Float64}, A_losvd::M
     return Cm
 end
 
+# WHAT:
+# Builds the right-hand-side target vector matching the expanded Cm row ordering.
+#
+# HOW:
+# Concatenate light targets and LOSVD targets. Append 1.0 only when an explicit
+# total-weight normalization row is present.
 function build_expanded_target(light_target::Vector{Float64}, losvd_target::Vector{Float64}; enforce_normalization::Bool=true)
     return enforce_normalization ? vcat(light_target, losvd_target, 1.0) : vcat(light_target, losvd_target)
 end
 
+# WHAT:
+# Builds the initial expanded variable vector.
+#
+# FIRST PART:
+# Physical orbit weights.
+#
+# SECOND PART:
+# LOSVD slack = observed LOSVD target - current orbit LOSVD model.
+#
+# WHY:
+# This makes the initial expanded state exactly encode the current LOSVD residual
+# rather than starting the slack variables from arbitrary values.
 function build_expanded_weights_initial(w_orbit::Vector{Float64}, A_losvd::Matrix{Float64}, losvd_target::Vector{Float64})
     Nlosvd, Norbit = size(A_losvd)
     length(w_orbit) == Norbit || error("w_orbit length does not match A_losvd columns")
@@ -244,6 +505,20 @@ function build_expanded_weights_initial(w_orbit::Vector{Float64}, A_losvd::Matri
     return vcat(w_orbit, slack)
 end
 
+# WHAT:
+# Constructs the SPEAR constraint-space matrix Am.
+#
+# MATHEMATICALLY:
+#   Am = Cm * diag(1/ddS) * Cm'
+#
+# where ddS contains the second derivatives of the entropy/penalty objective.
+#
+# WHY:
+# This eliminates the full variable-space Newton problem and solves for one
+# Lagrange multiplier per constraint row instead.
+#
+# NOTE:
+# _spear_safe_ddS protects every Hessian denominator before inversion.
 function karl_spear_build_Am(Cm::Matrix{Float64}, ddS::Vector{Float64}; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     Narr, nvar = size(Cm)
     length(ddS) == nvar || error("ddS length must match Cm columns")
@@ -254,6 +529,16 @@ function karl_spear_build_Am(Cm::Matrix{Float64}, ddS::Vector{Float64}; floor::F
     return Cm * Diagonal(invdd) * transpose(Cm)
 end
 
+# WHAT:
+# Adds the objective-gradient contribution to the SPEAR right-hand side.
+#
+# HOW:
+# Form dS/ddS for each expanded variable, multiply through Cm, then add that vector
+# to the current constraint residual delY.
+#
+# WHY:
+# The Newton direction must respond to both constraint error and the local slope of
+# the entropy/LOSVD objective.
 function karl_spear_rhs!(delY::Vector{Float64}, Cm::Matrix{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     Narr, nvar = size(Cm)
     length(delY) == Narr || error("delY length must match Cm rows")
@@ -267,6 +552,15 @@ function karl_spear_rhs!(delY::Vector{Float64}, Cm::Matrix{Float64}, dS::Vector{
     return delY
 end
 
+# WHAT:
+# Reconstructs the full variable-space Newton direction dw from the solved SPEAR
+# multipliers lambda.
+#
+# EQUATION:
+#   dw_j = ((Cm' * lambda)_j - dS_j) / ddS_j
+#
+# RETURNS:
+# A proposed change for every orbit weight plus every LOSVD slack variable.
 function karl_spear_delta_w(Cm::Matrix{Float64}, lambda::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     Narr, nvar = size(Cm)
     length(lambda) == Narr || error("lambda length must match Cm rows")
@@ -280,6 +574,15 @@ function karl_spear_delta_w(Cm::Matrix{Float64}, lambda::Vector{Float64}, dS::Ve
     return dw
 end
 
+# WHAT:
+# Solves the symmetric SPEAR linear system Am*lambda = rhs.
+#
+# HOW:
+# Uses a Bunch-Kaufman factorization, appropriate for a symmetric matrix that is not
+# assumed to be positive definite.
+#
+# SAFETY:
+# Matrix, right-hand side, and resulting multipliers must all be finite.
 function _solve_spear_system(Am::Matrix{Float64}, rhs::Vector{Float64})
     size(Am, 1) == size(Am, 2) || error("SPEAR Am must be square")
     size(Am, 1) == length(rhs) || error("SPEAR Am and rhs dimensions do not match")
@@ -293,6 +596,52 @@ function _solve_spear_system(Am::Matrix{Float64}, rhs::Vector{Float64})
     return Vector{Float64}(lambda)
 end
 
+# WHAT:
+# Main Karl-style orbit-weight solver used by OSPM.
+#
+# BIG PICTURE:
+# For one fixed gravitational potential, the orbit library is already known. This
+# function decides how much stellar weight each orbit receives.
+#
+# It seeks a smooth phase-volume-aware orbit distribution while requiring the
+# weighted orbit library to reproduce the tracer/light constraints and while
+# reducing the LOSVD mismatch.
+#
+# OBJECTIVE PIECES:
+# Orbit entropy:
+#   S_orbit = -sum(w * log(w*wphase))
+#
+# LOSVD penalty:
+#   alphat * chi2_LOSVD
+#
+# The reported profit is entropy - alphat*chi2_LOSVD.
+#
+# IMPORTANT:
+# The light constraint is not simply added as another soft chi-square term inside
+# this solver. Light enters the expanded Cm equality system and is separately gated
+# by the requested relative tolerance.
+#
+# MAIN FLOW:
+#   1. Validate dimensions and phase volumes.
+#   2. Build phase-volume-based starting orbit weights.
+#   3. Build expanded Cm with LOSVD slack variables.
+#   4. Iterate Karl/SPEAR correction steps.
+#   5. Recompute the LOSVD state and light residual after each accepted step.
+#   6. Stop only when the light constraint, slack consistency, normalization, and
+#      delta-chi2 convergence requirements are satisfied.
+#
+# CONVERGENCE NOTE:
+# light_sigma_tol is measured and reported, but the actual convergence gate below
+# uses light_constraint_ok from light_rel_tol. light_sigma_constraint_ok is
+# diagnostic in this function.
+#
+# STATIONARY FAILURE:
+# If the numerical state stops moving while required constraints remain unsatisfied,
+# the function exits as a failed solve rather than declaring convergence.
+#
+# OUTPUT:
+# Returns the orbit weights and a Boolean convergence flag. With return_diag=true,
+# it also returns the full solver diagnostics used by the outer OSPM pipeline.
 function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matrix{Float64}, light_target::Vector{Float64}, light_sigma::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64};
     Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, wphase=nothing, 
     maxiter::Int=DEFAULT_KARL_MAXITER, seed::UInt=UInt(0), entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, apfac::Float64=DEFAULT_KARL_APFAC, return_diag::Bool=false, rcond_every::Int=250,
@@ -311,10 +660,13 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     iseven(Norbit) || error("Karl phase-volume solving requires paired orbit columns")
     light_sigma_use = max.(abs.(light_sigma), 1.0e-12)
     light_sigma_residual(w) = maximum(abs.(A_light * w .- light_target) ./ light_sigma_use)
+    # STEP: Validate the phase-space measure used by entropy.
     wp = _prepare_wphase(wphase, Norbit; require_paired=true, pair_rtol=1.0e-12)
     wphase_diag = karl_wphase_diagnostics(wp; paired=true)
-    w = fill(1.0 / Norbit, Norbit)
+    # STEP: Start from a phase-volume-weighted orbit distribution.
+    w = karl_initial_weights_from_wphase(wp; paired=true, rotfrac=0.75, floor=entropy_floor)
     enforce_normalization = !_expanded_light_implies_normalization(A_light, light_target)
+    # STEP: Build the hard-constraint system plus LOSVD slack columns.
     Cm = build_expanded_Cm_with_losvd_slack(A_light, A_losvd; enforce_normalization=enforce_normalization)
     target_base = build_expanded_target(light_target, losvd_target; enforce_normalization=enforce_normalization)
     w_all = build_expanded_weights_initial(w, A_losvd, losvd_target)
@@ -336,12 +688,13 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     iterations = 0
     converged = false
     ok = true
-    weight_diag_verbose = get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1"
-    weight_progress_every = max(1, something(tryparse(Int, get(ENV, "OSPM_WEIGHT_PROGRESS_EVERY", "25")), 25))
 
+    # ITERATE: Repeatedly change orbit weights until both the tracer constraints
+    # and the LOSVD state stop changing within the requested tolerances.
     for iter in 1:maxiter
         iterations = iter
         compute_rcond = iter == 1 || iter == maxiter || iter % rcond_every == 0
+        # One constrained entropy/LOSVD correction step.
         w_all_new, step_ok, sdiag = karl_spear_step_light_losvd_all(
             w_all, Norbit, Cm, target_base, A_losvd, losvd_target, losvd_sigma, wp;
             Nlight=Nlight, Nspatial=Nspatial, Nvbin=Nvbin, alphat=alphat, apfac=apfac,
@@ -387,33 +740,25 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
         light_sigma_progress = abs.(light_model .- light_target) ./ light_sigma_use
         worst_light_bin = argmax(light_sigma_progress)
 
-        will_converge = light_constraint_ok && slack_consistent && normalized && delta_chi2_iteration <= delta_chi2_iter_tol
-        print_progress = weight_diag_verbose || iter == 1 || iter % weight_progress_every == 0 || will_converge || iter == maxiter
-        if print_progress
-            println("[WEIGHTS]",
-                " iteration=", iter,
-                " chi2=", chi2_losvd_current,
-                " light_rel=", max_light_relative_residual_value,
-                " delta_chi2=", delta_chi2_iteration,
-                " stepfac=", sdiag.stepfac,
-                " active_bound=", sdiag.n_active_bound)
-            if weight_diag_verbose
-                println("[WEIGHT DETAIL]",
-                    " iteration=", iter,
-                    " active_passes=", sdiag.active_passes,
-                    " active_changed=", active_changed,
-                    " state_change=", state_change,
-                    " fracnew_min=", minimum(losvd_state.fracnew),
-                    " fracnew_max=", maximum(losvd_state.fracnew),
-                    " light_constraint_ok=", light_constraint_ok,
-                    " max_light_sigma_residual=", light_sigma_progress[worst_light_bin],
-                    " light_sigma_constraint_ok=", light_sigma_constraint_ok,
-                    " worst_light_sigma_bin=", worst_light_bin,
-                    " delta_chi2_step_normalized=", delta_chi2_iteration_step_normalized)
-            end
-        end
+        println("[WEIGHT PROGRESS] iteration=", iter,
+            " active_passes=", sdiag.active_passes,
+            " N_active_bound=", sdiag.n_active_bound,
+            " active_changed=", active_changed,
+            " stepfac=", sdiag.stepfac,
+            " state_change=", state_change,
+            " fracnew_min=", minimum(losvd_state.fracnew),
+            " fracnew_max=", maximum(losvd_state.fracnew),
+            " chi_losvd=", chi2_losvd_current,
+            " max_light_relative_residual=", max_light_relative_residual_value,
+            " light_constraint_ok=", light_constraint_ok,
+            " max_light_sigma_residual=", light_sigma_progress[worst_light_bin],
+            " light_sigma_constraint_ok=", light_sigma_constraint_ok,
+            " worst_light_sigma_bin=", worst_light_bin,
+            " delta_chi2=", delta_chi2_iteration,
+            " delta_chi2_step_normalized=", delta_chi2_iteration_step_normalized)
 
-        if will_converge
+        # Convergence requires all hard consistency checks plus LOSVD chi2 stability.
+        if light_constraint_ok && slack_consistent && normalized && delta_chi2_iteration <= delta_chi2_iter_tol
             converged = true
             break
         end
@@ -457,6 +802,7 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     light_constraint_ok = max_light_relative_residual_value <= light_rel_tol
     light_sigma_constraint_ok = max_light_sigma_residual_value <= light_sigma_tol
     
+    # Rebuild the final effective constraint target before reporting diagnostics.
     final_target = copy(target_base)
     final_losvd !== nothing && (final_target[(Nlight + 1):(Nlight + Nlosvd)] .= final_losvd.effective_target)
     constraint_l2 = finite_state ? norm(final_target .- Cm * w_all) : Inf
@@ -544,6 +890,26 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     return w, solver_converged
 end
 
+# WHAT:
+# Performs one complete weight-solver iteration step.
+#
+# HOW:
+#   1. Split out the physical orbit weights.
+#   2. Build the current Karl fracnew LOSVD state.
+#   3. Build entropy and LOSVD-slack first/second derivatives.
+#   4. Replace the LOSVD target rows with their current effective fracnew targets.
+#   5. Compute one constrained SPEAR update.
+#   6. Verify the updated orbit weights remain finite, positive, and numerically valid.
+#
+# WHY:
+# The outer solve_weights_karl_expanded_cm loop owns convergence across iterations.
+# This function owns the mechanics of one iteration.
+#
+# NOTE:
+# In the current code path the actual update called here is
+# karl_spear_update_expanded, which uses a projected/backtracked line search.
+# The larger active-set machinery defined later in this file is not called from
+# this step in the source shown here.
 function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target_base::Vector{Float64}, A_losvd::Matrix{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, wphase_orbit::Vector{Float64}; Nlight::Int, Nspatial::Int, Nvbin::Int, alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, print_consistency::Bool=false, active_bound=nothing, max_active_passes::Int=512, bound_kkt_tol::Float64=1.0e-10)
     Narr, nvar = size(Cm)
     Nlosvd, Norbit2 = size(A_losvd)
@@ -556,6 +922,7 @@ function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, Cm
     Nspatial * Nvbin == Nlosvd || error("Nspatial*Nvbin does not match Nlosvd")
     active = active_bound === nothing ? falses(Norbit) : BitVector(active_bound)
     w_orbit = Vector{Float64}(@view w_all[1:Norbit])
+    # Recompute the LOSVD normalization/residual state for the current orbit mix.
     losvd_state = karl_losvd_fracnew_state(A_losvd, w_orbit, losvd_target, losvd_sigma, Nspatial, Nvbin)
     entropy, chi_slack, dS, ddS = build_expanded_entropy_derivatives(w_all, Norbit, wphase_orbit, losvd_state.residual, losvd_state.effective_sigma; alphat=alphat, entropy_floor=entropy_floor)
     target = copy(target_base)
@@ -585,6 +952,30 @@ function karl_spear_step_light_losvd_all(w_all::Vector{Float64}, Norbit::Int, Cm
     return wnew, step_ok, diag
 end
 
+# WHAT:
+# Builds the Karl LOSVD comparison state, including fracnew rescaling.
+#
+# PHYSICAL/NORMALIZATION PICTURE:
+# Each spatial LOSVD bin has several velocity cells. Some cells may be marked with
+# the invalid-sigma sentinel. fracnew measures what fraction of the model LOSVD lies
+# in the velocity cells that have usable observational uncertainties.
+#
+# HOW:
+# For each spatial bin:
+#   sumt  = model mass over all velocity cells
+#   sumt2 = model mass only over cells with valid sigma
+#   fracnew = sumt2/sumt
+#
+# The observed target and its sigma are then scaled by fracnew before residuals and
+# chi-square are computed.
+#
+# INVALID-SIGMA CELLS:
+# Their effective sigma is set to 1e6, making their direct chi-square influence
+# negligible while keeping the expanded arrays finite.
+#
+# WHY:
+# This is the Karl-style mechanism that keeps LOSVD normalization consistent when
+# only part of a velocity histogram is actually scored.
 function karl_losvd_fracnew_state(A_losvd::Matrix{Float64}, w::Vector{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}, Nspatial::Int, Nvbin::Int; invalid_sigma_sentinel::Float64=DEFAULT_KARL_INVALID_SIGMA_SENTINEL)
     Nlosvd, Norbit = size(A_losvd)
 
@@ -630,6 +1021,26 @@ function karl_losvd_fracnew_state(A_losvd::Matrix{Float64}, w::Vector{Float64}, 
     return ( model=model, fracnew=fracnew, effective_target=effective_target, effective_sigma=effective_sigma, residual=residual, chi_by_spatial=chi_by_spatial, chi_total=sum(chi_by_spatial))
 end
 
+# WHAT:
+# Builds the objective value, gradient dS, and diagonal Hessian ddS for every
+# expanded variable.
+#
+# ORBIT VARIABLES:
+#   entropy_j = -w_j log(w_j*wphase_j)
+#   dS_j      = -1 - log(w_j*wphase_j)
+#   ddS_j     = -1/w_j
+#
+# LOSVD SLACK VARIABLES:
+# They receive a negative quadratic penalty proportional to
+# alphat * residual^2 / sigma^2.
+#
+# WHY:
+# This puts the phase-volume entropy and LOSVD mismatch into one local Newton/SPEAR
+# objective while Cm carries the hard linear constraints.
+#
+# IMPORTANT:
+# The slack value used in the derivatives is the current LOSVD residual supplied by
+# karl_losvd_fracnew_state.
 function build_expanded_entropy_derivatives(w_all::Vector{Float64}, Norbit::Int, wphase_orbit::Vector{Float64}, losvd_residual::Vector{Float64}, losvd_sigma_effective::Vector{Float64}; alphat::Float64=DEFAULT_KARL_ALPHAT, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     Nvar = length(w_all)
     Nlosvd = Nvar - Norbit
@@ -665,6 +1076,38 @@ function build_expanded_entropy_derivatives(w_all::Vector{Float64}, Norbit::Int,
     return entropy, chi_slack, dS, ddS
 end
 
+# WHAT:
+# Takes one unconstrained SPEAR Newton direction and turns it into a safe accepted
+# update for the expanded variables.
+#
+# CURRENT IMPLEMENTATION:
+# This is a backtracking/projected line-search path.
+#
+# MAIN STEPS:
+#   1. Build Am, rhs, lambda, and the raw Newton direction dw.
+#   2. Try the requested step apfac.
+#   3. Project any orbit below entropy_floor back onto the floor.
+#   4. Renormalize all physical orbit weights to sum to one.
+#   5. Recompute LOSVD slack exactly from the projected orbit weights.
+#   6. Accept only if the worst relative light residual does not get worse.
+#   7. Otherwise halve the step and try again, up to 32 backtracks.
+#
+# WHY THE PROJECTION:
+# Entropy requires strictly positive orbit weights. The floor keeps every physical
+# orbit inside that domain.
+#
+# WHY THE LIGHT LINE SEARCH:
+# A Newton direction that improves the combined local system is not allowed to walk
+# away from the hard tracer/light fit.
+#
+# IMPORTANT:
+# This routine reports many active-set-shaped diagnostic fields for compatibility,
+# but its accepted update is produced by projection plus backtracking. It does not
+# call karl_spear_active_set_update below.
+#
+# rcond:
+# When requested, cond(Am) is converted to an estimated reciprocal condition number.
+# A small rcond warns that the constraint-space system is nearly singular.
 function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, step_safety::Float64=DEFAULT_KARL_STEP_SAFETY, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, active_bound=nothing, max_active_passes::Int=512, bound_kkt_tol::Float64=1.0e-10)
     Narr, nvar = size(Cm)
     length(w_all) == nvar || error("w_all length must match Cm columns")
@@ -688,6 +1131,7 @@ function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Mat
     light_target = Vector{Float64}(@view target[1:Nlight])
     losvd_rows = Nslack > 0 ? ((Nlight + 1):(Nlight + Nslack)) : (1:0)
 
+    # Current expanded model and the exact constraint correction it would need.
     model = Cm * w_all
     base_delY = target .- model
     rhs = copy(base_delY)
@@ -869,7 +1313,7 @@ function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Mat
     linearized_constraint_error_l2 = norm(Cm * (wnew .- w_all) .- stepfac .* base_delY)
     post_step_constraint_l2 = norm(target .- Cm * wnew)
 
-    get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL LINE SEARCH] requested_step=", apfac,
+    println("[KARL LINE SEARCH] requested_step=", apfac,
         " accepted_step=", stepfac,
         " backtracks=", backtracks,
         " projected_orbits=", n_projected_to_floor,
@@ -919,6 +1363,18 @@ function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Mat
     )
 end
 
+# WHAT:
+# Computes SVD-based rank and conditioning information for a SPEAR matrix.
+#
+# RETURNS:
+#   - the SVD factorization
+#   - numerical rank
+#   - rank threshold
+#   - reciprocal condition estimate using only supported singular directions
+#
+# WHY:
+# The active-set diagnostic/recovery machinery needs to know whether its reduced
+# constraint system has lost rank.
 function _svd_rank_info(Am::Matrix{Float64})
     F = svd(Am)
     smax = isempty(F.S) ? 0.0 : maximum(F.S)
@@ -931,6 +1387,23 @@ function _svd_rank_info(Am::Matrix{Float64})
     return F, rank_Am, rank_tol, rcond_supported
 end
 
+# WHAT:
+# Inspects the SPEAR system after some orbit weights have been declared fixed at the
+# entropy-floor boundary.
+#
+# HOW:
+# Bound orbit directions are fixed. Free orbit variables plus all slack variables
+# form a reduced Cm. The function solves that reduced system, using an SVD
+# pseudoinverse when the reduced matrix is rank deficient.
+#
+# IT ALSO CHECKS:
+#   - constraint residual
+#   - reconstructed full dw
+#   - whether free orbits would immediately hit the floor
+#   - KKT-style multipliers for currently bound orbits
+#
+# WHY:
+# This is a diagnostic/recovery building block for the active-set solver below.
 function inspect_reduced_system(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}, active_bound::AbstractVector{Bool}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     Narr, nvar = size(Cm)
     active = BitVector(active_bound)
@@ -976,6 +1449,17 @@ function inspect_reduced_system(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{
     return (active=active, free_orbits=free_orbits, free_vars=free_vars, fixed_dw=fixed_dw, base_delY=base_delY, rhs=rhs, Am=Am, lambda=Vector{Float64}(lambda), dw=dw, rank=rank_Am, Narr=Narr, supported_rcond=supported_rcond, svd_relative_residual=residual, primal_relative_error=primal_rel, bound_kkt=bound_kkt)
 end
 
+# WHAT:
+# Chooses the best bound orbit to release when an active-set solve gets trapped.
+#
+# HOW:
+# Temporarily free each currently bound orbit one at a time. Inspect the resulting
+# reduced system. Rank candidates by how few new floor violations they create,
+# whether the released orbit instantly rebinds, rank quality, and residual quality.
+#
+# WHY:
+# A poor active set can leave too few useful degrees of freedom to satisfy the
+# constraints. Releasing the best candidate can recover the solve.
 function _best_active_set_recovery_release(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}, active::AbstractVector{Bool}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     best_orbit = 0
     best_rank = -1
@@ -1026,6 +1510,18 @@ function _best_active_set_recovery_release(w_all::Vector{Float64}, Norbit::Int, 
     return (orbit=best_orbit, rank=best_rank, residual=best_residual, primal=best_primal, floor_violators=best_floor_violators, released_rebind=best_rebind)
 end
 
+# WHAT:
+# Recovery selector for the harder case where some recently released orbits are
+# marked recovery_locked because they tend to fall straight back onto the floor.
+#
+# HOW:
+# Test releasing each active orbit. Prefer trials that avoid creating violations
+# among those locked/rebinding orbits, preserve rank, and give a cleaner reduced
+# solve.
+#
+# WHY:
+# This attempts to prevent an active-set loop from bouncing between the same floor
+# configurations.
 function _best_locked_active_set_recovery_release(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}, active::AbstractVector{Bool}, recovery_locked::AbstractVector{Bool}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     best_orbit = 0
     best_rank = -1
@@ -1089,6 +1585,18 @@ function _best_locked_active_set_recovery_release(w_all::Vector{Float64}, Norbit
     return (orbit=best_orbit, rank=best_rank, residual=best_residual, primal=best_primal, floor_violators=best_floor_violators, locked_violators=best_locked_violators, locked_min_candidate=best_locked_min_candidate, released_rebind=best_rebind)
 end
 
+# WHAT:
+# Chooses a bound orbit to release specifically to repair rank deficiency.
+#
+# PHYSICAL/LINEAR-ALGEBRA PICTURE:
+# A reduced SPEAR system can lose a constraint direction when too many orbit columns
+# are fixed at the floor. The left-null singular vectors show which constraint-space
+# directions have lost support.
+#
+# HOW:
+# Measure how strongly each bound orbit column projects into that null space. Test
+# the strongest candidates. Prefer releases that restore rank without creating many
+# immediate floor violations.
 function _best_rank_deficiency_recovery_release(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}, active::AbstractVector{Bool}, Fsvd, current_rank::Int; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, topk::Int=96)
     Narr = size(Cm, 1)
     current_rank < Narr || return (orbit=0, rank=current_rank, residual=Inf, primal=Inf, floor_violators=typemax(Int), released_rebind=false, null_support=0.0)
@@ -1166,6 +1674,30 @@ function _best_rank_deficiency_recovery_release(w_all::Vector{Float64}, Norbit::
     return (orbit=best_orbit, rank=best_rank, residual=best_residual, primal=best_primal, floor_violators=best_floor_violators, released_rebind=best_rebind, null_support=best_support)
 end
 
+# WHAT:
+# Full active-set version of the Karl SPEAR update.
+#
+# IMPORTANT CURRENT-USE NOTE:
+# In the source shown here this function is defined but is not called by the main
+# karl_spear_step_light_losvd_all path. The active production step above currently
+# uses karl_spear_update_expanded instead.
+#
+# WHAT THIS ALGORITHM WOULD DO:
+#   - Mark orbit weights that hit the entropy floor as active/bound.
+#   - Resolve SPEAR using only the remaining free orbit variables plus slack.
+#   - Release bound variables when KKT multipliers say they should be free.
+#   - Detect cycles.
+#   - Use SVD fallback for rank-deficient reduced systems.
+#   - Attempt several recovery strategies when the active set becomes trapped.
+#
+# WHY IT EXISTS:
+# It is a more exact constrained-Newton treatment of the positivity boundary than
+# simply projecting a trial step onto the floor.
+#
+# KKT IDEA:
+# A weight sitting at its lower bound should remain there only while its bound
+# multiplier has the correct sign. A sufficiently negative multiplier makes that
+# orbit a release candidate.
 function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}, active_bound::AbstractVector{Bool}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, compute_rcond::Bool=true, rcond_warn::Float64=DEFAULT_KARL_SPEAR_RCOND_WARN, max_active_passes::Int=512, bound_kkt_tol::Float64=1.0e-10, svd_residual_tol::Float64=1.0e-10)
     Narr, nvar = size(Cm)
 
@@ -1184,6 +1716,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
 
     active = BitVector(active_bound)
 
+    # Current expanded model and the exact constraint correction it would need.
     model = Cm * w_all
     base_delY = target .- model
 
@@ -1248,7 +1781,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
             cycle_detected = true
             cycle_first_pass = mask_first_seen[mask_hash]
             cycle_repeat_pass = pass
-            get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE CYCLE] first_pass=", cycle_first_pass, " repeat_pass=", cycle_repeat_pass, " bound=", count(active))
+            println("[KARL ACTIVE CYCLE] first_pass=", cycle_first_pass, " repeat_pass=", cycle_repeat_pass, " bound=", count(active))
         else
             mask_first_seen[mask_hash] = pass
         end
@@ -1265,7 +1798,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
                 released_total += 1
                 last_released_idx = recovery.orbit
                 last_released_multiplier = NaN
-                get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE RECOVERY] pass=", pass, " cause=no_free_orbits orbit=", recovery.orbit, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " released_rebind=", recovery.released_rebind, " remaining_bound=", count(active))
+                println("[KARL ACTIVE RECOVERY] pass=", pass, " cause=no_free_orbits orbit=", recovery.orbit, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " released_rebind=", recovery.released_rebind, " remaining_bound=", count(active))
                 continue
             end
 
@@ -1285,7 +1818,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
                 released_total += 1
                 last_released_idx = recovery.orbit
                 last_released_multiplier = NaN
-                get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE RECOVERY] pass=", pass, " cause=insufficient_free_variables orbit=", recovery.orbit, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " released_rebind=", recovery.released_rebind, " remaining_bound=", count(active))
+                println("[KARL ACTIVE RECOVERY] pass=", pass, " cause=insufficient_free_variables orbit=", recovery.orbit, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " released_rebind=", recovery.released_rebind, " remaining_bound=", count(active))
                 continue
             end
 
@@ -1346,7 +1879,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
             svd_fallback_used = true
             svd_fallback_count += 1
 
-            get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE SVD] pass=", pass, " bound=", count(active), " free=", length(free_orbits), " Am_rank=", reduced_Am_rank, " Am_rcond=", rcond_est, " weak_constraint_row=", weak_constraint_row, " relative_residual=", svd_relative_residual, " tolerance=", svd_residual_tol)
+            println("[KARL ACTIVE SVD] pass=", pass, " bound=", count(active), " free=", length(free_orbits), " Am_rank=", reduced_Am_rank, " Am_rcond=", rcond_est, " weak_constraint_row=", weak_constraint_row, " relative_residual=", svd_relative_residual, " tolerance=", svd_residual_tol)
 
             if !isfinite(svd_relative_residual) || svd_relative_residual > svd_residual_tol
                 recovery = _best_rank_deficiency_recovery_release(w_all, Norbit, Cm, target, dS, ddS, active, Fsvd, reduced_Am_rank; apfac=apfac, entropy_floor=entropy_floor)
@@ -1358,7 +1891,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
                     released_total += 1
                     last_released_idx = recovery.orbit
                     last_released_multiplier = NaN
-                    get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE RECOVERY] pass=", pass, " cause=reduced_spear_inconsistent orbit=", recovery.orbit, " old_rank=", reduced_Am_rank, "/", Narr, " old_residual=", svd_relative_residual, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " released_rebind=", recovery.released_rebind, " remaining_bound=", count(active))
+                    println("[KARL ACTIVE RECOVERY] pass=", pass, " cause=reduced_spear_inconsistent orbit=", recovery.orbit, " old_rank=", reduced_Am_rank, "/", Narr, " old_residual=", svd_relative_residual, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " released_rebind=", recovery.released_rebind, " remaining_bound=", count(active))
                     continue
                 end
 
@@ -1432,7 +1965,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
         boundary_candidate = isempty(boundary_candidates) ? Inf : minimum(boundary_candidates)
         boundary_idx = isempty(boundary_candidates) ? 0 : boundary_indices[argmin(boundary_candidates)]
 
-        if compute_rcond && get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1"
+        if compute_rcond
             println("[KARL ACTIVE PASS] pass=", pass, " bound=", count(active), " free=", length(free_orbits), " Am_rank=", reduced_Am_rank, " Am_rcond=", rcond_est, " weak_constraint_row=", weak_constraint_row, " boundary_idx=", boundary_idx, " boundary_candidate=", boundary_candidate, " boundary_batch=", length(boundary_indices), " recovery_locked_floor=", length(locked_boundary_indices), " near_singular=", near_singular_spear_matrix)
         end
 
@@ -1450,7 +1983,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
                 active[j] = true
             end
 
-            get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE BIND] pass=", pass, " batch=", length(boundary_indices), " first_orbit=", boundary_idx, " first_candidate=", boundary_candidate, " recovery_locked_floor=", length(locked_boundary_indices), " remaining_free=", Norbit-count(active))
+            println("[KARL ACTIVE BIND] pass=", pass, " batch=", length(boundary_indices), " first_orbit=", boundary_idx, " first_candidate=", boundary_candidate, " recovery_locked_floor=", length(locked_boundary_indices), " remaining_free=", Norbit-count(active))
             continue
         end
 
@@ -1467,7 +2000,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
                 last_released_multiplier = NaN
                 ilocked = argmin(locked_boundary_candidates)
 
-                get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE MULTIRELEASE] pass=", pass, " locked_floor=", length(locked_boundary_indices), " locked_first_orbit=", locked_boundary_indices[ilocked], " locked_first_candidate=", locked_boundary_candidates[ilocked], " released_orbit=", recovery.orbit, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " locked_violators=", recovery.locked_violators, " locked_trial_candidate=", recovery.locked_min_candidate, " released_rebind=", recovery.released_rebind, " total_locked=", count(recovery_locked), " remaining_bound=", count(active))
+                println("[KARL ACTIVE MULTIRELEASE] pass=", pass, " locked_floor=", length(locked_boundary_indices), " locked_first_orbit=", locked_boundary_indices[ilocked], " locked_first_candidate=", locked_boundary_candidates[ilocked], " released_orbit=", recovery.orbit, " trial_rank=", recovery.rank, "/", Narr, " trial_residual=", recovery.residual, " floor_violators=", recovery.floor_violators, " locked_violators=", recovery.locked_violators, " locked_trial_candidate=", recovery.locked_min_candidate, " released_rebind=", recovery.released_rebind, " total_locked=", count(recovery_locked), " remaining_bound=", count(active))
                 continue
             end
 
@@ -1518,7 +2051,7 @@ function karl_spear_active_set_update(w_all::Vector{Float64}, Norbit::Int, Cm::M
             end
             released_total += length(release_candidates)
 
-            get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL ACTIVE RELEASE] pass=", pass, " batch=", length(release_candidates), " most_negative_orbit=", last_released_idx, " multiplier=", last_released_multiplier, " remaining_bound=", count(active))
+            println("[KARL ACTIVE RELEASE] pass=", pass, " batch=", length(release_candidates), " most_negative_orbit=", last_released_idx, " multiplier=", last_released_multiplier, " remaining_bound=", count(active))
 
             continue
         end
@@ -1576,7 +2109,26 @@ end
 # CHI
 # ========================================================================================================================
 
+# WHAT:
+# Diagnostic that runs the raw, unprotected SPEAR direction once and reports what
+# would happen before projection, line search, or boundary handling.
+#
+# CHECKS:
+#   - numerical rank and nullity of Am
+#   - supported reciprocal condition estimate
+#   - raw minimum trial orbit weight
+#   - number of negative trial weights
+#   - first orbit that would hit the entropy boundary
+#   - linear-system residual
+#
+# WHY:
+# This separates a problem already present in the underlying SPEAR direction from a
+# problem introduced later by positivity handling or line search.
+#
+# NOTE:
+# The main iteration requests this diagnostic on its first step only.
 function karl_raw_spear_consistency_diagnostic(w_all::Vector{Float64}, Norbit::Int, Cm::Matrix{Float64}, target::Vector{Float64}, dS::Vector{Float64}, ddS::Vector{Float64}; apfac::Float64=DEFAULT_KARL_APFAC, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
+    # Current expanded model and the exact constraint correction it would need.
     model = Cm * w_all
     rhs = target .- model
     Am = karl_spear_build_Am(Cm, ddS; floor=entropy_floor)
@@ -1610,11 +2162,24 @@ function karl_raw_spear_consistency_diagnostic(w_all::Vector{Float64}, Norbit::I
 
     system_residual = norm(Am * lambda - rhs) / max(norm(rhs), eps(Float64))
 
-    get(ENV, "OSPM_DIAG_WEIGHTS", "0") == "1" && println("[KARL CONSISTENCY] solve=bunchkaufman Am_rank=", rank_Am, " Am_nullity=", nullity_Am, " Am_supported_rcond=", supported_rcond, " raw_min_orbit_weight=", min_weight, " raw_min_orbit_idx=", min_idx, " raw_negative_orbits=", count(<(0.0), orbit_trial), " raw_negative_dw=", count(<(0.0), @view(dw[1:Norbit])), " raw_first_boundary_idx=", first_boundary_idx, " raw_first_boundary_candidate=", first_boundary, " raw_max_abs_dw=", maximum(abs, dw), " spear_system_relative_residual=", system_residual)
+    println("[KARL CONSISTENCY] solve=bunchkaufman Am_rank=", rank_Am, " Am_nullity=", nullity_Am, " Am_supported_rcond=", supported_rcond, " raw_min_orbit_weight=", min_weight, " raw_min_orbit_idx=", min_idx, " raw_negative_orbits=", count(<(0.0), orbit_trial), " raw_negative_dw=", count(<(0.0), @view(dw[1:Norbit])), " raw_first_boundary_idx=", first_boundary_idx, " raw_first_boundary_candidate=", first_boundary, " raw_max_abs_dw=", maximum(abs, dw), " spear_system_relative_residual=", system_residual)
 
     return (Am_rank=rank_Am, Am_nullity=nullity_Am, Am_supported_rcond=supported_rcond, raw_min_orbit_weight=min_weight, raw_min_orbit_idx=min_idx, raw_negative_orbits=count(<(0.0), orbit_trial), raw_negative_dw=count(<(0.0), @view(dw[1:Norbit])), raw_first_boundary_idx=first_boundary_idx, raw_first_boundary_candidate=first_boundary, raw_max_abs_dw=maximum(abs, dw), spear_system_relative_residual=system_residual)
 end
 
+# WHAT:
+# Minimal validity check for an expanded weight vector.
+#
+# HOW:
+# Require every expanded variable to be finite. Require every physical orbit weight
+# to be at or above the entropy floor.
+#
+# NOTE:
+# Despite the exclamation mark in the name, the current implementation does not
+# modify w_all. It only returns true or false.
+#
+# CURRENT USE:
+# It is defined in this file but not called elsewhere in the source shown here.
 function _project_expanded_weights!(w_all::Vector{Float64}, Norbit::Int; floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR)
     0 < Norbit <= length(w_all) || error("Norbit must be between 1 and length(w_all)")
     all(isfinite, w_all) || return false
@@ -1624,6 +2189,21 @@ function _project_expanded_weights!(w_all::Vector{Float64}, Norbit::Int; floor::
     return true
 end
 
+# WHAT:
+# Computes the largest safe scalar step along a proposed weight direction before a
+# physical orbit would cross zero.
+#
+# HOW:
+# For every free orbit with dw<0, calculate the distance to the zero-weight boundary.
+# Take the smallest boundary distance. Apply a safety fraction before stepping there.
+#
+# IMPORTANT:
+# The candidate calculation uses w/(-dw), so this helper protects the zero boundary,
+# not the explicit entropy_floor boundary.
+#
+# CURRENT USE:
+# It is defined here but is not called by the active main update path shown above.
+# karl_spear_update_expanded instead uses projection to entropy_floor plus backtracking.
 function karl_safe_step_factor(w::AbstractVector{Float64}, dw::AbstractVector{Float64}; requested_step::Float64=DEFAULT_KARL_APFAC, floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, safety::Float64=DEFAULT_KARL_STEP_SAFETY, active_bound=nothing)
     length(w) == length(dw) || error("w and dw lengths must match")
     isfinite(requested_step) && requested_step > 0.0 || error("requested_step must be finite and positive")

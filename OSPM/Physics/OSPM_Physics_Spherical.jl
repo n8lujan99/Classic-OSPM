@@ -24,6 +24,36 @@ const DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP = 0.15
     return mode_sym
 end
 
+@inline function _normalize_losvd_target_mode(mode)
+    mode_sym = Symbol(lowercase(String(mode)))
+    mode_sym in (:current, :karl_resolved_stars, :karl_mode0_observables) || error("Unknown losvd_target_mode=$(mode). Use current, karl_resolved_stars, or karl_mode0_observables")
+    return mode_sym
+end
+
+function _resolve_karl_observables(mode::Symbol; observables_csv=nothing)
+    mode === :karl_mode0_observables || return nothing
+    observables_csv === nothing && error("karl_observables_csv is required for losvd_target_mode=:karl_mode0_observables")
+    path = String(observables_csv)
+    isfile(path) || error("Karl observables CSV not found: $path")
+    return load_karl_observables(path)
+end
+
+function _observed_targets_for_mode(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, st, surface_brightness_profile, losvd_target_mode::Symbol, karl_observables; karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR)
+    if losvd_target_mode === :karl_mode0_observables
+        karl_observables === nothing && error("Karl observables runtime state is missing")
+        targets = karl_observables_targets(karl_observables)
+        length(targets.losvd_target) == st.Nlosvd || error("Karl observables target length does not match the orbit LOSVD matrix")
+        length(targets.losvd_sigma) == st.Nlosvd || error("Karl observables sigma length does not match the orbit LOSVD matrix")
+        length(karl_observables.star_count) == st.Nspatial || error("Karl observables star-count length does not match the orbit aperture count")
+        maximum(abs.(targets.velocity_edges_mps .- st.velocity_edges)) <= 1.0e-9 || error("Karl observables target and orbit velocity grids do not match")
+        projected_light_target = light_target_from_surface_brightness(surface_brightness_profile, st.light_edges; normalize=true)
+        projected_light_sigma = light_sigma_from_surface_brightness(surface_brightness_profile, st.light_edges; normalize=true, sigma_floor=1.0e-8)
+        counts_by_spatial = Float64.(karl_observables.star_count)
+        return copy(targets.losvd_target), copy(targets.losvd_sigma), projected_light_target, projected_light_sigma, counts_by_spatial
+    end
+    return observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=st.light_edges, target_mode=losvd_target_mode, karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
+end
+
 function _build_density_3d_target(stellar_model, constraint_edges::Vector{Float64})
     stellar_model === nothing && error("density_3d tracer constraint requires STELLAR_MODEL")
     tracer_model = copy(stellar_model)
@@ -62,7 +92,7 @@ function _resolve_tracer_constraint_targets(mode::Symbol, stellar_model, project
     return density_target, density_sigma
 end
 
-function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{Float64}, target::Vector{Float64}, sigma::Vector{Float64}, constraint_edges::Vector{Float64}; model_index::Int=1)
+function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{Float64}, target::Vector{Float64}, sigma::Vector{Float64}, constraint_edges::Vector{Float64}; model_index::Int=1, print_bins::Bool=false)
     size(A_constraint, 1) == length(target) || error("Tracer diagnostic target length mismatch")
     length(target) == length(sigma) || error("Tracer diagnostic sigma length mismatch")
     size(A_constraint, 2) == length(w) || error("Tracer diagnostic weight length mismatch")
@@ -71,6 +101,14 @@ function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{
 
     model = A_constraint * w
     Nbase = length(w) ÷ 2
+    sigma_residual = zeros(Float64, length(target))
+    relative_residual = zeros(Float64, length(target))
+    support_fraction = zeros(Float64, length(target))
+    effective_support = zeros(Float64, length(target))
+    target_scale = max(1.0, maximum(abs.(target)))
+    zero_target_atol = 100.0 * eps(Float64) * target_scale
+    resolved_targets = abs.(target[abs.(target) .> zero_target_atol])
+    zero_target_reference = isempty(resolved_targets) ? 1.0 : minimum(resolved_targets)
 
     @inbounds for ib in eachindex(target)
         pair_contrib = zeros(Float64, Nbase)
@@ -90,32 +128,98 @@ function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{
         end
 
         total_contrib = sum(pair_contrib)
-        effective_support = 0.0
-
         if isfinite(total_contrib) && total_contrib > 0.0
             p = pair_contrib ./ total_contrib
-            effective_support = 1.0 / sum(abs2, p)
+            effective_support[ib] = 1.0 / sum(abs2, p)
         end
 
-        signed_sigma_residual = (model[ib] - target[ib]) / max(abs(sigma[ib]), 1.0e-12)
+        sigma_residual[ib] = (model[ib] - target[ib]) / max(abs(sigma[ib]), 1.0e-12)
+        relative_denominator = abs(target[ib]) > zero_target_atol ? abs(target[ib]) : zero_target_reference
+        relative_residual[ib] = abs(model[ib] - target[ib]) / relative_denominator
+        support_fraction[ib] = n_support / Nbase
 
-        println("[TRACER BIN DIAG]",
-            " i=", model_index,
-            " bin=", ib,
-            " R_inner_pc=", constraint_edges[ib] / pc,
-            " R_outer_pc=", constraint_edges[ib + 1] / pc,
-            " target=", target[ib],
-            " model=", model[ib],
-            " sigma=", sigma[ib],
-            " signed_sigma_residual=", signed_sigma_residual,
-            " abs_sigma_residual=", abs(signed_sigma_residual),
-            " N_supporting_base_orbits=", n_support,
-            " support_fraction=", n_support / Nbase,
-            " effective_N_base_orbits=", effective_support,
-        )
+        if print_bins
+            println("[TRACER BIN]",
+                " i=", model_index,
+                " bin=", ib,
+                " R_inner_pc=", constraint_edges[ib] / pc,
+                " R_outer_pc=", constraint_edges[ib + 1] / pc,
+                " target=", target[ib],
+                " model=", model[ib],
+                " sigma_residual=", sigma_residual[ib],
+                " support_fraction=", support_fraction[ib],
+                " effective_N_base_orbits=", effective_support[ib])
+        end
     end
 
+    max_sigma_residual, worst_sigma_bin = findmax(abs.(sigma_residual))
+    max_relative_residual, worst_relative_bin = findmax(relative_residual)
+    min_support_fraction, weakest_support_bin = findmin(support_fraction)
+    min_effective_support, weakest_effective_bin = findmin(effective_support)
+
+    println("[TRACER]",
+        " i=", model_index,
+        " bins=", length(target),
+        " max_rel=", max_relative_residual,
+        " worst_rel_bin=", worst_relative_bin,
+        " max_sigma=", max_sigma_residual,
+        " worst_sigma_bin=", worst_sigma_bin,
+        " min_support_fraction=", min_support_fraction,
+        " weakest_support_bin=", weakest_support_bin,
+        " min_effective_N=", min_effective_support,
+        " weakest_effective_bin=", weakest_effective_bin)
+
     return nothing
+end
+
+function _print_losvd_window_diagnostics(A_losvd::Matrix{Float64}, A_kinematic::Matrix{Float64}, w::Vector{Float64}, aperture_ranges::Vector{Tuple{Float64,Float64}}, velocity_edges::Vector{Float64}, Nvbin::Int; model_index::Int=1, print_bins::Bool=true)
+    Nspatial = size(A_kinematic, 1)
+    size(A_kinematic, 2) == length(w) || error("LOSVD window diagnostic weight length mismatch")
+    size(A_losvd, 1) == Nspatial * Nvbin || error("LOSVD window diagnostic row count mismatch")
+    size(A_losvd, 2) == length(w) || error("LOSVD window diagnostic orbit count mismatch")
+    length(aperture_ranges) == Nspatial || error("LOSVD window diagnostic aperture-range mismatch")
+
+    model_losvd = A_losvd * w
+    projected_total = A_kinematic * w
+    inside = zeros(Float64, Nspatial)
+    outside = zeros(Float64, Nspatial)
+    outside_fraction = zeros(Float64, Nspatial)
+
+    @inbounds for ib in 1:Nspatial
+        rows = ((ib - 1) * Nvbin + 1):(ib * Nvbin)
+        inside[ib] = sum(@view model_losvd[rows])
+        outside[ib] = max(projected_total[ib] - inside[ib], 0.0)
+        outside_fraction[ib] = projected_total[ib] > 0.0 ? outside[ib] / projected_total[ib] : 0.0
+
+        if print_bins
+            println("[LOSVD WINDOW DIAG]",
+                " i=", model_index,
+                " bin=", ib,
+                " R_inner_pc=", aperture_ranges[ib][1] / pc,
+                " R_outer_pc=", aperture_ranges[ib][2] / pc,
+                " projected_total=", projected_total[ib],
+                " inside_velocity_window=", inside[ib],
+                " outside_velocity_window=", outside[ib],
+                " outside_fraction=", outside_fraction[ib],
+            )
+        end
+    end
+
+    total_projected = sum(projected_total)
+    total_inside = sum(inside)
+    total_outside = sum(outside)
+    global_fraction = total_projected > 0.0 ? total_outside / total_projected : 0.0
+    max_fraction, worst_bin = findmax(outside_fraction)
+
+    println("[LOSVD WINDOW]",
+        " i=", model_index,
+        " vmin_kms=", velocity_edges[1] / 1.0e3,
+        " vmax_kms=", velocity_edges[end] / 1.0e3,
+        " global_outside_fraction=", global_fraction,
+        " max_aperture_outside_fraction=", max_fraction,
+        " worst_aperture=", worst_bin)
+
+    return (outside_fraction_by_spatial=outside_fraction, global_outside_fraction=global_fraction, max_outside_fraction=max_fraction, worst_bin=worst_bin)
 end
 
 # Work state
@@ -157,6 +261,9 @@ mutable struct OrbitWorkState
     force_geometry::Symbol
     tracer_constraint_mode::Symbol
     tracer_axis_ratio::Float64
+    losvd_target_mode::Symbol
+    losvd_aperture_ranges::Vector{Tuple{Float64,Float64}}
+    karl_observables
 
     dt_frac_orbit::Float64
     t_deadline::UInt64
@@ -168,7 +275,17 @@ mutable struct OrbitWorkState
     next_coverage_check::Threads.Atomic{Int}
 
     A_losvd::Matrix{Float64}
+    A_kinematic::Matrix{Float64}
     A_light::Matrix{Float64}
+
+    projection_diag_enabled::Bool
+    projection_v3d_mean::Matrix{Float64}
+    projection_v3d_rms::Matrix{Float64}
+    projection_abs_vlos_mean::Matrix{Float64}
+    projection_vlos_rms::Matrix{Float64}
+    projection_abs_vlos_over_v3d_mean::Matrix{Float64}
+    projection_los_ratio_lt_0p25::Matrix{Float64}
+    projection_los_ratio_lt_0p5::Matrix{Float64}
 
     success_flags::Vector{Bool}
     attempts_used::Vector{Int}
@@ -511,7 +628,7 @@ function _init_orbit_work(
     max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP,
     shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS,
     coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY,
-    tracer_constraint_mode="projected_light")
+    tracer_constraint_mode="projected_light", losvd_target_mode=:current, karl_observables=nothing)
     iseven(Norbit) || error("Karl prograde/retrograde orbit pairing requires even Norbit because " * "Norbit is the final A-matrix column count")
 
     max_attempts_factor > 0 || error("max_attempts_factor must be positive")
@@ -524,17 +641,33 @@ function _init_orbit_work(
         valid_vec[i] && push!(vlos_idx, i)
     end
 
-    spatial_edges = resolve_karl_spatial_edges(kinematic_bin_edges)
-    light_edges = light_bin_edges === nothing ? spatial_edges : resolve_karl_light_edges(light_bin_edges)
+    losvd_mode = _normalize_losvd_target_mode(losvd_target_mode)
+    if losvd_mode === :karl_mode0_observables
+        karl_observables === nothing && error("Karl observables runtime state is required by _init_orbit_work")
+        losvd_aperture_ranges = karl_observables_aperture_ranges_m(karl_observables)
+        Nspatial = length(karl_observables.aperture_ids)
+        length(losvd_aperture_ranges) == Nspatial || error("Karl observables aperture-range count does not match aperture count")
+        spatial_edges = vcat(0.0, [range[2] for range in losvd_aperture_ranges])
+        any(diff(spatial_edges) .<= 0.0) && error("Karl observables aperture outer radii must be strictly increasing for the orbit shell/diagnostic grid")
+        light_bin_edges === nothing && error("light_bin_edges is required for Karl observables mode so the existing tracer constraints remain unchanged")
+        light_edges = resolve_karl_light_edges(light_bin_edges)
+        velocity_edges_use = copy(karl_observables.velocity_edges_mps)
+        if velocity_edges !== nothing
+            supplied_velocity_edges = Float64.(velocity_edges)
+            length(supplied_velocity_edges) == length(velocity_edges_use) || error("Supplied velocity grid does not match the Karl observables CSV")
+            maximum(abs.(supplied_velocity_edges .- velocity_edges_use)) <= 1.0e-9 || error("Supplied velocity grid does not match the Karl observables CSV")
+        end
+    else
+        spatial_edges = resolve_karl_spatial_edges(kinematic_bin_edges)
+        light_edges = light_bin_edges === nothing ? spatial_edges : resolve_karl_light_edges(light_bin_edges)
+        Nspatial = length(spatial_edges) - 1
+        losvd_aperture_ranges = [(spatial_edges[ib], spatial_edges[ib + 1]) for ib in 1:Nspatial]
+        velocity_edges_use = velocity_edges === nothing ? build_velocity_edges_auto(v_star_mps[vlos_idx], verr_star_mps[vlos_idx]; Nvbin=Nvbin) : Float64.(velocity_edges)
+    end
 
-    Nspatial = length(spatial_edges) - 1
     Nlight = length(light_edges) - 1
-
-    velocity_edges_use = velocity_edges === nothing ?
-        build_velocity_edges_auto(v_star_mps[vlos_idx], verr_star_mps[vlos_idx]; Nvbin=Nvbin) :
-        Float64.(velocity_edges)
-
     Nvbin_eff = length(velocity_edges_use) - 1
+    losvd_mode === :karl_mode0_observables && Nvbin_eff != karl_observables.nvel && error("Karl observables velocity-bin count does not match the CSV metadata")
     Nlosvd = Nspatial * Nvbin_eff
 
     force_geometry = haskey(ctx.halo, :stellar_model) ?
@@ -574,7 +707,18 @@ function _init_orbit_work(
     )
 
     A_losvd = zeros(Float64, Nlosvd, Norbit)
+    A_kinematic = zeros(Float64, Nspatial, Norbit)
     A_light = zeros(Float64, Nlight, Norbit)
+
+    projection_diag_enabled = get(ENV, "OSPM_DIAG_ORBIT_FAMILIES", "0") == "1" && losvd_mode !== :karl_mode0_observables
+    projection_shape = projection_diag_enabled ? (Nspatial, Norbit) : (0, 0)
+    projection_v3d_mean = fill(NaN, projection_shape...)
+    projection_v3d_rms = fill(NaN, projection_shape...)
+    projection_abs_vlos_mean = fill(NaN, projection_shape...)
+    projection_vlos_rms = fill(NaN, projection_shape...)
+    projection_abs_vlos_over_v3d_mean = fill(NaN, projection_shape...)
+    projection_los_ratio_lt_0p25 = fill(NaN, projection_shape...)
+    projection_los_ratio_lt_0p5 = fill(NaN, projection_shape...)
 
     success_flags = fill(false, Nbase_orbit)
     attempts_used = zeros(Int, Nbase_orbit)
@@ -605,16 +749,18 @@ function _init_orbit_work(
         third_launches, family_grid.launch_r0, family_grid.launch_theta0, family_grid.launch_energy, family_grid.launch_lz,
         sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps,
         spatial_edges, light_edges, velocity_edges_use, shells, launch_order,
-        orbit_ctx, ctx.pot, ctx.frc, Lfrac, force_geometry, tracer_mode, tracer_axis_ratio,
+        orbit_ctx, ctx.pot, ctx.frc, Lfrac, force_geometry, tracer_mode, tracer_axis_ratio, losvd_mode, losvd_aperture_ranges,
+        losvd_mode === :karl_mode0_observables ? karl_observables : nothing,
         dt_frac_orbit, t_deadline, fill_pct, regional_floor, max_regional_gap, shell_band_count, max(1, coverage_check_every), Threads.Atomic{Int}(first_coverage_check),
-        A_losvd, A_light,
+        A_losvd, A_kinematic, A_light,
+        projection_diag_enabled, projection_v3d_mean, projection_v3d_rms, projection_abs_vlos_mean, projection_vlos_rms, projection_abs_vlos_over_v3d_mean, projection_los_ratio_lt_0p25, projection_los_ratio_lt_0p5,
         success_flags, attempts_used, min_r_reached, rapo_list, failure_stage, launch_failure_state, sos_points, integration_points, integration_termination,
         initial_energy_diag, final_energy_diag, max_energy_drift, max_relative_energy_drift,
         phase_volume_state, Threads.Atomic{Int}(1), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), ReentrantLock(),
     )
 end
 
-@inline function _project_axisym_sample(ri::Float64, vr::Float64, vtheta::Float64, vphi::Float64, theta::Float64, phi::Float64, sini::Float64, cosi::Float64)
+@inline function _project_axisym_sample_full(ri::Float64, vr::Float64, vtheta::Float64, vphi::Float64, theta::Float64, phi::Float64, sini::Float64, cosi::Float64)
     st, ct = _sincos_safe(theta)
     cp, sp = cos(phi), sin(phi)
     x = ri * st * cp
@@ -626,6 +772,11 @@ end
     ysky = cosi * x - sini * z
     Rproj = sqrt(xsky * xsky + ysky * ysky)
     vlos = sini * vx + cosi * vz
+    return Rproj, vlos, xsky, ysky
+end
+
+@inline function _project_axisym_sample(ri::Float64, vr::Float64, vtheta::Float64, vphi::Float64, theta::Float64, phi::Float64, sini::Float64, cosi::Float64)
+    Rproj, vlos, _, _ = _project_axisym_sample_full(ri, vr, vtheta, vphi, theta, phi, sini, cosi)
     return Rproj, vlos
 end
 
@@ -1060,15 +1211,637 @@ function _orbit_library_usable(st::OrbitWorkState, successful_columns::Vector{In
 end
 
 function _compact_orbit_matrices(st::OrbitWorkState, successful_columns::Vector{Int})
-    return st.A_losvd[:, successful_columns], st.A_light[:, successful_columns]
+    return st.A_losvd[:, successful_columns], st.A_light[:, successful_columns], st.A_kinematic[:, successful_columns]
+end
+
+function _print_orbit_weight_family_diagnostics(st::OrbitWorkState, successful_columns::Vector{Int}, w::Vector{Float64}; model_index::Int=1, inner_radius_pc::Float64=30.0)
+    length(successful_columns) == length(w) || error("Orbit-family diagnostic column/weight length mismatch")
+    iseven(length(w)) || error("Orbit-family diagnostic requires prograde/retrograde orbit pairs")
+    all(isfinite, w) || error("Orbit-family diagnostic requires finite weights")
+
+    Npair = length(w) ÷ 2
+    nlfrac = length(st.Lfrac)
+    nthird = length(st.third_launches)
+    pair_weights = zeros(Float64, Npair)
+    shell_ids = zeros(Int, Npair)
+    lfrac_ids = zeros(Int, Npair)
+    third_ids = zeros(Int, Npair)
+    theta0_values = zeros(Float64, Npair)
+    launch_ltot_frac_values = zeros(Float64, Npair)
+    min_r_pc_values = zeros(Float64, Npair)
+    inner_flags = falses(Npair)
+
+    @inbounds for j in 1:Npair
+        jpro = 2 * j - 1
+        jret = 2 * j
+        col_pro = successful_columns[jpro]
+        col_ret = successful_columns[jret]
+        isodd(col_pro) || error("Orbit-family diagnostic expected prograde column first")
+        col_ret == col_pro + 1 || error("Orbit-family diagnostic orbit pair is not contiguous")
+        c = (col_pro + 1) ÷ 2
+        shell_id, lfrac_id, third_id = _orbit_grid_indices(c, st.Nshells, nlfrac, nthird)
+        theta0 = f64(st.launch_theta0[c])
+        sintheta0 = sin(theta0)
+        pair_weights[j] = w[jpro] + w[jret]
+        shell_ids[j] = shell_id
+        lfrac_ids[j] = lfrac_id
+        third_ids[j] = third_id
+        theta0_values[j] = theta0
+        launch_ltot_frac_values[j] = isfinite(sintheta0) && abs(sintheta0) > EPS_SIN ? f64(st.Lfrac[lfrac_id]) / abs(sintheta0) : NaN
+        min_r_pc_values[j] = f64(st.min_r_reached[c]) / pc
+        inner_flags[j] = st.shells[shell_id] / pc < inner_radius_pc
+    end
+
+    all(isfinite, theta0_values) || error("Orbit-family diagnostic found nonfinite launch theta")
+    all(isfinite, launch_ltot_frac_values) || error("Orbit-family diagnostic found nonfinite launch total-angular-momentum ratio")
+    all(isfinite, min_r_pc_values) || error("Orbit-family diagnostic found nonfinite minimum radius")
+
+    wsum = sum(pair_weights)
+    isfinite(wsum) && wsum > 0.0 || error("Orbit-family diagnostic has nonpositive total weight")
+    p = pair_weights ./ wsum
+    lfrac_values = [f64(st.Lfrac[idx]) for idx in lfrac_ids]
+    theta0_deg_values = theta0_values .* (180.0 / pi)
+    inner_sum = sum(pair_weights[inner_flags])
+    outer_flags = .!inner_flags
+    outer_sum = sum(pair_weights[outer_flags])
+    regular_flags = lfrac_ids .< nlfrac
+    regular_sum = sum(pair_weights[regular_flags])
+    low_lfrac_weight = sum(pair_weights[lfrac_values .<= 0.2])
+    high_lfrac_weight = sum(pair_weights[lfrac_values .>= 0.7])
+    circular_weight = sum(pair_weights[lfrac_ids .== nlfrac])
+    inner_high_lfrac_weight = sum(pair_weights[inner_flags .& (lfrac_values .>= 0.7)])
+    inner_high_ltot_weight = sum(pair_weights[inner_flags .& (launch_ltot_frac_values .>= 0.7)])
+    inner_min_r_lt_5pc_weight = sum(pair_weights[inner_flags .& (min_r_pc_values .< 5.0)])
+    inner_min_r_lt_10pc_weight = sum(pair_weights[inner_flags .& (min_r_pc_values .< 10.0)])
+    inner_min_r_lt_15pc_weight = sum(pair_weights[inner_flags .& (min_r_pc_values .< 15.0)])
+    weighted_mean_lfrac = sum(p .* lfrac_values)
+    weighted_mean_launch_ltot_frac = sum(p .* launch_ltot_frac_values)
+    weighted_mean_min_r_pc = sum(p .* min_r_pc_values)
+    inner_mean_lfrac = inner_sum > 0.0 ? sum(pair_weights[inner_flags] .* lfrac_values[inner_flags]) / inner_sum : NaN
+    inner_mean_launch_ltot_frac = inner_sum > 0.0 ? sum(pair_weights[inner_flags] .* launch_ltot_frac_values[inner_flags]) / inner_sum : NaN
+    inner_mean_min_r_pc = inner_sum > 0.0 ? sum(pair_weights[inner_flags] .* min_r_pc_values[inner_flags]) / inner_sum : NaN
+    outer_mean_lfrac = outer_sum > 0.0 ? sum(pair_weights[outer_flags] .* lfrac_values[outer_flags]) / outer_sum : NaN
+    regular_mean_third = regular_sum > 0.0 ? sum(pair_weights[regular_flags] .* st.third_launches[third_ids[regular_flags]]) / regular_sum : NaN
+    prograde_fraction = sum(@view w[1:2:end]) / sum(w)
+    retrograde_fraction = sum(@view w[2:2:end]) / sum(w)
+
+    println("[ORBIT WEIGHT FAMILY SUMMARY]",
+        " i=", model_index,
+        " paired_base_orbits=", Npair,
+        " weight_sum=", wsum,
+        " weighted_mean_lfrac=", weighted_mean_lfrac,
+        " weighted_mean_launch_ltot_frac=", weighted_mean_launch_ltot_frac,
+        " weighted_mean_min_r_pc=", weighted_mean_min_r_pc,
+        " low_lfrac_le_0p2_fraction=", low_lfrac_weight / wsum,
+        " high_lfrac_ge_0p7_fraction=", high_lfrac_weight / wsum,
+        " circular_lfrac_1_fraction=", circular_weight / wsum,
+        " inner_launch_radius_pc=", inner_radius_pc,
+        " inner_launch_weight_fraction=", inner_sum / wsum,
+        " inner_high_lfrac_ge_0p7_fraction=", inner_sum > 0.0 ? inner_high_lfrac_weight / inner_sum : NaN,
+        " inner_weighted_mean_lfrac=", inner_mean_lfrac,
+        " inner_weighted_mean_launch_ltot_frac=", inner_mean_launch_ltot_frac,
+        " inner_launch_ltot_ge_0p7_fraction=", inner_sum > 0.0 ? inner_high_ltot_weight / inner_sum : NaN,
+        " inner_weighted_mean_min_r_pc=", inner_mean_min_r_pc,
+        " inner_fraction_min_r_lt_5pc=", inner_sum > 0.0 ? inner_min_r_lt_5pc_weight / inner_sum : NaN,
+        " inner_fraction_min_r_lt_10pc=", inner_sum > 0.0 ? inner_min_r_lt_10pc_weight / inner_sum : NaN,
+        " inner_fraction_min_r_lt_15pc=", inner_sum > 0.0 ? inner_min_r_lt_15pc_weight / inner_sum : NaN,
+        " outer_weighted_mean_lfrac=", outer_mean_lfrac,
+        " regular_family_weight_fraction=", regular_sum / wsum,
+        " regular_weighted_mean_third_u=", regular_mean_third,
+        " prograde_fraction=", prograde_fraction,
+        " retrograde_fraction=", retrograde_fraction,
+    )
+
+    @inbounds for lfrac_id in 1:nlfrac
+        mask = lfrac_ids .== lfrac_id
+        group_weight = sum(pair_weights[mask])
+        group_inner_weight = sum(pair_weights[mask .& inner_flags])
+        group_outer_weight = sum(pair_weights[mask .& outer_flags])
+        group_pairs = pair_weights[mask]
+        effective_pairs = group_weight > 0.0 ? 1.0 / sum(abs2, group_pairs ./ group_weight) : 0.0
+        println("[ORBIT WEIGHT LFRAC]",
+            " i=", model_index,
+            " lfrac_id=", lfrac_id,
+            " lfrac=", f64(st.Lfrac[lfrac_id]),
+            " weight_fraction=", group_weight / wsum,
+            " inner_fraction=", inner_sum > 0.0 ? group_inner_weight / inner_sum : NaN,
+            " outer_fraction=", outer_sum > 0.0 ? group_outer_weight / outer_sum : NaN,
+            " N_base_orbits=", count(identity, mask),
+            " effective_N_base_orbits=", effective_pairs,
+        )
+    end
+
+    regular_inner_sum = sum(pair_weights[regular_flags .& inner_flags])
+    @inbounds for third_id in 1:nthird
+        mask = regular_flags .& (third_ids .== third_id)
+        inner_mask = mask .& inner_flags
+        group_weight = sum(pair_weights[mask])
+        group_inner_weight = sum(pair_weights[inner_mask])
+        group_pairs = pair_weights[mask]
+        effective_pairs = group_weight > 0.0 ? 1.0 / sum(abs2, group_pairs ./ group_weight) : 0.0
+        mean_theta0_deg = group_weight > 0.0 ? sum(pair_weights[mask] .* theta0_deg_values[mask]) / group_weight : NaN
+        mean_launch_ltot_frac = group_weight > 0.0 ? sum(pair_weights[mask] .* launch_ltot_frac_values[mask]) / group_weight : NaN
+        mean_min_r_pc = group_weight > 0.0 ? sum(pair_weights[mask] .* min_r_pc_values[mask]) / group_weight : NaN
+        inner_mean_theta0_deg = group_inner_weight > 0.0 ? sum(pair_weights[inner_mask] .* theta0_deg_values[inner_mask]) / group_inner_weight : NaN
+        inner_mean_launch_ltot_frac = group_inner_weight > 0.0 ? sum(pair_weights[inner_mask] .* launch_ltot_frac_values[inner_mask]) / group_inner_weight : NaN
+        inner_mean_min_r_pc = group_inner_weight > 0.0 ? sum(pair_weights[inner_mask] .* min_r_pc_values[inner_mask]) / group_inner_weight : NaN
+        inner_min_r_lt_10pc_weight = sum(pair_weights[inner_mask .& (min_r_pc_values .< 10.0)])
+        println("[ORBIT WEIGHT THIRD]",
+            " i=", model_index,
+            " third_id=", third_id,
+            " third_u=", st.third_launches[third_id],
+            " regular_weight_fraction=", regular_sum > 0.0 ? group_weight / regular_sum : NaN,
+            " inner_regular_fraction=", regular_inner_sum > 0.0 ? group_inner_weight / regular_inner_sum : NaN,
+            " weighted_mean_theta0_deg=", mean_theta0_deg,
+            " weighted_mean_launch_ltot_frac=", mean_launch_ltot_frac,
+            " weighted_mean_min_r_pc=", mean_min_r_pc,
+            " inner_weighted_mean_theta0_deg=", inner_mean_theta0_deg,
+            " inner_weighted_mean_launch_ltot_frac=", inner_mean_launch_ltot_frac,
+            " inner_weighted_mean_min_r_pc=", inner_mean_min_r_pc,
+            " inner_fraction_min_r_lt_10pc=", group_inner_weight > 0.0 ? inner_min_r_lt_10pc_weight / group_inner_weight : NaN,
+            " N_base_orbits=", count(identity, mask),
+            " effective_N_base_orbits=", effective_pairs,
+        )
+    end
+
+    nshell_bands = min(st.shell_band_count, st.Nshells)
+    @inbounds for band in 1:nshell_bands
+        mask = falses(Npair)
+        shell_min = Inf
+        shell_max = 0.0
+        for j in 1:Npair
+            shell_band = fld((shell_ids[j] - 1) * nshell_bands, st.Nshells) + 1
+            shell_band == band || continue
+            mask[j] = true
+            shell_pc = st.shells[shell_ids[j]] / pc
+            shell_min = min(shell_min, shell_pc)
+            shell_max = max(shell_max, shell_pc)
+        end
+        group_weight = sum(pair_weights[mask])
+        println("[ORBIT WEIGHT SHELL]",
+            " i=", model_index,
+            " shell_band=", band,
+            " shell_min_pc=", isfinite(shell_min) ? shell_min : NaN,
+            " shell_max_pc=", shell_max > 0.0 ? shell_max : NaN,
+            " weight_fraction=", group_weight / wsum,
+            " N_base_orbits=", count(identity, mask),
+        )
+    end
+
+    return nothing
+end
+
+function _print_orbit_projection_diagnostics(st::OrbitWorkState, successful_columns::Vector{Int}, w::Vector{Float64}, A_losvd::Matrix{Float64}, A_kinematic::Matrix{Float64}, losvd_target::Vector{Float64}, losvd_sigma::Vector{Float64}; model_index::Int=1, inner_radius_pc::Float64=30.0, target_lfrac::Float64=0.2, target_third_u::Float64=0.5, target_aperture::Int=1)
+    st.projection_diag_enabled || return nothing
+    length(successful_columns) == length(w) || error("Orbit projection diagnostic column/weight length mismatch")
+    size(A_losvd, 2) == length(w) || error("Orbit projection diagnostic LOSVD column mismatch")
+    size(A_kinematic, 2) == length(w) || error("Orbit projection diagnostic kinematic column mismatch")
+    size(A_losvd, 1) == st.Nspatial * st.Nvbin || error("Orbit projection diagnostic LOSVD row mismatch")
+    size(A_kinematic, 1) == st.Nspatial || error("Orbit projection diagnostic aperture mismatch")
+    length(losvd_target) == size(A_losvd, 1) || error("Orbit projection diagnostic LOSVD target length mismatch")
+    length(losvd_sigma) == size(A_losvd, 1) || error("Orbit projection diagnostic LOSVD sigma length mismatch")
+    1 <= target_aperture <= st.Nspatial || error("Orbit projection diagnostic target aperture is outside the spatial grid")
+    iseven(length(w)) || error("Orbit projection diagnostic requires prograde/retrograde orbit pairs")
+
+    nlfrac = length(st.Lfrac)
+    nthird = length(st.third_launches)
+    lfrac_id_target = argmin(abs.(Float64.(collect(st.Lfrac)) .- target_lfrac))
+    third_id_target = argmin(abs.(st.third_launches .- target_third_u))
+    lfrac_value = f64(st.Lfrac[lfrac_id_target])
+    third_u_value = f64(st.third_launches[third_id_target])
+    abs(lfrac_value - target_lfrac) <= 1.0e-12 || error("Orbit projection target Lfrac is not present in the launch grid")
+    abs(third_u_value - target_third_u) <= 1.0e-12 || error("Orbit projection target third_u is not present in the launch grid")
+
+    family_columns = Int[]
+    inner_family_columns = Int[]
+    family_base_orbits = Int[]
+    inner_family_base_orbits = Int[]
+    @inbounds for j in 1:2:length(successful_columns)
+        col_pro = successful_columns[j]
+        col_ret = successful_columns[j + 1]
+        isodd(col_pro) || error("Orbit projection diagnostic expected prograde column first")
+        col_ret == col_pro + 1 || error("Orbit projection diagnostic orbit pair is not contiguous")
+        c = (col_pro + 1) ÷ 2
+        shell_id, lfrac_id, third_id = _orbit_grid_indices(c, st.Nshells, nlfrac, nthird)
+        lfrac_id == lfrac_id_target || continue
+        third_id == third_id_target || continue
+        push!(family_columns, j)
+        push!(family_columns, j + 1)
+        push!(family_base_orbits, c)
+        if st.shells[shell_id] / pc < inner_radius_pc
+            push!(inner_family_columns, j)
+            push!(inner_family_columns, j + 1)
+            push!(inner_family_base_orbits, c)
+        end
+    end
+
+    isempty(family_columns) && error("Orbit projection diagnostic found no successful columns for the requested family")
+    isempty(inner_family_columns) && error("Orbit projection diagnostic found no inner successful columns for the requested family")
+
+    total_weight = sum(w)
+    family_weight = sum(w[family_columns])
+    inner_family_weight = sum(w[inner_family_columns])
+    println("[ORBIT PROJECTION FAMILY SUMMARY]",
+        " i=", model_index,
+        " target_lfrac=", lfrac_value,
+        " target_third_u=", third_u_value,
+        " inner_launch_radius_pc=", inner_radius_pc,
+        " N_family_base_orbits=", length(family_base_orbits),
+        " N_inner_family_base_orbits=", length(inner_family_base_orbits),
+        " family_weight_fraction=", family_weight / total_weight,
+        " inner_family_weight_fraction=", inner_family_weight / total_weight,
+        " inner_fraction_of_family_weight=", family_weight > 0.0 ? inner_family_weight / family_weight : NaN,
+    )
+
+    velocity_centers = 0.5 .* (st.velocity_edges[1:end-1] .+ st.velocity_edges[2:end])
+    threshold_kms = (10.0, 20.0, 30.0, 50.0)
+    losvd_state = karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, st.Nspatial, st.Nvbin)
+
+    @inbounds for ib in 1:st.Nspatial
+        rows = ((ib - 1) * st.Nvbin + 1):(ib * st.Nvbin)
+        model_projected = dot(@view(A_kinematic[ib, :]), w)
+        family_projected = dot(@view(A_kinematic[ib, inner_family_columns]), @view(w[inner_family_columns]))
+        family_hist = A_losvd[rows, inner_family_columns] * w[inner_family_columns]
+        family_inside = sum(family_hist)
+        family_outside = max(family_projected - family_inside, 0.0)
+        family_outside_fraction = family_projected > 0.0 ? family_outside / family_projected : NaN
+        family_fraction_of_aperture = model_projected > 0.0 ? family_projected / model_projected : NaN
+
+        metric_weight = 0.0
+        mean_v3d = 0.0
+        rms_v3d_sq = 0.0
+        mean_abs_vlos = 0.0
+        rms_vlos_sq = 0.0
+        mean_ratio = 0.0
+        frac_ratio_lt_0p25 = 0.0
+        frac_ratio_lt_0p5 = 0.0
+        for compact_col in inner_family_columns
+            full_col = successful_columns[compact_col]
+            aperture_fraction = A_kinematic[ib, compact_col]
+            contribution = w[compact_col] * aperture_fraction
+            contribution > 0.0 || continue
+            v3d_mean = st.projection_v3d_mean[ib, full_col]
+            v3d_rms = st.projection_v3d_rms[ib, full_col]
+            abs_vlos_mean = st.projection_abs_vlos_mean[ib, full_col]
+            vlos_rms = st.projection_vlos_rms[ib, full_col]
+            ratio_mean = st.projection_abs_vlos_over_v3d_mean[ib, full_col]
+            ratio_lt_0p25 = st.projection_los_ratio_lt_0p25[ib, full_col]
+            ratio_lt_0p5 = st.projection_los_ratio_lt_0p5[ib, full_col]
+            if all(isfinite, (v3d_mean, v3d_rms, abs_vlos_mean, vlos_rms, ratio_mean, ratio_lt_0p25, ratio_lt_0p5))
+                metric_weight += contribution
+                mean_v3d += contribution * v3d_mean
+                rms_v3d_sq += contribution * v3d_rms * v3d_rms
+                mean_abs_vlos += contribution * abs_vlos_mean
+                rms_vlos_sq += contribution * vlos_rms * vlos_rms
+                mean_ratio += contribution * ratio_mean
+                frac_ratio_lt_0p25 += contribution * ratio_lt_0p25
+                frac_ratio_lt_0p5 += contribution * ratio_lt_0p5
+            end
+        end
+        if metric_weight > 0.0
+            mean_v3d /= metric_weight
+            mean_abs_vlos /= metric_weight
+            mean_ratio /= metric_weight
+            frac_ratio_lt_0p25 /= metric_weight
+            frac_ratio_lt_0p5 /= metric_weight
+            rms_v3d_sq /= metric_weight
+            rms_vlos_sq /= metric_weight
+        else
+            mean_v3d = NaN
+            mean_abs_vlos = NaN
+            mean_ratio = NaN
+            frac_ratio_lt_0p25 = NaN
+            frac_ratio_lt_0p5 = NaN
+            rms_v3d_sq = NaN
+            rms_vlos_sq = NaN
+        end
+        rms_v3d = isfinite(rms_v3d_sq) ? sqrt(max(rms_v3d_sq, 0.0)) : NaN
+        rms_vlos = isfinite(rms_vlos_sq) ? sqrt(max(rms_vlos_sq, 0.0)) : NaN
+
+        hist_sum = sum(family_hist)
+        hist_abs_mean = hist_sum > 0.0 ? sum(family_hist .* abs.(velocity_centers)) / hist_sum : NaN
+        hist_rms = hist_sum > 0.0 ? sqrt(sum(family_hist .* velocity_centers .* velocity_centers) / hist_sum) : NaN
+        high_fractions = Float64[]
+        for threshold in threshold_kms
+            threshold_mps = threshold * 1.0e3
+            high_fraction = hist_sum > 0.0 ? sum(family_hist[abs.(velocity_centers) .>= threshold_mps]) / hist_sum : NaN
+            push!(high_fractions, high_fraction)
+        end
+
+        println("[ORBIT PROJECTION APERTURE]",
+            " i=", model_index,
+            " aperture=", ib,
+            " R_inner_pc=", st.spatial_edges[ib] / pc,
+            " R_outer_pc=", st.spatial_edges[ib + 1] / pc,
+            " family_projected_weight=", family_projected,
+            " model_projected_weight=", model_projected,
+            " family_fraction_of_aperture=", family_fraction_of_aperture,
+            " family_inside_velocity_window=", family_inside,
+            " family_outside_velocity_window=", family_outside,
+            " family_outside_fraction=", family_outside_fraction,
+            " mean_v3d_kms=", mean_v3d / 1.0e3,
+            " rms_v3d_kms=", rms_v3d / 1.0e3,
+            " mean_abs_vlos_kms=", mean_abs_vlos / 1.0e3,
+            " rms_vlos_kms=", rms_vlos / 1.0e3,
+            " mean_abs_vlos_over_v3d=", mean_ratio,
+            " fraction_abs_vlos_over_v3d_lt_0p25=", frac_ratio_lt_0p25,
+            " fraction_abs_vlos_over_v3d_lt_0p5=", frac_ratio_lt_0p5,
+            " losvd_hist_mean_abs_v_kms=", hist_abs_mean / 1.0e3,
+            " losvd_hist_rms_v_kms=", hist_rms / 1.0e3,
+            " losvd_frac_abs_v_ge_10kms=", high_fractions[1],
+            " losvd_frac_abs_v_ge_20kms=", high_fractions[2],
+            " losvd_frac_abs_v_ge_30kms=", high_fractions[3],
+            " losvd_frac_abs_v_ge_50kms=", high_fractions[4],
+        )
+    end
+
+    rows = ((target_aperture - 1) * st.Nvbin + 1):(target_aperture * st.Nvbin)
+    family_hist = A_losvd[rows, inner_family_columns] * w[inner_family_columns]
+    model_hist = losvd_state.model[rows]
+    raw_target = losvd_target[rows]
+    raw_sigma = losvd_sigma[rows]
+    effective_target = losvd_state.effective_target[rows]
+    effective_sigma = losvd_state.effective_sigma[rows]
+    target_sum = sum(effective_target)
+    model_sum = sum(model_hist)
+    family_sum = sum(family_hist)
+    chi_aperture = losvd_state.chi_by_spatial[target_aperture]
+    chi_without_family = 0.0
+    max_abs_sigma_residual = 0.0
+    max_abs_sigma_bin = 0
+    println("[ORBIT PROJECTION LOSVD SUMMARY] i=", model_index, " aperture=", target_aperture, " R_inner_pc=", st.spatial_edges[target_aperture] / pc, " R_outer_pc=", st.spatial_edges[target_aperture + 1] / pc, " fracnew=", losvd_state.fracnew[target_aperture], " target_sum=", target_sum, " model_sum=", model_sum, " inner_family_sum=", family_sum, " inner_family_fraction_of_model=", model_sum > 0.0 ? family_sum / model_sum : NaN, " chi2_aperture=", chi_aperture)
+    @inbounds for local_bin in 1:st.Nvbin
+        row = first(rows) + local_bin - 1
+        sigma_eff = max(effective_sigma[local_bin], 1.0e-12)
+        residual_sigma = (model_hist[local_bin] - effective_target[local_bin]) / sigma_eff
+        chi_bin = residual_sigma * residual_sigma
+        model_without_family = model_hist[local_bin] - family_hist[local_bin]
+        residual_without_family_sigma = (model_without_family - effective_target[local_bin]) / sigma_eff
+        chi_without_bin = residual_without_family_sigma * residual_without_family_sigma
+        chi_without_family += chi_without_bin
+        abs_residual_sigma = abs(residual_sigma)
+        if abs_residual_sigma > max_abs_sigma_residual
+            max_abs_sigma_residual = abs_residual_sigma
+            max_abs_sigma_bin = local_bin
+        end
+        target_shape_fraction = target_sum > 0.0 ? effective_target[local_bin] / target_sum : NaN
+        model_shape_fraction = model_sum > 0.0 ? model_hist[local_bin] / model_sum : NaN
+        family_shape_fraction = family_sum > 0.0 ? family_hist[local_bin] / family_sum : NaN
+        family_fraction_of_model_bin = model_hist[local_bin] > 0.0 ? family_hist[local_bin] / model_hist[local_bin] : NaN
+        sigma_is_invalid = raw_sigma[local_bin] == DEFAULT_KARL_INVALID_SIGMA_SENTINEL
+        println("[ORBIT PROJECTION LOSVD BIN] i=", model_index, " aperture=", target_aperture, " velocity_bin=", local_bin, " v_inner_kms=", st.velocity_edges[local_bin] / 1.0e3, " v_outer_kms=", st.velocity_edges[local_bin + 1] / 1.0e3, " v_center_kms=", velocity_centers[local_bin] / 1.0e3, " raw_target=", raw_target[local_bin], " raw_sigma=", raw_sigma[local_bin], " sigma_is_invalid=", sigma_is_invalid, " effective_target=", effective_target[local_bin], " effective_sigma=", effective_sigma[local_bin], " total_model=", model_hist[local_bin], " inner_family_model=", family_hist[local_bin], " model_without_inner_family=", model_without_family, " target_shape_fraction=", target_shape_fraction, " model_shape_fraction=", model_shape_fraction, " inner_family_shape_fraction=", family_shape_fraction, " inner_family_fraction_of_model_bin=", family_fraction_of_model_bin, " residual_sigma=", residual_sigma, " chi2_bin=", chi_bin, " chi2_without_inner_family=", chi_without_bin, " delta_chi2_inner_family=", chi_bin - chi_without_bin)
+    end
+    println("[ORBIT PROJECTION LOSVD CHI SUMMARY] i=", model_index, " aperture=", target_aperture, " chi2_with_inner_family=", chi_aperture, " chi2_without_inner_family_fixed_other_weights=", chi_without_family, " delta_chi2_inner_family=", chi_aperture - chi_without_family, " max_abs_sigma_residual=", max_abs_sigma_residual, " max_abs_sigma_bin=", max_abs_sigma_bin)
+
+    return nothing
+end
+
+function _print_orbit_phase_volume_diagnostics(st::OrbitWorkState, successful_columns::Vector{Int}, w::Vector{Float64}, wphase_use::Vector{Float64}, phase_result; model_index::Int=1, inner_radius_pc::Float64=30.0, topn::Int=10)
+    length(successful_columns) == length(w) || error("Orbit phase-volume diagnostic column/weight length mismatch")
+    length(wphase_use) == length(w) || error("Orbit phase-volume diagnostic wphase/weight length mismatch")
+    iseven(length(w)) || error("Orbit phase-volume diagnostic requires prograde/retrograde orbit pairs")
+    topn > 0 || error("Orbit phase-volume diagnostic topn must be positive")
+    all(isfinite, w) || error("Orbit phase-volume diagnostic requires finite weights")
+    all(>(0.0), w) || error("Orbit phase-volume diagnostic requires positive orbit weights")
+    all(isfinite, wphase_use) || error("Orbit phase-volume diagnostic requires finite wphase")
+    all(>(0.0), wphase_use) || error("Orbit phase-volume diagnostic requires positive wphase")
+
+    Npair = length(w) ÷ 2
+    nlfrac = length(st.Lfrac)
+    nthird = length(st.third_launches)
+
+    base_indices = zeros(Int, Npair)
+    shell_ids = zeros(Int, Npair)
+    lfrac_ids = zeros(Int, Npair)
+    third_ids = zeros(Int, Npair)
+    pair_weights = zeros(Float64, Npair)
+    pair_phase_volume = zeros(Float64, Npair)
+    theta0_deg_values = zeros(Float64, Npair)
+    launch_ltot_frac_values = zeros(Float64, Npair)
+    min_r_pc_values = zeros(Float64, Npair)
+    inner_flags = falses(Npair)
+
+    @inbounds for j in 1:Npair
+        jpro = 2 * j - 1
+        jret = 2 * j
+        col_pro = successful_columns[jpro]
+        col_ret = successful_columns[jret]
+        isodd(col_pro) || error("Orbit phase-volume diagnostic expected prograde column first")
+        col_ret == col_pro + 1 || error("Orbit phase-volume diagnostic orbit pair is not contiguous")
+        c = (col_pro + 1) ÷ 2
+        shell_id, lfrac_id, third_id = _orbit_grid_indices(c, st.Nshells, nlfrac, nthird)
+        pv = f64(phase_result.phase_volume_base[c])
+        isfinite(pv) && pv > 0.0 || error("Orbit phase-volume diagnostic found invalid phase volume at base orbit $c")
+        theta0 = f64(st.launch_theta0[c])
+        sintheta0 = sin(theta0)
+
+        base_indices[j] = c
+        shell_ids[j] = shell_id
+        lfrac_ids[j] = lfrac_id
+        third_ids[j] = third_id
+        pair_weights[j] = w[jpro] + w[jret]
+        pair_phase_volume[j] = pv
+        theta0_deg_values[j] = theta0 * (180.0 / pi)
+        launch_ltot_frac_values[j] = isfinite(sintheta0) && abs(sintheta0) > EPS_SIN ? f64(st.Lfrac[lfrac_id]) / abs(sintheta0) : NaN
+        min_r_pc_values[j] = f64(st.min_r_reached[c]) / pc
+        inner_flags[j] = st.shells[shell_id] / pc < inner_radius_pc
+    end
+
+    all(isfinite, theta0_deg_values) || error("Orbit phase-volume diagnostic found nonfinite launch theta")
+    all(isfinite, launch_ltot_frac_values) || error("Orbit phase-volume diagnostic found nonfinite launch total-angular-momentum ratio")
+    all(isfinite, min_r_pc_values) || error("Orbit phase-volume diagnostic found nonfinite minimum radius")
+
+    phase_volume_columns = Float64.(phase_result.phase_volume_paired[successful_columns])
+    all(isfinite, phase_volume_columns) || error("Orbit phase-volume diagnostic found nonfinite compact phase-volume columns")
+    all(>(0.0), phase_volume_columns) || error("Orbit phase-volume diagnostic found non-positive compact phase-volume columns")
+
+    reciprocal_error = maximum(abs.(phase_volume_columns .* wphase_use .- 1.0))
+    wsum = sum(w)
+    isfinite(wsum) && wsum > 0.0 || error("Orbit phase-volume diagnostic has nonpositive total fitted weight")
+    phase_column_sum = sum(phase_volume_columns)
+    isfinite(phase_column_sum) && phase_column_sum > 0.0 || error("Orbit phase-volume diagnostic has nonpositive total phase volume")
+
+    wnorm = w ./ wsum
+    phase_prior_columns = phase_volume_columns ./ phase_column_sum
+    column_kl_terms = wnorm .* log.(wnorm ./ phase_prior_columns)
+    column_kl = sum(column_kl_terms)
+    entropy_direct = karl_entropy_value(wnorm, wphase_use)
+    entropy_reconstructed = log(phase_column_sum) - column_kl
+    entropy_reconstruction_error = entropy_direct - entropy_reconstructed
+
+    pair_weight_sum = sum(pair_weights)
+    pair_phase_sum = sum(pair_phase_volume)
+    pair_weight_share = pair_weights ./ pair_weight_sum
+    pair_phase_share = pair_phase_volume ./ pair_phase_sum
+    pair_enhancement = pair_weight_share ./ pair_phase_share
+    pair_kl_contribution = pair_weight_share .* log.(pair_enhancement)
+    pair_kl = sum(pair_kl_contribution)
+    pair_weight_neff = 1.0 / sum(abs2, pair_weight_share)
+    pair_phase_neff = 1.0 / sum(abs2, pair_phase_share)
+    max_pair_enhancement, max_pair_enhancement_idx = findmax(pair_enhancement)
+
+    println("[ORBIT PHASE ENTROPY SUMMARY]",
+        " i=", model_index,
+        " paired_base_orbits=", Npair,
+        " fitted_weight_sum=", wsum,
+        " compact_phase_volume_sum=", phase_column_sum,
+        " reciprocal_alignment_max_abs=", reciprocal_error,
+        " entropy_direct_normalized=", entropy_direct,
+        " entropy_reconstructed=", entropy_reconstructed,
+        " entropy_reconstruction_error=", entropy_reconstruction_error,
+        " entropy_normalization_free=", -column_kl,
+        " KL_column_to_phase_prior=", column_kl,
+        " KL_pair_to_phase_prior=", pair_kl,
+        " KL_rotation_excess=", column_kl - pair_kl,
+        " fitted_effective_N_pairs=", pair_weight_neff,
+        " phase_prior_effective_N_pairs=", pair_phase_neff,
+        " max_pair_weight_to_phase_ratio=", max_pair_enhancement,
+        " max_pair_weight_to_phase_base_orbit=", base_indices[max_pair_enhancement_idx],
+    )
+
+    inner_weight_sum = sum(pair_weights[inner_flags])
+    inner_phase_sum = sum(pair_phase_volume[inner_flags])
+    regular_flags = lfrac_ids .< nlfrac
+    regular_weight_sum = sum(pair_weights[regular_flags])
+    regular_phase_sum = sum(pair_phase_volume[regular_flags])
+    regular_inner_flags = regular_flags .& inner_flags
+    regular_inner_weight_sum = sum(pair_weights[regular_inner_flags])
+    regular_inner_phase_sum = sum(pair_phase_volume[regular_inner_flags])
+
+    @inbounds for lfrac_id in 1:nlfrac
+        mask = lfrac_ids .== lfrac_id
+        inner_mask = mask .& inner_flags
+        group_weight = sum(pair_weights[mask])
+        group_phase = sum(pair_phase_volume[mask])
+        group_weight_fraction = group_weight / pair_weight_sum
+        group_phase_fraction = group_phase / pair_phase_sum
+        group_inner_weight = sum(pair_weights[inner_mask])
+        group_inner_phase = sum(pair_phase_volume[inner_mask])
+        inner_weight_fraction = inner_weight_sum > 0.0 ? group_inner_weight / inner_weight_sum : NaN
+        inner_phase_fraction = inner_phase_sum > 0.0 ? group_inner_phase / inner_phase_sum : NaN
+        println("[ORBIT PHASE LFRAC]",
+            " i=", model_index,
+            " lfrac_id=", lfrac_id,
+            " lfrac=", f64(st.Lfrac[lfrac_id]),
+            " weight_fraction=", group_weight_fraction,
+            " phase_volume_fraction=", group_phase_fraction,
+            " weight_to_phase_ratio=", group_phase_fraction > 0.0 ? group_weight_fraction / group_phase_fraction : NaN,
+            " inner_weight_fraction=", inner_weight_fraction,
+            " inner_phase_volume_fraction=", inner_phase_fraction,
+            " inner_weight_to_phase_ratio=", isfinite(inner_phase_fraction) && inner_phase_fraction > 0.0 ? inner_weight_fraction / inner_phase_fraction : NaN,
+            " N_base_orbits=", count(identity, mask),
+        )
+    end
+
+    @inbounds for third_id in 1:nthird
+        mask = regular_flags .& (third_ids .== third_id)
+        inner_mask = mask .& inner_flags
+        group_weight = sum(pair_weights[mask])
+        group_phase = sum(pair_phase_volume[mask])
+        group_inner_weight = sum(pair_weights[inner_mask])
+        group_inner_phase = sum(pair_phase_volume[inner_mask])
+        regular_weight_fraction = regular_weight_sum > 0.0 ? group_weight / regular_weight_sum : NaN
+        regular_phase_fraction = regular_phase_sum > 0.0 ? group_phase / regular_phase_sum : NaN
+        inner_regular_weight_fraction = regular_inner_weight_sum > 0.0 ? group_inner_weight / regular_inner_weight_sum : NaN
+        inner_regular_phase_fraction = regular_inner_phase_sum > 0.0 ? group_inner_phase / regular_inner_phase_sum : NaN
+        println("[ORBIT PHASE THIRD]",
+            " i=", model_index,
+            " third_id=", third_id,
+            " third_u=", st.third_launches[third_id],
+            " regular_weight_fraction=", regular_weight_fraction,
+            " regular_phase_volume_fraction=", regular_phase_fraction,
+            " regular_weight_to_phase_ratio=", isfinite(regular_phase_fraction) && regular_phase_fraction > 0.0 ? regular_weight_fraction / regular_phase_fraction : NaN,
+            " inner_regular_weight_fraction=", inner_regular_weight_fraction,
+            " inner_regular_phase_volume_fraction=", inner_regular_phase_fraction,
+            " inner_regular_weight_to_phase_ratio=", isfinite(inner_regular_phase_fraction) && inner_regular_phase_fraction > 0.0 ? inner_regular_weight_fraction / inner_regular_phase_fraction : NaN,
+            " N_base_orbits=", count(identity, mask),
+        )
+    end
+
+    nshell_bands = min(st.shell_band_count, st.Nshells)
+    @inbounds for band in 1:nshell_bands
+        mask = falses(Npair)
+        shell_min = Inf
+        shell_max = 0.0
+        for j in 1:Npair
+            shell_band = fld((shell_ids[j] - 1) * nshell_bands, st.Nshells) + 1
+            shell_band == band || continue
+            mask[j] = true
+            shell_pc = st.shells[shell_ids[j]] / pc
+            shell_min = min(shell_min, shell_pc)
+            shell_max = max(shell_max, shell_pc)
+        end
+        group_weight_fraction = sum(pair_weights[mask]) / pair_weight_sum
+        group_phase_fraction = sum(pair_phase_volume[mask]) / pair_phase_sum
+        println("[ORBIT PHASE SHELL]",
+            " i=", model_index,
+            " shell_band=", band,
+            " shell_min_pc=", isfinite(shell_min) ? shell_min : NaN,
+            " shell_max_pc=", shell_max > 0.0 ? shell_max : NaN,
+            " weight_fraction=", group_weight_fraction,
+            " phase_volume_fraction=", group_phase_fraction,
+            " weight_to_phase_ratio=", group_phase_fraction > 0.0 ? group_weight_fraction / group_phase_fraction : NaN,
+            " N_base_orbits=", count(identity, mask),
+        )
+    end
+
+    function print_phase_orbit_row(tag::String, rank::Int, j::Int)
+        c = base_indices[j]
+        println(tag,
+            " i=", model_index,
+            " rank=", rank,
+            " base_orbit=", c,
+            " shell_id=", shell_ids[j],
+            " shell_pc=", st.shells[shell_ids[j]] / pc,
+            " lfrac_id=", lfrac_ids[j],
+            " lfrac=", f64(st.Lfrac[lfrac_ids[j]]),
+            " third_id=", third_ids[j],
+            " third_u=", st.third_launches[third_ids[j]],
+            " weight_fraction=", pair_weight_share[j],
+            " phase_volume_fraction=", pair_phase_share[j],
+            " weight_to_phase_ratio=", pair_enhancement[j],
+            " KL_pair_contribution=", pair_kl_contribution[j],
+            " normalized_phase_volume=", pair_phase_volume[j],
+            " raw_phase_volume=", phase_result.raw_phase_volume_base[c],
+            " sos_area=", phase_result.sos_area[c],
+            " delta_sos_area=", phase_result.delta_sos_area[c],
+            " dE=", phase_result.dE[c],
+            " dLz=", phase_result.dLz[c],
+            " energy=", st.phase_volume_state.energy[c],
+            " lz_abs=", st.phase_volume_state.lz_abs[c],
+            " launch_r0_pc=", st.launch_r0[c] / pc,
+            " launch_theta0_deg=", theta0_deg_values[j],
+            " launch_ltot_frac=", launch_ltot_frac_values[j],
+            " min_r_pc=", min_r_pc_values[j],
+            " sos_points=", st.sos_points[c],
+        )
+    end
+
+    top_count = min(topn, Npair)
+    top_kl_order = sortperm(pair_kl_contribution; rev=true)
+    @inbounds for rank in 1:top_count
+        print_phase_orbit_row("[ORBIT PHASE TOP KL]", rank, top_kl_order[rank])
+    end
+
+    u05_id = argmin(abs.(st.third_launches .- 0.5))
+    if abs(st.third_launches[u05_id] - 0.5) <= 1.0e-12
+        u05_indices = findall(regular_flags .& inner_flags .& (third_ids .== u05_id))
+        sort!(u05_indices; by=j -> pair_weights[j], rev=true)
+        u05_count = min(topn, length(u05_indices))
+        @inbounds for rank in 1:u05_count
+            print_phase_orbit_row("[ORBIT PHASE INNER U0P5]", rank, u05_indices[rank])
+        end
+    end
+
+    return nothing
 end
 
 function _build_compact_karl_wphase(st::OrbitWorkState, successful_columns::Vector{Int})
-    wphase_paired, phase_diag = build_karl_wphase(st.phase_volume_state; normalization=:geometric_mean, strict=true)
-    wphase_use = compact_karl_wphase(wphase_paired, successful_columns, st.Norbit)
+    phase_result = compute_karl_phase_volumes(st.phase_volume_state; normalization=:geometric_mean, strict=true)
+    wphase_use = compact_karl_wphase(phase_result.wphase_paired, successful_columns, st.Norbit)
     length(wphase_use) == length(successful_columns) ||
         error("compacted Karl wphase length does not match successful orbit columns")
-    return wphase_use, phase_diag
+    return wphase_use, phase_result.diagnostics, phase_result
 end
 
 # This is the main worker function that runs in a thread to compute orbits and fill the A-matrix.
@@ -1076,10 +1849,28 @@ function _orbit_worker!(st::OrbitWorkState)
 
     col_losvd_pro = zeros(Float64, st.Nlosvd)
     col_losvd_ret = zeros(Float64, st.Nlosvd)
+    col_kinematic = zeros(Float64, st.Nspatial)
     col_light = zeros(Float64, st.Nlight)
+    projection_hits = zeros(Int, st.Nspatial)
+    projection_v3d_sum = zeros(Float64, st.Nspatial)
+    projection_v3d_sq_sum = zeros(Float64, st.Nspatial)
+    projection_abs_vlos_pro_sum = zeros(Float64, st.Nspatial)
+    projection_abs_vlos_ret_sum = zeros(Float64, st.Nspatial)
+    projection_vlos_pro_sq_sum = zeros(Float64, st.Nspatial)
+    projection_vlos_ret_sq_sum = zeros(Float64, st.Nspatial)
+    projection_ratio_pro_sum = zeros(Float64, st.Nspatial)
+    projection_ratio_ret_sum = zeros(Float64, st.Nspatial)
+    projection_ratio_pro_lt_0p25 = zeros(Int, st.Nspatial)
+    projection_ratio_ret_lt_0p25 = zeros(Int, st.Nspatial)
+    projection_ratio_pro_lt_0p5 = zeros(Int, st.Nspatial)
+    projection_ratio_ret_lt_0p5 = zeros(Int, st.Nspatial)
     s_arr = Vector{Float64}(undef, st.nsteps)
     vlos_pro_buf = Vector{Float64}(undef, st.nsteps)
     vlos_ret_buf = Vector{Float64}(undef, st.nsteps)
+    xsky_arr = st.losvd_target_mode === :karl_mode0_observables ? Vector{Float64}(undef, st.nsteps) : Float64[]
+    ysky_arr = st.losvd_target_mode === :karl_mode0_observables ? Vector{Float64}(undef, st.nsteps) : Float64[]
+    karl_vlib_pro = st.losvd_target_mode === :karl_mode0_observables ? zeros(Float64, st.karl_observables.nvel, st.karl_observables.nrlib, st.karl_observables.nvlib) : zeros(Float64, 0, 0, 0)
+    karl_spatial = st.losvd_target_mode === :karl_mode0_observables ? zeros(Float64, st.karl_observables.nrlib, st.karl_observables.nvlib) : zeros(Float64, 0, 0)
     energy_drift_tolerance = 1.0e-2
     dt_scales = (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125)
     continuation_step_safeties = (0.10, 0.075, 0.05, 0.025, 0.0125)
@@ -1313,20 +2104,43 @@ function _orbit_worker!(st::OrbitWorkState)
         resize!(s_arr, Nhits)
         resize!(vlos_pro_buf, Nhits)
         resize!(vlos_ret_buf, Nhits)
+        st.losvd_target_mode === :karl_mode0_observables && resize!(xsky_arr, Nhits)
+        st.losvd_target_mode === :karl_mode0_observables && resize!(ysky_arr, Nhits)
         phi = 0.0
         @inbounds for i in 1:Nhits
             ri = f64(r[i])
             thi = f64(theta[i])
             si = _ssin(thi)
             vphi_i = f64(Lz0) / max(ri * si, 1.0e-30)
-            s_arr[i], vlos_pro_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), vphi_i, thi, phi, st.sini, st.cosi)
-            _, vlos_ret_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), -vphi_i, thi, phi, st.sini, st.cosi)
+            if st.losvd_target_mode === :karl_mode0_observables
+                s_arr[i], vlos_pro_buf[i], xsky_arr[i], ysky_arr[i] = _project_axisym_sample_full(ri, f64(vr[i]), f64(vtheta[i]), vphi_i, thi, phi, st.sini, st.cosi)
+                vlos_ret_buf[i] = -vlos_pro_buf[i]
+            else
+                s_arr[i], vlos_pro_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), vphi_i, thi, phi, st.sini, st.cosi)
+                _, vlos_ret_buf[i] = _project_axisym_sample(ri, f64(vr[i]), f64(vtheta[i]), -vphi_i, thi, phi, st.sini, st.cosi)
+            end
             phi += f64(Lz0) / max(ri * ri * si * si, 1.0e-30) * dt_orb
         end
 
         fill!(col_losvd_pro, 0.0)
         fill!(col_losvd_ret, 0.0)
+        fill!(col_kinematic, 0.0)
         fill!(col_light, 0.0)
+        st.losvd_target_mode === :karl_mode0_observables && fill!(karl_vlib_pro, 0.0)
+        st.losvd_target_mode === :karl_mode0_observables && fill!(karl_spatial, 0.0)
+        fill!(projection_hits, 0)
+        fill!(projection_v3d_sum, 0.0)
+        fill!(projection_v3d_sq_sum, 0.0)
+        fill!(projection_abs_vlos_pro_sum, 0.0)
+        fill!(projection_abs_vlos_ret_sum, 0.0)
+        fill!(projection_vlos_pro_sq_sum, 0.0)
+        fill!(projection_vlos_ret_sq_sum, 0.0)
+        fill!(projection_ratio_pro_sum, 0.0)
+        fill!(projection_ratio_ret_sum, 0.0)
+        fill!(projection_ratio_pro_lt_0p25, 0)
+        fill!(projection_ratio_ret_lt_0p25, 0)
+        fill!(projection_ratio_pro_lt_0p5, 0)
+        fill!(projection_ratio_ret_lt_0p5, 0)
 
         @inbounds for k in 1:Nhits
             constraint_radius = s_arr[k]
@@ -1338,9 +2152,49 @@ function _orbit_worker!(st::OrbitWorkState)
                 constraint_radius = sqrt(R_intrinsic * R_intrinsic + (z_intrinsic / st.tracer_axis_ratio) * (z_intrinsic / st.tracer_axis_ratio))
             end
             il = _bin_index(st.light_edges, constraint_radius)
-            ik = _bin_index(st.spatial_edges, s_arr[k])
             il > 0 && (col_light[il] += 1.0)
+
+            if st.losvd_target_mode === :karl_mode0_observables
+                ir_karl, iv_karl = karl_observables_projected_cell(st.karl_observables, s_arr[k], ysky_arr[k])
+                ir_karl == 0 && continue
+                iv_karl == 0 && continue
+                karl_spatial[ir_karl, iv_karl] += 1.0
+                # Karl's raw v1lib source grid is the x>=0 half-plane. Fold x<0 samples back to that source grid and reverse their LOS velocity before the seeing convolution.
+                vlos_folded = xsky_arr[k] < 0.0 ? -vlos_pro_buf[k] : vlos_pro_buf[k]
+                jb_pro = _bin_index(st.velocity_edges, vlos_folded)
+                jb_pro > 0 && (karl_vlib_pro[jb_pro, ir_karl, iv_karl] += 1.0)
+                continue
+            end
+
+            ik = _bin_index(st.spatial_edges, s_arr[k])
             ik == 0 && continue
+            col_kinematic[ik] += 1.0
+            if st.projection_diag_enabled
+                rk = f64(r[k])
+                thk = f64(theta[k])
+                sik = _ssin(thk)
+                vrk = f64(vr[k])
+                vtk = f64(vtheta[k])
+                vphik = f64(Lz0) / max(rk * sik, 1.0e-30)
+                v3d = sqrt(vrk * vrk + vtk * vtk + vphik * vphik)
+                abs_vlos_pro = abs(vlos_pro_buf[k])
+                abs_vlos_ret = abs(vlos_ret_buf[k])
+                ratio_pro = v3d > 0.0 ? abs_vlos_pro / v3d : 0.0
+                ratio_ret = v3d > 0.0 ? abs_vlos_ret / v3d : 0.0
+                projection_hits[ik] += 1
+                projection_v3d_sum[ik] += v3d
+                projection_v3d_sq_sum[ik] += v3d * v3d
+                projection_abs_vlos_pro_sum[ik] += abs_vlos_pro
+                projection_abs_vlos_ret_sum[ik] += abs_vlos_ret
+                projection_vlos_pro_sq_sum[ik] += vlos_pro_buf[k] * vlos_pro_buf[k]
+                projection_vlos_ret_sq_sum[ik] += vlos_ret_buf[k] * vlos_ret_buf[k]
+                projection_ratio_pro_sum[ik] += ratio_pro
+                projection_ratio_ret_sum[ik] += ratio_ret
+                ratio_pro < 0.25 && (projection_ratio_pro_lt_0p25[ik] += 1)
+                ratio_ret < 0.25 && (projection_ratio_ret_lt_0p25[ik] += 1)
+                ratio_pro < 0.5 && (projection_ratio_pro_lt_0p5[ik] += 1)
+                ratio_ret < 0.5 && (projection_ratio_ret_lt_0p5[ik] += 1)
+            end
             jb_pro = _bin_index(st.velocity_edges, vlos_pro_buf[k])
             if jb_pro > 0
                 row_pro = (ik - 1) * st.Nvbin + jb_pro
@@ -1354,8 +2208,24 @@ function _orbit_worker!(st::OrbitWorkState)
         end
 
         col_light ./= Nhits
-        col_losvd_pro ./= Nhits
-        col_losvd_ret ./= Nhits
+        if st.losvd_target_mode === :karl_mode0_observables
+            karl_vlib_pro ./= Nhits
+            karl_spatial ./= Nhits
+            karl_response = karl_observables_seeing_response(karl_vlib_pro, karl_spatial, st.karl_observables)
+            col_losvd_pro .= karl_response.losvd
+            col_kinematic .= karl_response.kinematic
+            @inbounds for ia in 1:st.Nspatial
+                for jb in 1:st.Nvbin
+                    row = (ia - 1) * st.Nvbin + jb
+                    reverse_row = (ia - 1) * st.Nvbin + (st.Nvbin - jb + 1)
+                    col_losvd_ret[row] = col_losvd_pro[reverse_row]
+                end
+            end
+        else
+            col_kinematic ./= Nhits
+            col_losvd_pro ./= Nhits
+            col_losvd_ret ./= Nhits
+        end
         pro_activity = sum(abs, col_losvd_pro) + sum(abs, col_light)
         ret_activity = sum(abs, col_losvd_ret) + sum(abs, col_light)
         if !(isfinite(pro_activity) && pro_activity > 0.0 && isfinite(ret_activity) && ret_activity > 0.0)
@@ -1368,8 +2238,33 @@ function _orbit_worker!(st::OrbitWorkState)
         col_ret = 2 * c_claim
         @inbounds st.A_losvd[:, col_pro] .= col_losvd_pro
         @inbounds st.A_losvd[:, col_ret] .= col_losvd_ret
+        @inbounds st.A_kinematic[:, col_pro] .= col_kinematic
+        @inbounds st.A_kinematic[:, col_ret] .= col_kinematic
         @inbounds st.A_light[:, col_pro] .= col_light
         @inbounds st.A_light[:, col_ret] .= col_light
+        if st.projection_diag_enabled
+            @inbounds for ik in 1:st.Nspatial
+                nhit = projection_hits[ik]
+                nhit > 0 || continue
+                invhit = 1.0 / nhit
+                v3d_mean = projection_v3d_sum[ik] * invhit
+                v3d_rms = sqrt(max(projection_v3d_sq_sum[ik] * invhit, 0.0))
+                st.projection_v3d_mean[ik, col_pro] = v3d_mean
+                st.projection_v3d_mean[ik, col_ret] = v3d_mean
+                st.projection_v3d_rms[ik, col_pro] = v3d_rms
+                st.projection_v3d_rms[ik, col_ret] = v3d_rms
+                st.projection_abs_vlos_mean[ik, col_pro] = projection_abs_vlos_pro_sum[ik] * invhit
+                st.projection_abs_vlos_mean[ik, col_ret] = projection_abs_vlos_ret_sum[ik] * invhit
+                st.projection_vlos_rms[ik, col_pro] = sqrt(max(projection_vlos_pro_sq_sum[ik] * invhit, 0.0))
+                st.projection_vlos_rms[ik, col_ret] = sqrt(max(projection_vlos_ret_sq_sum[ik] * invhit, 0.0))
+                st.projection_abs_vlos_over_v3d_mean[ik, col_pro] = projection_ratio_pro_sum[ik] * invhit
+                st.projection_abs_vlos_over_v3d_mean[ik, col_ret] = projection_ratio_ret_sum[ik] * invhit
+                st.projection_los_ratio_lt_0p25[ik, col_pro] = projection_ratio_pro_lt_0p25[ik] * invhit
+                st.projection_los_ratio_lt_0p25[ik, col_ret] = projection_ratio_ret_lt_0p25[ik] * invhit
+                st.projection_los_ratio_lt_0p5[ik, col_pro] = projection_ratio_pro_lt_0p5[ik] * invhit
+                st.projection_los_ratio_lt_0p5[ik, col_ret] = projection_ratio_ret_lt_0p5[ik] * invhit
+            end
+        end
         st.failure_stage[c_claim] = :success
         st.success_flags[c_claim] = true
         Threads.atomic_add!(st.filled_atomic, 1)
@@ -1439,7 +2334,15 @@ function _close_orbit_phase!(st::OrbitWorkState; next_phase::Int=2)
 end
 
 # Main A-matrix builder: maps orbital weights → Karl observables.
-function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
+function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, 
+    verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, 
+    surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, 
+    dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, 
+    fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, 
+    shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, 
+    Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, 
+    karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, 
+    karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, karl_observables_csv=nothing)
     Nstar = length(R_star_m)
     @assert length(has_vlos) == Nstar
     @assert length(v_star_mps) == Nstar
@@ -1449,6 +2352,8 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
     tracer_constraint_mode_sym = _normalize_tracer_constraint_mode(tracer_constraint_mode)
+    losvd_target_mode_sym = _normalize_losvd_target_mode(losvd_target_mode)
+    karl_observables = _resolve_karl_observables(losvd_target_mode_sym; observables_csv=karl_observables_csv)
     prewarm_stellar_force_cache(stellar_model_jl)
     light_edges_force = light_bin_edges === nothing ? resolve_karl_spatial_edges(kinematic_bin_edges) : resolve_karl_light_edges(light_bin_edges)
     required_force_rmax_m = 1.5 * light_edges_force[end]
@@ -1461,7 +2366,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     end
     st = _init_orbit_work(Norbit, R_star_m, has_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=nsteps, Lfrac=Lfrac, dt_frac_orbit=dt_frac_orbit, max_attempts_factor=max_attempts_factor,
         t_deadline=t_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch,
-        fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, tracer_constraint_mode=tracer_constraint_mode_sym)
+        fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables)
     Threads.atomic_xchg!(st.phase, 1)
     nworkers = threaded ? Threads.nthreads() : 1
     if threaded && nworkers > 1
@@ -1482,11 +2387,11 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
 
     _orbit_library_usable(st, coverage.successful_columns) || error("Unusable orbit library: no usable compact orbit solution remains after failed orbit columns are removed")
 
-    A_losvd, A_light = _compact_orbit_matrices(st, coverage.successful_columns)
-    wphase_use, phase_diag = _build_compact_karl_wphase(st, coverage.successful_columns)
+    A_losvd, A_light, A_kinematic = _compact_orbit_matrices(st, coverage.successful_columns)
+    wphase_use, phase_diag, _ = _build_compact_karl_wphase(st, coverage.successful_columns)
     A = vcat(A_losvd, A_light)
     if diag
-        losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = observed_targets_karl(R_star_m, has_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl, light_edges=st.light_edges)
+        losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = _observed_targets_for_mode(R_star_m, has_vlos, v_star_mps, verr_star_mps, st, surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
         light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, stellar_model_jl, projected_light_target, projected_light_sigma, st.light_edges)
         return (
             A,
@@ -1521,6 +2426,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
                 "Nshells" => st.Nshells,
                 "shell_max_pc" => st.shells[end] / pc,
                 "spatial_edges" => st.spatial_edges,
+                "losvd_aperture_ranges" => st.losvd_aperture_ranges,
                 "light_edges" => st.light_edges,
                 "velocity_edges" => st.velocity_edges,
                 "losvd_target" => losvd_target,
@@ -1530,6 +2436,13 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
                 "counts_by_spatial" => counts_by_spatial,
                 "force_geometry" => String(st.force_geometry),
                 "tracer_constraint_mode" => String(tracer_constraint_mode_sym),
+                "losvd_target_mode" => String(losvd_target_mode_sym),
+                "karl_resolved_kde_grid" => karl_resolved_kde_grid,
+                "karl_resolved_kde_width_bins" => karl_resolved_kde_width_bins,
+                "karl_resolved_vmin_kms" => karl_resolved_vmin_kms,
+                "karl_resolved_vmax_kms" => karl_resolved_vmax_kms,
+                "karl_resolved_bootstraps" => karl_resolved_bootstraps,
+                "karl_resolved_envelope_floor" => karl_resolved_envelope_floor,
                 "wphase" => wphase_use,
                 "phase_volume_convention" => string(phase_diag.convention),
                 "phase_volume_normalization" => string(phase_diag.normalization),
@@ -1556,7 +2469,7 @@ end
 # Batch evaluator: Karl-style binned LOSVD + selectable projected-light or 3-D tracer-density constraint.
 # This is the Heart of the whole Pipeline 
 # and is where all the parallelism is implemented
-function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing)
+function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, karl_observables_csv=nothing)
     nrow, nbatch = size(thetas)
     surface_brightness_profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     apfac > 0.0 || error("apfac must be positive")
@@ -1564,6 +2477,15 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     light_sigma_tol > 0.0 || error("light_sigma_tol must be positive")
     delta_chi2_iter_tol >= 0.0 || error("delta_chi2_iter_tol must be nonnegative")
     threads_per_model > 0 || error("threads_per_model must be positive")
+    losvd_target_mode_sym = _normalize_losvd_target_mode(losvd_target_mode)
+    karl_observables = _resolve_karl_observables(losvd_target_mode_sym; observables_csv=karl_observables_csv)
+    if losvd_target_mode_sym === :karl_resolved_stars
+        karl_resolved_kde_grid > 1 || error("karl_resolved_kde_grid must exceed one")
+        isfinite(karl_resolved_kde_width_bins) && karl_resolved_kde_width_bins > 0.0 || error("karl_resolved_kde_width_bins must be finite and positive")
+        isfinite(karl_resolved_vmin_kms) && isfinite(karl_resolved_vmax_kms) && karl_resolved_vmax_kms > karl_resolved_vmin_kms || error("Karl resolved LOSVD velocity bounds are invalid")
+        karl_resolved_bootstraps > 1 || error("karl_resolved_bootstraps must exceed one")
+        isfinite(karl_resolved_envelope_floor) && karl_resolved_envelope_floor >= 0.0 || error("karl_resolved_envelope_floor must be finite and nonnegative")
+    end
     BLAS.set_num_threads(nbatch == 1 ? Threads.nthreads() : 1) # set to highest for a single model test change for multi-model runs
     allocated_threads = tryparse(Int, get(ENV, "SLURM_CPUS_PER_TASK", ""))
     if allocated_threads !== nothing &&
@@ -1580,6 +2502,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         " slurm_cpus=", get(ENV, "SLURM_CPUS_PER_TASK", "local"),
         " threads_per_model=", threads_per_model,
         " model_owner_limit_requested=", model_owner_limit,
+        " losvd_target_mode=", losvd_target_mode_sym,
     )
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
@@ -1656,9 +2579,19 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     group_sizes = [group_base + (igroup <= group_remainder ? 1 : 0) for igroup in 1:owner_limit]
     scheduler_counters = (orbit_models=Threads.Atomic{Int}(0), orbit_workers=Threads.Atomic{Int}(0), helper_workers=Threads.Atomic{Int}(0), weight_models=Threads.Atomic{Int}(0), active_model_owners=Threads.Atomic{Int}(0), completed_models=Threads.Atomic{Int}(0), stop_monitor=Threads.Atomic{Int}(0))
     scheduler_started_ns = time_ns()
-    println("[SCHED GROUPS] julia_threads=", nthreads, " threads_per_model_target=", threads_per_model, " model_groups=", owner_limit, " group_sizes=", join(group_sizes, ","))
+    println("[SCHED] julia_threads=", nthreads, " threads_per_model=", threads_per_model, " model_groups=", owner_limit, " group_sizes=", join(group_sizes, ","))
+    if get(ENV, "OSPM_DIAG_JULIA_HANDOFF", "0") == "1"
+        if losvd_target_mode_sym === :karl_resolved_stars
+            println("[JULIA OBSERVABLES] mode=", losvd_target_mode_sym, " Nvbin=", Nvbin, " kde_grid=", karl_resolved_kde_grid, " kde_width_bins=", karl_resolved_kde_width_bins, " vmin_kms=", karl_resolved_vmin_kms, " vmax_kms=", karl_resolved_vmax_kms)
+        elseif losvd_target_mode_sym === :karl_mode0_observables
+            println("[JULIA OBSERVABLES] mode=", losvd_target_mode_sym, " Nvbin=", Nvbin, " csv=", karl_observables_csv)
+        else
+            println("[JULIA OBSERVABLES] mode=", losvd_target_mode_sym, " Nvbin=", Nvbin)
+        end
+    end
 
     function _print_scheduler_diagnostics!()
+        get(ENV, "OSPM_DIAG_SCHEDULER", "0") == "1" || return nothing
         claimed = clamp(next_theta[] - 1, 0, nbatch)
         completed = scheduler_counters.completed_models[]
         orbit_models = scheduler_counters.orbit_models[]
@@ -1696,27 +2629,30 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     end
     function _print_phase_volume_diagnostics!(i::Int, phase_diag)
         phase_diag === nothing && return nothing
-        println(
-            "[KARL PHASE VOLUME DIAG]",
+        println("[PHASE VOLUME]",
             " i=", i,
             " convention=", phase_diag.convention,
             " normalization=", phase_diag.normalization,
-            " launches_recorded=", phase_diag.launches_recorded,
-            " sos_recorded=", phase_diag.sos_recorded,
             " valid_base_orbits=", phase_diag.valid_base_orbits,
-            " nested_groups=", phase_diag.nested_groups,
-            " duplicate_area_clusters=", phase_diag.duplicate_area_clusters,
-            " duplicate_area_orbits=", phase_diag.duplicate_area_orbits,
-            " raw_min=", phase_diag.raw_phase_volume_min,
-            " raw_max=", phase_diag.raw_phase_volume_max,
             " raw_dynamic_range=", phase_diag.raw_phase_volume_dynamic_range,
             " normalized_min=", phase_diag.normalized_phase_volume_min,
-            " normalized_max=", phase_diag.normalized_phase_volume_max,
-            " wphase_min=", phase_diag.wphase_min,
-            " wphase_max=", phase_diag.wphase_max,
-        )
+            " normalized_max=", phase_diag.normalized_phase_volume_max)
+        if get(ENV, "OSPM_DIAG_PHASE_VOLUME", "0") == "1"
+            println("[PHASE VOLUME DETAIL]",
+                " i=", i,
+                " launches_recorded=", phase_diag.launches_recorded,
+                " sos_recorded=", phase_diag.sos_recorded,
+                " nested_groups=", phase_diag.nested_groups,
+                " duplicate_area_clusters=", phase_diag.duplicate_area_clusters,
+                " duplicate_area_orbits=", phase_diag.duplicate_area_orbits,
+                " raw_min=", phase_diag.raw_phase_volume_min,
+                " raw_max=", phase_diag.raw_phase_volume_max,
+                " wphase_min=", phase_diag.wphase_min,
+                " wphase_max=", phase_diag.wphase_max)
+        end
         return nothing
     end
+
     function _store_solver_diagnostics!(i::Int, wdiag)
         delta_chi2_iteration[i] = Float64(_wdiag_value(wdiag, :delta_chi2_iteration, Inf))
         max_light_relative_residual[i] = Float64(_wdiag_value(wdiag, :max_light_relative_residual, Inf))
@@ -1729,7 +2665,21 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     end
     function _print_karl_diagnostics!(i::Int, tid::Int, wdiag, chi2_score::Float64)
         wdiag === nothing && return nothing
-        println("[KARL SOLVER DIAG] i=", i, " tid=", tid, " chi_losvd_score=", chi2_score, " chi_losvd_solver=", _wdiag_value(wdiag, :chi_losvd, NaN), " delta_chi2_iteration=", _wdiag_value(wdiag, :delta_chi2_iteration, NaN), " delta_chi2_iteration_ok=", _wdiag_value(wdiag, :delta_chi2_iteration_ok, false), " max_light_relative_residual=", _wdiag_value(wdiag, :max_light_relative_residual, NaN), " max_light_sigma_residual=", _wdiag_value(wdiag, :max_light_sigma_residual, NaN), " light_constraint_ok=", _wdiag_value(wdiag, :light_constraint_ok, false), " entropy=", _wdiag_value(wdiag, :entropy, NaN), " profit=", _wdiag_value(wdiag, :profit, NaN), " losvd_penalty=", _wdiag_value(wdiag, :losvd_penalty, NaN), " chi_slack=", _wdiag_value(wdiag, :chi_slack, NaN), " slack_to_losvd=", _wdiag_value(wdiag, :slack_to_losvd, NaN), " slack_l2=", _wdiag_value(wdiag, :slack_l2, NaN), " slack_max_abs=", _wdiag_value(wdiag, :slack_max_abs, NaN), " rcond_est=", _wdiag_value(wdiag, :rcond_est, NaN), " max_abs_dw=", _wdiag_value(wdiag, :max_abs_dw, NaN), " stepfac=", _wdiag_value(wdiag, :stepfac, NaN), " iterations=", _wdiag_value(wdiag, :iterations, 0), " constraint_ok=", _wdiag_value(wdiag, :constraint_ok, false), " slack_consistent=", _wdiag_value(wdiag, :slack_consistent, false), " normalized=", _wdiag_value(wdiag, :normalized, false), " solver_converged=", _wdiag_value(wdiag, :solver_converged, false), " failure_reason=", _wdiag_value(wdiag, :failure_reason, :none), " wphase_convention=", _wdiag_value(wdiag, :wphase_convention, :missing), " wphase_min=", _wdiag_value(wdiag, :wphase_min, NaN), " wphase_max=", _wdiag_value(wdiag, :wphase_max, NaN), " wphase_dynamic_range=", _wdiag_value(wdiag, :wphase_dynamic_range, NaN), " phase_volume_min=", _wdiag_value(wdiag, :phase_volume_min, NaN), " phase_volume_max=", _wdiag_value(wdiag, :phase_volume_max, NaN), " phase_volume_dynamic_range=", _wdiag_value(wdiag, :phase_volume_dynamic_range, NaN), " wphase_pair_max_relative_mismatch=", _wdiag_value(wdiag, :wphase_pair_max_relative_mismatch, NaN), " N_nonzero=", N_nonzero_weights[i], " Neff=", effective_N_orbits[i], " max_weight_fraction=", max_weight_fraction[i])
+        println("[WEIGHT RESULT]",
+            " i=", i,
+            " tid=", tid,
+            " converged=", _wdiag_value(wdiag, :solver_converged, false),
+            " iterations=", _wdiag_value(wdiag, :iterations, 0),
+            " chi2=", chi2_score,
+            " delta_chi2=", _wdiag_value(wdiag, :delta_chi2_iteration, NaN),
+            " light_rel=", _wdiag_value(wdiag, :max_light_relative_residual, NaN),
+            " light_sigma=", _wdiag_value(wdiag, :max_light_sigma_residual, NaN),
+            " N_nonzero=", N_nonzero_weights[i],
+            " Neff=", effective_N_orbits[i],
+            " max_weight=", max_weight_fraction[i])
+        if get(ENV, "OSPM_DIAG_SOLVER", "0") == "1"
+            println("[WEIGHT RESULT DETAIL] i=", i, " tid=", tid, " chi_losvd_solver=", _wdiag_value(wdiag, :chi_losvd, NaN), " entropy=", _wdiag_value(wdiag, :entropy, NaN), " profit=", _wdiag_value(wdiag, :profit, NaN), " losvd_penalty=", _wdiag_value(wdiag, :losvd_penalty, NaN), " chi_slack=", _wdiag_value(wdiag, :chi_slack, NaN), " slack_to_losvd=", _wdiag_value(wdiag, :slack_to_losvd, NaN), " slack_l2=", _wdiag_value(wdiag, :slack_l2, NaN), " slack_max_abs=", _wdiag_value(wdiag, :slack_max_abs, NaN), " rcond_est=", _wdiag_value(wdiag, :rcond_est, NaN), " max_abs_dw=", _wdiag_value(wdiag, :max_abs_dw, NaN), " stepfac=", _wdiag_value(wdiag, :stepfac, NaN), " constraint_ok=", _wdiag_value(wdiag, :constraint_ok, false), " slack_consistent=", _wdiag_value(wdiag, :slack_consistent, false), " normalized=", _wdiag_value(wdiag, :normalized, false), " failure_reason=", _wdiag_value(wdiag, :failure_reason, :none), " wphase_convention=", _wdiag_value(wdiag, :wphase_convention, :missing), " wphase_dynamic_range=", _wdiag_value(wdiag, :wphase_dynamic_range, NaN), " phase_volume_dynamic_range=", _wdiag_value(wdiag, :phase_volume_dynamic_range, NaN), " wphase_pair_max_relative_mismatch=", _wdiag_value(wdiag, :wphase_pair_max_relative_mismatch, NaN))
+        end
         return nothing
     end
 
@@ -1775,11 +2725,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         continue
                     end
                     ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, required_rmax_m=required_force_rmax_m, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
-                    ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every, tracer_constraint_mode=tracer_constraint_mode_sym)
+                    ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables)
                     work_states[i] = ws
                     planned_base_orbits[i] = length(ws.launch_order)
                     if i == 1
-                        println("[KARL BIN DIAG] tracer_constraint_mode=", tracer_constraint_mode_sym, " N_constraint=", ws.Nlight, " N_kin=", ws.Nspatial, " Nvbin=", ws.Nvbin, " A_constraint_rows=", size(ws.A_light, 1), " A_losvd_rows=", size(ws.A_losvd, 1), " R_constraint_max_pc=", ws.light_edges[end] / pc, " R_kin_max_pc=", ws.spatial_edges[end] / pc, " R_shell_max_pc=", ws.shells[end] / pc, " N_shells=", ws.Nshells, " N_constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin)
+                        println("[MODEL GRID] tracer_bins=", ws.Nlight, " apertures=", ws.Nspatial, " Nvbin=", ws.Nvbin, " shells=", ws.Nshells, " constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin, " R_tracer_max_pc=", ws.light_edges[end] / pc, " R_aperture_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc, " R_shell_max_pc=", ws.shells[end] / pc)
                     end
                     Threads.atomic_add!(scheduler_counters.orbit_models, 1)
                     try
@@ -1815,7 +2765,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     if !coverage.accepted
                         _print_orbit_failure_diagnostics(ws, i)
 
-                        println("[ORBIT COVERAGE WARNING] i=", i, " region=", coverage_meta.issue_region, " axis=", coverage_meta.issue_axis, " shell_bands=", isempty(coverage_meta.issue_shell_bands) ? "none" : coverage_meta.issue_shell_bands, " succeeded=", coverage.succeeded, " attempted=", coverage.attempted, " planned=", coverage.planned, " required=", coverage.required, " coverage_fraction=", coverage.coverage_fraction, " attempted_fraction=", coverage.attempted_fraction, " success_fraction=", coverage.success_fraction, " shell_min=", coverage.shell_minimum_coverage, " lfrac_min=", coverage.lfrac_minimum_coverage, " theta_min=", coverage.theta_minimum_coverage, " shell_gap=", coverage.shell_coverage_gap, " lfrac_gap=", coverage.lfrac_coverage_gap, " theta_gap=", coverage.theta_coverage_gap, " joint_holes=", length(coverage.joint_holes), " deadline_hit=", coverage_deadline_hit[i], " reasons=", isempty(coverage_meta.reasons) ? "none" : coverage_meta.reasons)
+                        println("[ORBIT COVERAGE WARNING] i=", i, " region=", coverage_meta.issue_region, " axis=", coverage_meta.issue_axis, " shell_bands=", isempty(coverage_meta.issue_shell_bands) ? "none" : coverage_meta.issue_shell_bands, 
+                        " succeeded=", coverage.succeeded, " attempted=", coverage.attempted, " planned=", coverage.planned, " required=", coverage.required, " coverage_fraction=", coverage.coverage_fraction, " attempted_fraction=", 
+                        coverage.attempted_fraction, " success_fraction=", coverage.success_fraction, " shell_min=", coverage.shell_minimum_coverage, " lfrac_min=", coverage.lfrac_minimum_coverage, " theta_min=", coverage.theta_minimum_coverage, 
+                        " shell_gap=", coverage.shell_coverage_gap, " lfrac_gap=", coverage.lfrac_coverage_gap, " theta_gap=", coverage.theta_coverage_gap, " joint_holes=", length(coverage.joint_holes), " deadline_hit=", coverage_deadline_hit[i], 
+                        " reasons=", isempty(coverage_meta.reasons) ? "none" : coverage_meta.reasons)
                     end
                     if !_orbit_library_usable(ws, coverage.successful_columns)
                         status[i] = 1
@@ -1824,11 +2778,12 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
-                    A_losvd, A_light = _compact_orbit_matrices(ws, coverage.successful_columns)
+                    A_losvd, A_light, A_kinematic = _compact_orbit_matrices(ws, coverage.successful_columns)
                     wphase_use = Float64[]
                     phase_diag = nothing
+                    phase_result = nothing
                     try
-                        wphase_use, phase_diag = _build_compact_karl_wphase(ws, coverage.successful_columns,)
+                        wphase_use, phase_diag, phase_result = _build_compact_karl_wphase(ws, coverage.successful_columns,)
                     catch phase_error
                         status[i] = 1
                         solver_failure_reason[i] = "phase_volume_failed"
@@ -1869,7 +2824,9 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
-                    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws.spatial_edges, ws.velocity_edges; surface_brightness_profile=surface_brightness_profile_jl, light_edges=ws.light_edges)
+                    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = _observed_targets_for_mode(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws, 
+                    surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, 
+                    karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
                     light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, stellar_model_jl, projected_light_target, projected_light_sigma, ws.light_edges)
                     light_fit_mask = trues(length(light_target))
                     any(light_fit_mask) || error("No tracer-constraint bins are available")
@@ -1877,61 +2834,80 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     light_target_fit = light_target
                     light_sigma_fit = light_sigma
                     if i == 1
-                        println(
-                            "[KARL TRACER FIT DIAG] mode=", tracer_constraint_mode_sym,
-                            " N_constraint_full=", length(light_target),
-                            " N_constraint_fit=", length(light_target_fit),
-                            " R_constraint_full_max_pc=", ws.light_edges[end] / pc,
-                            " R_constraint_fit_max_pc=", maximum(ws.light_edges[2:end][light_fit_mask]) / pc,
-                            " R_kin_max_pc=", ws.spatial_edges[end] / pc,
-                            " target_full_sum=", sum(light_target),
-                            " target_fit_sum=", sum(light_target_fit),
-                            " target_vs_projected_l1=", sum(abs.(light_target_fit .- projected_light_target)),
-                            " constraint_sigma_min=", minimum(light_sigma_fit),
-                            " constraint_sigma_max=", maximum(light_sigma_fit),
-                        )
+                        println("[TRACER CONFIG]",
+                            " mode=", tracer_constraint_mode_sym,
+                            " bins=", length(light_target_fit),
+                            " Rmax_pc=", ws.light_edges[end] / pc,
+                            " target_sum=", sum(light_target_fit))
+                        if get(ENV, "OSPM_DIAG_TRACER", "0") == "1"
+                            println("[TRACER CONFIG DETAIL]",
+                                " projected_target_l1=", sum(abs.(light_target_fit .- projected_light_target)),
+                                " sigma_min=", minimum(light_sigma_fit),
+                                " sigma_max=", maximum(light_sigma_fit),
+                                " R_kin_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc)
+                        end
                     end
                     Threads.atomic_add!(scheduler_counters.weight_models, 1)
                     w = Float64[]
                     ok = false
                     wdiag = nothing
                     try
-                        w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin, alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i), entropy_floor=entropy_floor, apfac=apfac, return_diag=true)
+                        w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin, 
+                        alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i), 
+                        entropy_floor=entropy_floor, apfac=apfac, return_diag=true)
                     finally
                         Threads.atomic_add!(scheduler_counters.weight_models, -1)
                     end
 
                 _store_solver_diagnostics!(i, wdiag)
                 if length(w) == size(A_light_fit, 2) && all(isfinite, w)
-                    _print_tracer_bin_diagnostics(A_light_fit, w, light_target_fit, light_sigma_fit, ws.light_edges; model_index=i)
+                    print_tracer_bins = get(ENV, "OSPM_DIAG_TRACER", "0") == "1"
+                    _print_tracer_bin_diagnostics(A_light_fit, w, light_target_fit, light_sigma_fit, ws.light_edges; model_index=i, print_bins=print_tracer_bins)
                 end
                 finite_weight_solution = length(w) == size(A_losvd, 2) && all(isfinite, w)
                 cl = Inf
+                losvd_window_diag = nothing
 
                 if finite_weight_solution
-                    cl = chi2_block(A_losvd, w, losvd_target, losvd_sigma)
+                    print_window_bins = get(ENV, "OSPM_DIAG_LOSVD_WINDOW", "0") == "1"
+                    losvd_window_diag = _print_losvd_window_diagnostics(A_losvd, A_kinematic, w, ws.losvd_aperture_ranges, ws.velocity_edges, ws.Nvbin; model_index=i, print_bins=print_window_bins)
+
+                    losvd_score_state = karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, ws.Nspatial, ws.Nvbin)
+                    cl = losvd_score_state.chi_total
                     chi2_losvd[i] = cl
+
                     R_inner_m = R_inner_pc * pc
+                    inner_chi = 0.0
+                    outer_chi = 0.0
                     ninner = 0
                     nouter = 0
-                    inner_rows = Int[]
-                    outer_rows = Int[]
+
                     @inbounds for ib in 1:ws.Nspatial
-                        rmid = 0.5 * (ws.spatial_edges[ib] + ws.spatial_edges[ib + 1])
-                        rows = ((ib - 1) * ws.Nvbin + 1):(ib * ws.Nvbin)
+                        rmid = 0.5 * (ws.losvd_aperture_ranges[ib][1] + ws.losvd_aperture_ranges[ib][2])
+
                         if rmid < R_inner_m
-                            append!(inner_rows, rows)
+                            inner_chi += losvd_score_state.chi_by_spatial[ib]
                             ninner += Int(round(counts_by_spatial[ib]))
                         else
-                            append!(outer_rows, rows)
+                            outer_chi += losvd_score_state.chi_by_spatial[ib]
                             nouter += Int(round(counts_by_spatial[ib]))
                         end
                     end
+
+                    chi2_inner[i] = inner_chi
+                    chi2_outer[i] = outer_chi
                     N_inner[i] = ninner
                     N_outer[i] = nouter
-                    !isempty(inner_rows) && (chi2_inner[i] = chi2_block(A_losvd[inner_rows, :], w, losvd_target[inner_rows], losvd_sigma[inner_rows]))
-                    !isempty(outer_rows) && (chi2_outer[i] = chi2_block(A_losvd[outer_rows, :], w, losvd_target[outer_rows], losvd_sigma[outer_rows]))
+
                     _store_weight_diagnostics!(i, w)
+                    if get(ENV, "OSPM_DIAG_ORBIT_FAMILIES", "0") == "1"
+                        _print_orbit_weight_family_diagnostics(ws, coverage.successful_columns, w; model_index=i, inner_radius_pc=R_inner_pc)
+                        _print_orbit_phase_volume_diagnostics(ws, coverage.successful_columns, w, wphase_use, phase_result; model_index=i, inner_radius_pc=R_inner_pc)
+                        target_lfrac = parse(Float64, get(ENV, "OSPM_DIAG_PROJECTION_LFRAC", "0.2"))
+                        target_third_u = parse(Float64, get(ENV, "OSPM_DIAG_PROJECTION_THIRD_U", "0.5"))
+                        target_aperture = parse(Int, get(ENV, "OSPM_DIAG_PROJECTION_APERTURE", "1"))
+                        _print_orbit_projection_diagnostics(ws, coverage.successful_columns, w, A_losvd, A_kinematic, losvd_target, losvd_sigma; model_index=i, inner_radius_pc=R_inner_pc, target_lfrac=target_lfrac, target_third_u=target_third_u, target_aperture=target_aperture)
+                    end
                 end
                 if !ok
                     if length(w) == size(A_light_fit, 2) && all(isfinite, w)
@@ -1971,6 +2947,14 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     continue
                 end
                 _print_karl_diagnostics!(i, tid, wdiag, cl)
+                if losvd_target_mode_sym !== :karl_mode0_observables && losvd_window_diag !== nothing && losvd_window_diag.max_outside_fraction > DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION
+                    solver_failure_reason[i] = "losvd_window_exceeded"
+                    solver_converged[i] = false
+                    println("[LOSVD WINDOW REJECT] i=", i, " worst_bin=", losvd_window_diag.worst_bin, " max_aperture_outside_fraction=", losvd_window_diag.max_outside_fraction, " allowed_max=", DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION, " chi2_losvd=", cl)
+                    status[i] = 2
+                    Threads.atomic_xchg!(ws.phase, 3)
+                    continue
+                end
 
                     status[i] = 0
                     Threads.atomic_xchg!(ws.phase, 3)

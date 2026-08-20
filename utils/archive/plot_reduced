@@ -1,0 +1,662 @@
+python - <<'PY'
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+
+path = "Data/Galaxy_Profiles/Draco/default/draco_nonsingular_isothermal_full_light.csv"
+profile_out = ( "Data/Galaxy_Profiles/Draco/default/" "Draco_chi2_profiles_karl_style.png")
+landscape_out = ("Data/Galaxy_Profiles/Draco/default/" "Draco_delta_chi2_landscapes_smbh_zoom.png")
+
+# Fixed plotting bounds from the original Karl-style Segue 1 view.
+mbh_plot_min = 0.0
+mbh_plot_max = 3e6
+vcirc_plot_min = 0.0
+vcirc_plot_max = 90.0
+rs_kpc_plot_min = 0.0
+rs_kpc_plot_max = 100.0
+ml_plot_min = 0.2
+ml_plot_max = 3
+
+# Raw chi-square display range from the original Karl-style figure.
+chi2_plot_min = 0
+chi2_plot_max = 1000.0
+
+# Model-family colors from the original figure/caption.
+no_halo_color = "#ef3340"
+no_smbh_color = "#003f9e"
+combination_color = "#35b68f"
+
+
+# ------------------------------------------------------------
+# Load and clean data
+# ------------------------------------------------------------
+
+df = pd.read_csv(path).copy()
+df = df.replace([np.inf, -np.inf], np.nan)
+required_columns = [ "chi2", "MBH", "vcirc", "r_s", "ML", "status"]
+df = df.dropna(subset=required_columns)
+
+# Apply one joint four-parameter analysis box before calculating anything.
+# A model row is retained only when every parameter lies inside its bound.
+# r_s is stored in parsecs, so 10 kpc corresponds to 10,000 pc here.
+rows_before_parameter_filter = len(df)
+inside_ml = ((df["ML"] >= ml_plot_min) & (df["ML"] <= ml_plot_max))
+inside_mbh = ((df["MBH"] >= mbh_plot_min) &(df["MBH"] <= mbh_plot_max))
+inside_vcirc = ( (df["vcirc"] >= vcirc_plot_min) &(df["vcirc"] <= vcirc_plot_max))
+inside_rs = ((df["r_s"] > 1000.0 * rs_kpc_plot_min) &(df["r_s"] <= 1000.0 * rs_kpc_plot_max))
+rows_outside_ml = int((~inside_ml).sum())
+rows_outside_mbh = int((~inside_mbh).sum())
+rows_outside_vcirc = int((~inside_vcirc).sum())
+rows_outside_rs = int((~inside_rs).sum())
+df = df[inside_ml & inside_mbh & inside_vcirc & inside_rs].copy()
+rows_removed_parameter_filter = rows_before_parameter_filter - len(df)
+
+# The deck stores r_s in parsecs. Display it in kiloparsecs so the
+# plotted 0--10 range matches the original Karl-style figure.
+df["r_s_kpc"] = df["r_s"] / 1000.0
+if df.empty:
+    raise RuntimeError("No valid model rows remain after cleaning.")
+chi_min = df["chi2"].min()
+df["delta_chi2"] = df["chi2"] - chi_min
+full = df[df["status"] == "pass_full"].copy()
+df_mbh = df[(df["MBH"] >= mbh_plot_min) & (df["MBH"] <= mbh_plot_max)].copy()
+full_mbh = df_mbh[ df_mbh["status"] == "pass_full"].copy()
+# Split by physical model content rather than daemon pass name. This keeps
+# later search-stage labels from changing the displayed model family.
+zero_halo = np.isclose(df["vcirc"], 0.0, atol=1.0e-12)
+zero_smbh = np.isclose(df["MBH"], 0.0, atol=1.0e-12)
+
+model_families = [
+    ("No dark halo", df[zero_halo].copy(), no_halo_color),
+    ("No black hole", df[~zero_halo & zero_smbh].copy(), no_smbh_color),
+    ("Black hole + dark halo", df[~zero_halo & ~zero_smbh].copy(), combination_color),
+]
+
+if df_mbh.empty:
+    raise RuntimeError( "No models fall inside the requested SMBH plotting range.")
+
+best = df.loc[df["chi2"].idxmin()]
+best_zoom = df_mbh.loc[df_mbh["chi2"].idxmin()]
+
+print("\nGLOBAL BEST MODEL")
+print( best[["chi2", "delta_chi2", "MBH", "vcirc", "r_s", "ML", "status"]].to_string())
+print("\nBEST MODEL INSIDE SMBH ZOOM")
+print(best_zoom[ ["chi2", "delta_chi2", "MBH", "vcirc", "r_s", "ML", "status"] ].to_string())
+print(f"\nGlobal minimum chi2: {chi_min:.6f}")
+print("Rows outside each bound before the joint filter " "(categories may overlap):")
+print( f"  M/L outside [{ml_plot_min:g}, {ml_plot_max:g}]: " f"{rows_outside_ml}")
+print( f"  MBH outside [{mbh_plot_min:g}, {mbh_plot_max:g}] Msun: " f"{rows_outside_mbh}")
+print( f"  vcirc outside [{vcirc_plot_min:g}, {vcirc_plot_max:g}] km/s: " f"{rows_outside_vcirc}")
+print( f"  r_s outside ({rs_kpc_plot_min:g}, {rs_kpc_plot_max:g}] kpc: " f"{rows_outside_rs}")
+print( f"Unique rows removed by the joint four-parameter filter: " f"{rows_removed_parameter_filter}")
+print(f"Rows retained for every calculation and plot: {len(df)}")
+print(f"Rows inside SMBH zoom: {len(df_mbh)}")
+print(f"pass_full rows inside zoom: {len(full_mbh)}")
+
+
+# ------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------
+
+def make_edges(values, bins=70, log=False):
+    values = np.asarray(values)
+    if log:
+        positive = values[values > 0]
+        if len(positive) == 0:
+            raise ValueError("Logarithmic bins require positive values.")
+        return np.geomspace( positive.min(), positive.max(), bins + 1)
+    return np.linspace( values.min(), values.max(), bins + 1)
+
+
+def profile_min(frame, parameter, edges, log=False):
+    if frame.empty:
+        return np.array([]), np.array([]), np.array([])
+    values = frame[parameter].to_numpy()
+    scores = frame["delta_chi2"].to_numpy()
+    inside = ( (values >= edges[0]) & (values <= edges[-1]))
+    values = values[inside]
+    scores = scores[inside]
+    if len(values) == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    index = np.searchsorted(
+        edges,
+        values,
+        side="right",
+    ) - 1
+
+    index = np.clip(
+        index,
+        0,
+        len(edges) - 2,
+    )
+
+    minimum = np.full(
+        len(edges) - 1,
+        np.inf,
+    )
+
+    count = np.zeros(
+        len(edges) - 1,
+        dtype=int,
+    )
+
+    np.minimum.at(
+        minimum,
+        index,
+        scores,
+    )
+
+    np.add.at(
+        count,
+        index,
+        1,
+    )
+
+    if log:
+        centers = np.sqrt(
+            edges[:-1] * edges[1:]
+        )
+    else:
+        centers = 0.5 * (
+            edges[:-1] + edges[1:]
+        )
+
+    good = (
+        np.isfinite(minimum) &
+        (count > 0)
+    )
+
+    return (
+        centers[good],
+        minimum[good],
+        count[good],
+    )
+
+
+def cell_statistics(frame, xcol, ycol, xedges, yedges):
+    shape = (
+        len(yedges) - 1,
+        len(xedges) - 1,
+    )
+
+    minimum = np.full(shape, np.inf)
+    count = np.zeros(shape, dtype=int)
+
+    if frame.empty:
+        return minimum, count
+
+    x = frame[xcol].to_numpy()
+    y = frame[ycol].to_numpy()
+    scores = frame["delta_chi2"].to_numpy()
+
+    inside = (
+        (x >= xedges[0]) &
+        (x <= xedges[-1]) &
+        (y >= yedges[0]) &
+        (y <= yedges[-1])
+    )
+
+    x = x[inside]
+    y = y[inside]
+    scores = scores[inside]
+
+    if len(x) == 0:
+        return minimum, count
+
+    xi = np.searchsorted(
+        xedges,
+        x,
+        side="right",
+    ) - 1
+
+    yi = np.searchsorted(
+        yedges,
+        y,
+        side="right",
+    ) - 1
+
+    xi = np.clip(
+        xi,
+        0,
+        len(xedges) - 2,
+    )
+
+    yi = np.clip(
+        yi,
+        0,
+        len(yedges) - 2,
+    )
+
+    np.minimum.at(
+        minimum,
+        (yi, xi),
+        scores,
+    )
+
+    np.add.at(
+        count,
+        (yi, xi),
+        1,
+    )
+
+    return minimum, count
+
+
+# ------------------------------------------------------------
+# One-dimensional raw chi-square panels in the original Karl-style view
+# ------------------------------------------------------------
+
+parameters = [
+    (
+        "ML",
+        r"$M/L$",
+        False,
+    ),
+    (
+        "MBH",
+        r"$M_{\rm BH}\;(M_\odot)$",
+        False,
+    ),
+    (
+        "vcirc",
+        r"$V_{\rm circ}\;({\rm km\,s^{-1}})$",
+        False,
+    ),
+    (
+        "r_s_kpc",
+        r"$r_s\;({\rm kpc})$",
+        False,
+    ),
+]
+
+fig, axes = plt.subplots(
+    2,
+    2,
+    figsize=(13, 10),
+)
+
+axes = axes.ravel()
+
+
+def fitted_lower_contour(frame, parameter, edges):
+    """Quadratic fit to the binned lower chi-square envelope."""
+    if frame.empty:
+        return np.array([]), np.array([])
+
+    values = frame[parameter].to_numpy()
+    scores = frame["chi2"].to_numpy()
+
+    inside = (
+        (values >= edges[0]) &
+        (values <= edges[-1]) &
+        np.isfinite(values) &
+        np.isfinite(scores)
+    )
+
+    values = values[inside]
+    scores = scores[inside]
+
+    if len(values) < 3:
+        return np.array([]), np.array([])
+
+    index = np.searchsorted(edges, values, side="right") - 1
+    index = np.clip(index, 0, len(edges) - 2)
+
+    minimum = np.full(len(edges) - 1, np.inf)
+    np.minimum.at(minimum, index, scores)
+
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    good = np.isfinite(minimum)
+
+    x_profile = centers[good]
+    y_profile = minimum[good]
+
+    # Keep the fit tied to the visible lower contour instead of high-chi2
+    # outliers. Scaling x avoids numerical trouble for black-hole mass.
+    near_floor = y_profile <= min(chi2_plot_max, chi_min + 60.0)
+    x_profile = x_profile[near_floor]
+    y_profile = y_profile[near_floor]
+
+    if len(x_profile) < 3:
+        return x_profile, y_profile
+
+    x_mid = 0.5 * (edges[0] + edges[-1])
+    x_half_range = 0.5 * (edges[-1] - edges[0])
+    x_scaled = (x_profile - x_mid) / x_half_range
+
+    coefficients = np.polyfit(x_scaled, y_profile, deg=2)
+
+    x_fit = np.linspace(edges[0], edges[-1], 400)
+    x_fit_scaled = (x_fit - x_mid) / x_half_range
+    y_fit = np.polyval(coefficients, x_fit_scaled)
+
+    return x_fit, y_fit
+
+for ax, (parameter, xlabel, use_log) in zip(
+    axes,
+    parameters,
+):
+    if parameter == "MBH":
+        plot_frame = df_mbh
+        edges = np.linspace(
+            mbh_plot_min,
+            mbh_plot_max,
+            49,
+        )
+    elif parameter == "vcirc":
+        plot_frame = df
+        edges = np.linspace(
+            vcirc_plot_min,
+            vcirc_plot_max,
+            41,
+        )
+    elif parameter == "r_s_kpc":
+        plot_frame = df
+        edges = np.linspace(
+            rs_kpc_plot_min,
+            rs_kpc_plot_max,
+            41,
+        )
+    elif parameter == "ML":
+        plot_frame = df
+        edges = np.linspace(
+            ml_plot_min,
+            ml_plot_max,
+            41,
+        )
+    else:
+        plot_frame = df
+        edges = make_edges(
+            plot_frame[parameter],
+            bins=40,
+            log=use_log,
+        )
+
+    # Light sigma bands for one profiled parameter: Delta chi2 = 1, 4, 9.
+    sigma_edges = [chi_min, chi_min + 1.0, chi_min + 4.0, chi_min + 9.0]
+    sigma_colors = ["#f2a900", "#75aadb", "#e75464"]
+
+    for lower, upper, band_color in zip(
+        sigma_edges[:-1],
+        sigma_edges[1:],
+        sigma_colors,
+    ):
+        ax.axhspan(lower, upper, color=band_color, alpha=0.07, zorder=0)
+
+    for level, line_color in zip(
+        sigma_edges,
+        ["#f2a900", "#75aadb", "#e75464", "#9b7ede"],
+    ):
+        ax.axhline(
+            level,
+            color=line_color,
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.85,
+            zorder=1,
+        )
+
+    for family_label, family_frame, family_color in model_families:
+        family_panel = family_frame[
+            (family_frame[parameter] >= edges[0]) &
+            (family_frame[parameter] <= edges[-1]) &
+            (family_frame["chi2"] >= chi2_plot_min) &
+            (family_frame["chi2"] <= chi2_plot_max)
+        ]
+
+        ax.scatter(
+            family_panel[parameter],
+            family_panel["chi2"],
+            s=8,
+            alpha=0.82,
+            color=family_color,
+            edgecolors="none",
+            rasterized=True,
+            label=family_label,
+            zorder=2,
+        )
+
+    #x_fit, y_fit = fitted_lower_contour(plot_frame, parameter, edges)
+
+    #ax.plot(
+    #    x_fit,
+    #    y_fit,
+    #    color="black",
+    #    linestyle="--",
+    #    linewidth=1.2,
+    #    label="Best-fit contour",
+    #    zorder=4,
+    #)
+
+    if use_log:
+        ax.set_xscale("log")
+
+    if parameter == "MBH":
+        ax.set_xlim( mbh_plot_min, mbh_plot_max )
+        ax.ticklabel_format( axis="x", style="sci", scilimits=(5, 5) )
+
+    if parameter == "vcirc":
+        ax.set_xlim( vcirc_plot_min, vcirc_plot_max)
+
+    if parameter == "r_s_kpc":
+        ax.set_xlim( rs_kpc_plot_min, rs_kpc_plot_max)
+
+    if parameter == "ML":
+        ax.set_xlim( ml_plot_min, ml_plot_max)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(r"$\chi^2_{\rm LOSVD}$")
+    ax.set_ylim( chi2_plot_min, chi2_plot_max,)
+    ax.grid(alpha=0.18, linewidth=0.6)
+
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend( handles, labels, loc="upper center", ncol=4, fontsize=8.5, frameon=False, bbox_to_anchor=(0.5, 0.985))
+fig.suptitle( rf"Segue 1 model comparison: $\chi^2_{{\min}}={chi_min:.3f}$", fontsize=14,  y=1.015)
+fig.tight_layout(rect=(0, 0, 1, 0.94))
+fig.savefig( profile_out, dpi=220, bbox_inches="tight")
+plt.close(fig)
+
+
+# ------------------------------------------------------------
+# Two-dimensional landscapes
+# ------------------------------------------------------------
+
+# 48 SMBH cells across 0–1.5 million solar masses.
+# Each cell is 31,250 solar masses wide.
+mbh_edges = np.linspace(
+    mbh_plot_min,
+    mbh_plot_max,
+    49,
+)
+
+vcirc_edges = np.linspace(
+    vcirc_plot_min,
+    vcirc_plot_max,
+    36,
+)
+
+rs_edges = np.linspace(
+    rs_kpc_plot_min,
+    rs_kpc_plot_max,
+    36,
+)
+
+planes = [
+    (
+        "vcirc",
+        vcirc_edges,
+        r"$V_{\rm circ}\;({\rm km\,s^{-1}})$",
+        False,
+    ),
+    (
+        "r_s_kpc",
+        rs_edges,
+        r"$r_s\;({\rm kpc})$",
+        False,
+    ),
+]
+
+fig, axes = plt.subplots(
+    2,
+    3,
+    figsize=(18, 11),
+)
+
+score_image = None
+count_image = None
+
+for row, (ycol, yedges, ylabel, log_y) in enumerate(planes):
+    all_min, all_count = cell_statistics(
+        df_mbh,
+        "MBH",
+        ycol,
+        mbh_edges,
+        yedges,
+    )
+
+    full_min, full_count = cell_statistics(
+        full_mbh,
+        "MBH",
+        ycol,
+        mbh_edges,
+        yedges,
+    )
+
+    all_map = np.ma.masked_where(
+        (all_count < 3) |
+        ~np.isfinite(all_min),
+        all_min,
+    )
+
+    full_map = np.ma.masked_where(
+        (full_count < 1) |
+        ~np.isfinite(full_min),
+        full_min,
+    )
+
+    count_map = np.ma.masked_where(
+        all_count == 0,
+        all_count,
+    )
+
+    score_image = axes[row, 0].pcolormesh(
+        mbh_edges,
+        yedges,
+        all_map,
+        shading="auto",
+        cmap="viridis",
+        vmin=0,
+        vmax=50,
+    )
+
+    axes[row, 0].set_title(
+        "Minimum raw Δχ²: all statuses"
+    )
+
+    axes[row, 1].pcolormesh(
+        mbh_edges,
+        yedges,
+        full_map,
+        shading="auto",
+        cmap="viridis",
+        vmin=0,
+        vmax=50,
+    )
+
+    axes[row, 1].set_title(
+        "Minimum raw Δχ²: pass_full only"
+    )
+
+    count_vmax = max(
+        1,
+        int(all_count.max()),
+    )
+
+    count_image = axes[row, 2].pcolormesh(
+        mbh_edges,
+        yedges,
+        count_map,
+        shading="auto",
+        cmap="magma",
+        norm=LogNorm(
+            vmin=1,
+            vmax=count_vmax,
+        ),
+    )
+
+    axes[row, 2].set_title(
+        "Models evaluated per cell"
+    )
+
+    if not full_mbh.empty:
+        best_full = full_mbh.loc[
+            full_mbh["chi2"].idxmin()
+        ]
+    else:
+        best_full = best_zoom
+
+    axes[row, 0].scatter(
+        best_zoom["MBH"],
+        best_zoom[ycol],
+        marker="*",
+        s=180,
+        color="white",
+        edgecolor="black",
+        zorder=10,
+    )
+
+    axes[row, 1].scatter(
+        best_full["MBH"],
+        best_full[ycol],
+        marker="*",
+        s=180,
+        color="white",
+        edgecolor="black",
+        zorder=10,
+    )
+
+    for ax in axes[row]:
+        ax.set_xlim(
+            mbh_plot_min,
+            mbh_plot_max,
+        )
+
+        ax.ticklabel_format(
+            axis="x",
+            style="sci",
+            scilimits=(5, 5),
+        )
+
+        ax.set_xlabel(
+            r"$M_{\rm BH}\;(M_\odot)$"
+        )
+
+        ax.set_ylabel(ylabel)
+
+        if ycol == "vcirc":
+            ax.set_ylim(
+                vcirc_plot_min,
+                vcirc_plot_max,
+            )
+
+        if ycol == "r_s_kpc":
+            ax.set_ylim(
+                rs_kpc_plot_min,
+                rs_kpc_plot_max,
+            )
+
+        for mass in [1e5, 5e5, 1e6]:
+            ax.axvline( mass, color="white", linestyle=":", linewidth=0.8, alpha=0.45)
+        if log_y:
+            ax.set_yscale("log")
+
+fig.colorbar( score_image, ax=axes[:, :2], label=r"Minimum $\Delta\chi^2_{\rm LOSVD}$", shrink=0.85)
+fig.colorbar( count_image, ax=axes[:, 2], label="Models per cell", shrink=0.85)
+fig.suptitle( "Segue 1 black-hole–halo structure: " r"$0\leq M_{\rm BH}\leq1.5\times10^6\,M_\odot$", fontsize=15)
+fig.savefig( landscape_out, dpi=220, bbox_inches="tight")
+plt.close(fig)
+print(f"\nSaved: {profile_out}")
+print(f"Saved: {landscape_out}")
+PY

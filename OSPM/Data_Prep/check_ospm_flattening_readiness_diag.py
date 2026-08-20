@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+
+"""FOR DIAGNOSTIC USE ONLY."""
+
+
+
+
 import argparse
 from pathlib import Path
 import numpy as np
