@@ -13,6 +13,7 @@ if not PROFILE_ROOT.exists():
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
 
 INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
+
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
 CONFIG = {
@@ -25,10 +26,10 @@ CONFIG = {
     "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"],
     "INITIAL_THETA": INITIAL_THETA,
     "THETA_BOUNDS": [
-        (0.0, 200.0),
-        (1.0, 5000.0),
-        (0.0, 5.0e6),
-        (0.2, 20.0),
+        (0.0, 200.0),           # v0 [km/s] — dark-halo velocity scale
+        (1.0, 5000.0),          # r_c [pc] — dark-halo core radius
+        (0.0, 5.0e6),           # MBH [Msun] — central black-hole mass
+        (0.2, 20.0),            # M/L — stellar mass-to-light ratio
     ],
 
     # Galaxy geometry
@@ -104,7 +105,7 @@ CONFIG = {
     },
 
     # Draco needs the longer weight solve.
-    "OBSERVABLES": {"KARL_MAXITER": 4000, "KARL_APFAC": 1.0},
+    "OBSERVABLES": {"KARL_MAXITER": 4000},
 
     # Draco numerical domain
     "MIN_DISTANCE": 1e-6,
@@ -122,5 +123,5 @@ CONFIG = {
     "PEN_SPHERE_STRENGTH": 200,
 
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-try4-density3d-karl-observables.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-try5-density3d-karl-observables.csv"),
 }

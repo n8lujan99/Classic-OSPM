@@ -1,6 +1,10 @@
+# OSPM_Config_Center — Segue1
+# Galaxy-specific configuration only.
+# Shared solver, orbit-library, AI, deck, and runtime defaults come from OSPM/load_config.py.
+
 from pathlib import Path
 
-LOCAL_DEBUG = True
+LOCAL_DEBUG = False
 
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
@@ -8,8 +12,10 @@ if not PROFILE_ROOT.exists():
 
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Segue1_karl_observables.csv"
 
-INITIAL_THETA = [13.320825619743976, 27.64513174995341, 370858.67274967243, 1.433594982833482]
-#INITIAL_THETA = [18.68078541842375, 304.0490742108145, 3932645.9209644324, 3.093423297240227]
+INITIAL_THETA = [13.320825619743976, 27.64513174995341, 370858.67274967243, 1.433594982833482] # Default
+
+#INITIAL_THETA = [18.68078541842375, 304.0490742108145, 3932645.9209644324, 3.093423297240227] # now fails as it should
+#INITIAL_THETA = [13.320825619743976, 27.64513174995341, 1000000.0, 1.433594982833482]
 
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
@@ -113,5 +119,5 @@ CONFIG = {
     "MBH_LOG_FLOOR": 1.0e3,
     "MBH_ZERO_FRACTION": 0.10,
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_stars.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "Segue1-try1-density3d-karl-mode0-observables.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "Segue1-try2-density3d-karl-mode0-observables.csv"),
 }

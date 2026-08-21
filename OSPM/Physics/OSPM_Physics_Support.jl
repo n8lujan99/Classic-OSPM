@@ -67,6 +67,7 @@ const DEFAULT_KARL_ALPHAT       = 1.0      # Karl-style data-mismatch multiplier
 
 const DEFAULT_KARL_MAXITER       = 250       # Karl SPEAR/Newton iteration cap
 const DEFAULT_KARL_ENTROPY_FLOOR = 1e-30    # initialization/numerical floor only; not the positivity boundary
+const DEFAULT_KARL_FILTER_TINY   = 1e-37    # Karl filter.f physical orbit-weight floor after each SPEAR step
 const DEFAULT_KARL_APFAC         = 0.01      # maximum requested SPEAR step
 const DEFAULT_KARL_LIGHT_REL_TOL = 0.01
 const DEFAULT_KARL_DELTA_CHI2_ITER_TOL = 0.3
@@ -133,8 +134,22 @@ struct KarlObservables
     mkherm_rng::String
 end
 
+struct KarlD3TracerConstraints
+    path::String
+    nradial::Int
+    nangular::Int
+    radial_edges_m::Vector{Float64}
+    angular_edges::Vector{Float64}
+    row_index::Matrix{Int}
+    row_radial::Vector{Int}
+    row_angular::Vector{Int}
+    target::Vector{Float64}
+end
+
 const _KARL_OBSERVABLES_CACHE = Dict{String,KarlObservables}()
 const _KARL_OBSERVABLES_LOCK = ReentrantLock()
+const _KARL_D3_TRACER_CACHE = Dict{Tuple{String,UInt64,UInt64},KarlD3TracerConstraints}()
+const _KARL_D3_TRACER_LOCK = ReentrantLock()
 
 const _HALO_CTX_CACHE = Dict{Tuple{Float64,Float64,Float64,Float64,UInt64,Symbol,Float64,Int,Float64,Float64},HaloContext}()
 const _HALO_LOCK = ReentrantLock()
@@ -270,6 +285,247 @@ end
         return 0
     end
     return j
+end
+
+
+@inline function _karl_d3_stellar_model_value(stellar_model, key::Symbol)
+    stellar_model === nothing && return nothing
+    haskey(stellar_model, key) && return stellar_model[key]
+    skey = String(key)
+    haskey(stellar_model, skey) && return stellar_model[skey]
+    return nothing
+end
+
+@inline function _karl_d3_homeoid_mu_from_karl_v(v::Float64, q::Float64)
+    0.0 <= v <= 1.0 || error("Karl d3 angular coordinate must lie in [0,1]")
+    isfinite(q) && q > 0.0 || error("Karl d3 source axis ratio must be finite and positive")
+    denom2 = q^2 + (1.0 - q^2) * v^2
+    denom2 > 0.0 || error("Karl d3 homeoid angular transform is singular")
+    return clamp(v / sqrt(denom2), 0.0, 1.0)
+end
+
+function _karl_d3_homeoid_radial_measure(source_m_inner::Float64, source_m_outer::Float64, mu_lo::Float64, mu_hi::Float64, target_r_inner::Float64, target_r_outer::Float64, q::Float64; nquad::Int=32)
+    mu_hi > mu_lo || return 0.0
+    nquad > 0 || error("Karl d3 homeoid overlap quadrature must be positive")
+    dmu = (mu_hi - mu_lo) / nquad
+    overlap = 0.0
+    q2 = q^2
+    @inbounds for k in 1:nquad
+        mu = mu_lo + (k - 0.5) * dmu
+        radial_scale2 = 1.0 - (1.0 - q2) * mu^2
+        radial_scale2 > 0.0 || continue
+        radial_scale = sqrt(radial_scale2)
+        overlap_m_inner = max(source_m_inner, target_r_inner / radial_scale)
+        overlap_m_outer = min(source_m_outer, target_r_outer / radial_scale)
+        overlap_m_outer > overlap_m_inner && (overlap += overlap_m_outer^3 - overlap_m_inner^3)
+    end
+    return overlap * dmu
+end
+
+function _load_karl_d3_tracer_constraints_uncached(stellar_model, radial_edges_m::Vector{Float64}, angular_edges::Vector{Float64})
+    tracer_path_value = _karl_d3_stellar_model_value(stellar_model, :tracer_grid_csv)
+    tracer_path_value === nothing && error("density_3d tracer constraint requires STELLAR_MODEL.tracer_grid_csv")
+    path = abspath(String(tracer_path_value))
+    isfile(path) || error("density_3d tracer grid CSV not found: $path")
+    length(radial_edges_m) >= 2 || error("Karl d3 radial grid requires at least two edges")
+    length(angular_edges) >= 2 || error("Karl d3 angular grid requires at least two edges")
+    any(.!isfinite.(radial_edges_m)) && error("Karl d3 radial edges contain nonfinite values")
+    any(.!isfinite.(angular_edges)) && error("Karl d3 angular edges contain nonfinite values")
+    any(diff(radial_edges_m) .<= 0.0) && error("Karl d3 radial edges must be strictly increasing")
+    any(diff(angular_edges) .<= 0.0) && error("Karl d3 angular edges must be strictly increasing")
+    abs(angular_edges[1]) <= 1.0e-12 || error("Karl d3 angular grid must begin at v=0")
+    abs(angular_edges[end] - 1.0) <= 1.0e-12 || error("Karl d3 angular grid must end at v=1")
+
+    raw_lines = readlines(path)
+    isempty(raw_lines) && error("density_3d tracer grid CSV is empty: $path")
+    header = String.(strip.(split(chomp(raw_lines[1]), ","; keepempty=true)))
+    columns = Dict{String,Int}(name => i for (i, name) in pairs(header))
+    required = ("R_inner_pc", "R_outer_pc", "theta_inner_rad", "theta_outer_rad", "cell_luminosity_Lsun", "q_axis_ratio", "flattened_geometry", "density_coordinate")
+    for name in required
+        haskey(columns, name) || error("density_3d tracer grid $path is missing required column $name")
+    end
+
+    nradial = length(radial_edges_m) - 1
+    nangular = length(angular_edges) - 1
+    Nconstraint = 1 + (nradial - 1) * nangular
+    row_index = zeros(Int, nradial, nangular)
+    row_radial = Vector{Int}(undef, Nconstraint)
+    row_angular = Vector{Int}(undef, Nconstraint)
+    target = zeros(Float64, Nconstraint)
+
+    @inbounds for iv in 1:nangular
+        row_index[1, iv] = 1
+    end
+    row_radial[1] = 1
+    row_angular[1] = 0
+
+    row = 1
+    @inbounds for ir in 2:nradial
+        for iv in 1:nangular
+            row += 1
+            row_index[ir, iv] = row
+            row_radial[row] = ir
+            row_angular[row] = iv
+        end
+    end
+    row == Nconstraint || error("Karl d3 row construction produced $row constraints; expected $Nconstraint")
+
+    radial_edges_pc = radial_edges_m ./ pc
+    total_luminosity = 0.0
+    used_luminosity = 0.0
+    q_reference = NaN
+    max_required_column = maximum(columns[name] for name in required)
+
+    @inbounds for iline in 2:length(raw_lines)
+        stripped = strip(raw_lines[iline])
+        isempty(stripped) && continue
+
+        fields = String.(strip.(split(chomp(raw_lines[iline]), ","; keepempty=true)))
+        length(fields) >= max_required_column || error("density_3d tracer grid $path line $iline does not contain the required columns")
+
+        source_m_inner = parse(Float64, fields[columns["R_inner_pc"]])
+        source_m_outer = parse(Float64, fields[columns["R_outer_pc"]])
+        theta_inner = parse(Float64, fields[columns["theta_inner_rad"]])
+        theta_outer = parse(Float64, fields[columns["theta_outer_rad"]])
+        luminosity = parse(Float64, fields[columns["cell_luminosity_Lsun"]])
+        q = parse(Float64, fields[columns["q_axis_ratio"]])
+        flattened_geometry = strip(fields[columns["flattened_geometry"]])
+        density_coordinate = strip(fields[columns["density_coordinate"]])
+
+        isfinite(source_m_inner) && isfinite(source_m_outer) && isfinite(theta_inner) && isfinite(theta_outer) && isfinite(luminosity) && isfinite(q) ||
+            error("density_3d tracer grid $path contains nonfinite required values at line $iline")
+        source_m_inner >= 0.0 || error("density_3d tracer grid $path has negative R_inner_pc at line $iline")
+        source_m_outer > source_m_inner || error("density_3d tracer grid $path has invalid radial cell at line $iline")
+        0.0 <= theta_inner < theta_outer <= pi || error("density_3d tracer grid $path has invalid theta cell at line $iline")
+        luminosity >= 0.0 || error("density_3d tracer grid $path contains negative cell luminosity at line $iline")
+        q > 0.0 || error("density_3d tracer grid $path has non-positive q_axis_ratio at line $iline")
+        flattened_geometry == "oblate_homeoid" || error("density_3d tracer grid $path requires flattened_geometry=oblate_homeoid; got $flattened_geometry at line $iline")
+        density_coordinate == "m_pc" || error("density_3d tracer grid $path requires density_coordinate=m_pc; got $density_coordinate at line $iline")
+
+        if isnan(q_reference)
+            q_reference = q
+        else
+            scale = max(abs(q_reference), abs(q), 1.0)
+            abs(q - q_reference) <= 1.0e-12 * scale || error("density_3d tracer grid $path changes q_axis_ratio between rows")
+        end
+
+        total_luminosity += luminosity
+        luminosity == 0.0 && continue
+
+        source_radial_measure = source_m_outer^3 - source_m_inner^3
+        source_radial_measure > 0.0 || continue
+
+        mu_a = cos(theta_inner)
+        mu_b = cos(theta_outer)
+        source_mu_lo = min(mu_a, mu_b)
+        source_mu_hi = max(mu_a, mu_b)
+        source_angular_measure = source_mu_hi - source_mu_lo
+        source_angular_measure > 0.0 || continue
+
+        source_measure = source_radial_measure * source_angular_measure
+        source_measure > 0.0 || continue
+
+        for ir in 1:nradial
+            target_r_inner = radial_edges_pc[ir]
+            target_r_outer = radial_edges_pc[ir + 1]
+
+            if ir == 1
+                overlap_measure = _karl_d3_homeoid_radial_measure(source_m_inner, source_m_outer, source_mu_lo, source_mu_hi, target_r_inner, target_r_outer, q)
+                overlap_measure > 0.0 || continue
+                contribution = luminosity * overlap_measure / source_measure
+                target[1] += contribution
+                used_luminosity += contribution
+                continue
+            end
+
+            for iv in 1:nangular
+                v_inner = angular_edges[iv]
+                v_outer = angular_edges[iv + 1]
+                homeoid_mu_inner = _karl_d3_homeoid_mu_from_karl_v(v_inner, q)
+                homeoid_mu_outer = _karl_d3_homeoid_mu_from_karl_v(v_outer, q)
+
+                positive_lo = max(source_mu_lo, homeoid_mu_inner)
+                positive_hi = min(source_mu_hi, homeoid_mu_outer)
+                negative_lo = max(source_mu_lo, -homeoid_mu_outer)
+                negative_hi = min(source_mu_hi, -homeoid_mu_inner)
+
+                overlap_measure = 0.0
+                positive_hi > positive_lo && (overlap_measure += _karl_d3_homeoid_radial_measure(source_m_inner, source_m_outer, positive_lo, positive_hi, target_r_inner, target_r_outer, q))
+                negative_hi > negative_lo && (overlap_measure += _karl_d3_homeoid_radial_measure(source_m_inner, source_m_outer, negative_lo, negative_hi, target_r_inner, target_r_outer, q))
+                overlap_measure > 0.0 || continue
+
+                contribution = luminosity * overlap_measure / source_measure
+                target[row_index[ir, iv]] += contribution
+                used_luminosity += contribution
+            end
+        end
+    end
+
+    isfinite(total_luminosity) && total_luminosity > 0.0 || error("density_3d tracer grid $path has non-positive total luminosity")
+    isfinite(used_luminosity) && used_luminosity > 0.0 || error("density_3d tracer target has no luminosity inside the Karl d3 grid")
+
+    target ./= used_luminosity
+    isapprox(sum(target), 1.0; rtol=1.0e-12, atol=1.0e-12) || error("Karl d3 tracer target does not normalize to one")
+
+    retained_fraction = used_luminosity / total_luminosity
+    zero_target_rows = count(==(0.0), target)
+
+    println("[KARL D3 TRACER LOAD]",
+        " path=", path,
+        " radial_bins=", nradial,
+        " angular_bins=", nangular,
+        " constraints=", Nconstraint,
+        " inner_theta_collapsed=true",
+        " source_coordinate=oblate_homeoid_m",
+        " target_coordinate=karl_spherical_r_v",
+        " overlap_rebinned=true",
+        " overlap_quadrature=32",
+        " q_axis_ratio=", q_reference,
+        " zero_target_rows=", zero_target_rows,
+        " retained_light_fraction=", retained_fraction,
+        " Rmax_pc=", radial_edges_m[end] / pc)
+
+    return KarlD3TracerConstraints(path, nradial, nangular, copy(radial_edges_m), copy(angular_edges), row_index, row_radial, row_angular, target)
+end
+
+function load_karl_d3_tracer_constraints(stellar_model, radial_edges_m::Vector{Float64}, angular_edges::Vector{Float64})
+    tracer_path_value = _karl_d3_stellar_model_value(stellar_model, :tracer_grid_csv)
+    tracer_path_value === nothing && error("density_3d tracer constraint requires STELLAR_MODEL.tracer_grid_csv")
+    path = abspath(String(tracer_path_value))
+    key = (path, UInt64(hash(Tuple(radial_edges_m))), UInt64(hash(Tuple(angular_edges))))
+    lock(_KARL_D3_TRACER_LOCK)
+    try
+        haskey(_KARL_D3_TRACER_CACHE, key) && return _KARL_D3_TRACER_CACHE[key]
+    finally
+        unlock(_KARL_D3_TRACER_LOCK)
+    end
+    constraints = _load_karl_d3_tracer_constraints_uncached(stellar_model, radial_edges_m, angular_edges)
+    lock(_KARL_D3_TRACER_LOCK)
+    try
+        return get!(_KARL_D3_TRACER_CACHE, key, constraints)
+    finally
+        unlock(_KARL_D3_TRACER_LOCK)
+    end
+end
+
+@inline function karl_d3_tracer_row(constraints::KarlD3TracerConstraints, r_m::Float64, theta::Float64)
+    isfinite(r_m) && r_m >= 0.0 || return 0
+    isfinite(theta) || return 0
+    ir = _bin_index(constraints.radial_edges_m, r_m)
+    ir == 0 && return 0
+    vcoord = clamp(abs(cos(theta)), 0.0, 1.0)
+    iv = searchsortedlast(constraints.angular_edges, vcoord)
+    iv < 1 && return 0
+    iv >= length(constraints.angular_edges) && (iv = constraints.nangular)
+    return constraints.row_index[ir, iv]
+end
+
+function karl_d3_radial_target(constraints::KarlD3TracerConstraints)
+    radial = zeros(Float64, constraints.nradial)
+    @inbounds for row in eachindex(constraints.target)
+        radial[constraints.row_radial[row]] += constraints.target[row]
+    end
+    return radial
 end
 
 # Fast dependency-free normal CDF approximation.

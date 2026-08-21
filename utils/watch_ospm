@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+INTERVAL="${1:-10}"
+
+cleanup() {
+    printf '\033[?25h'
+}
+trap cleanup EXIT INT TERM
+
+# Hide cursor while refreshing.
+printf '\033[?25l'
+
+while true; do
+    PID="$(
+        ps -u "$USER" -o pid=,pcpu=,args= |
+        grep -E 'python.*OSPM|python.*daemon|python.*start|julia' |
+        grep -v -E 'grep|watch_ospm' |
+        sort -k2 -nr |
+        awk 'NR==1 {print $1}'
+    )"
+
+    # Move to top-left and redraw the current screen instead of appending.
+    printf '\033[H\033[J'
+
+    echo "OSPM LIVE MONITOR"
+    echo "================================================================================================"
+    echo "$(date '+%F %T')    refresh=${INTERVAL}s"
+
+    if [[ -z "$PID" ]]; then
+        echo
+        echo "No active OSPM process found."
+        sleep "$INTERVAL"
+        continue
+    fi
+
+    echo
+    ps -p "$PID" -o pid,ppid,etime,%cpu,%mem,nlwp,rss,vsz,stat,wchan:24,cmd
+
+    echo
+    echo "THREADS — highest CPU"
+    echo "------------------------------------------------------------------------------------------------"
+    ps -L -p "$PID" \
+        -o tid,psr,pcpu,stat,wchan:24,comm \
+        --sort=-pcpu |
+        head -12
+
+    if [[ -r "/proc/$PID/io" ]]; then
+        echo
+        echo "I/O"
+        echo "------------------------------------------------------------------------------------------------"
+        grep -E 'rchar|wchar|read_bytes|write_bytes' "/proc/$PID/io"
+    fi
+
+    sleep "$INTERVAL"
+done

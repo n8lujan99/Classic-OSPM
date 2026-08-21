@@ -54,49 +54,43 @@ function _observed_targets_for_mode(R_star_m::Vector{Float64}, valid_vlos::Abstr
     return observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=st.light_edges, target_mode=losvd_target_mode, karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
 end
 
-function _build_density_3d_target(stellar_model, constraint_edges::Vector{Float64})
-    stellar_model === nothing && error("density_3d tracer constraint requires STELLAR_MODEL")
-    tracer_model = copy(stellar_model)
-    if haskey(tracer_model, "tracer_grid_csv")
-        tracer_model["grid_csv"] = tracer_model["tracer_grid_csv"]
-    elseif haskey(tracer_model, :tracer_grid_csv)
-        tracer_model[:grid_csv] = tracer_model[:tracer_grid_csv]
-    end
-    grid = build_axisymmetric_light_grid_model(tracer_model)
-    q = max(abs(f64(grid.q)), 1.0e-6)
-    target = zeros(Float64, length(constraint_edges) - 1)
-    @inbounds for i in eachindex(grid.L_cell)
-        R = f64(grid.R_m[i])
-        z = f64(grid.z_m[i])
-        L = f64(grid.L_cell[i])
-        m = sqrt(R * R + (z / q) * (z / q))
-        ibin = _bin_index(constraint_edges, m)
-        ibin > 0 && isfinite(L) && L >= 0.0 && (target[ibin] += L)
-    end
-    total = sum(target)
-    isfinite(total) && total > 0.0 || error("density_3d tracer target has no luminosity inside the constraint grid")
-    target ./= total
-    return target
-end
-
-function _resolve_tracer_constraint_targets(mode::Symbol, stellar_model, projected_target::Vector{Float64}, projected_sigma::Vector{Float64}, constraint_edges::Vector{Float64})
+function _resolve_tracer_constraint_targets(mode::Symbol, projected_target::Vector{Float64}, projected_sigma::Vector{Float64}, d3_constraints)
     if mode === :projected_light
         return projected_target, projected_sigma
     end
+
     mode === :density_3d || error("Unsupported tracer constraint mode: $mode")
-    density_target = _build_density_3d_target(stellar_model, constraint_edges)
-    length(density_target) == length(projected_target) || error("density_3d target length does not match projected-light target length")
+    d3_constraints === nothing && error("density_3d tracer constraints were not initialized")
+    length(projected_target) == length(projected_sigma) || error("Projected tracer target and sigma lengths do not match")
+
+    density_target = copy(d3_constraints.target)
     projected_sigma_safe = max.(abs.(projected_sigma), 1.0e-12)
     fractional_sigma = projected_sigma_safe ./ max.(abs.(projected_target), 1.0e-12)
-    density_sigma = max.(abs.(density_target) .* fractional_sigma, projected_sigma_safe)
+    finite_fractional_sigma = fractional_sigma[isfinite.(fractional_sigma) .& (fractional_sigma .> 0.0)]
+    fallback_fractional_sigma = isempty(finite_fractional_sigma) ? 1.0 : median(finite_fractional_sigma)
+
+    density_sigma = similar(density_target)
+
+    if length(projected_target) == d3_constraints.nradial
+        @inbounds for row in eachindex(density_target)
+            ir = d3_constraints.row_radial[row]
+            frac_sigma = isfinite(fractional_sigma[ir]) && fractional_sigma[ir] > 0.0 ? fractional_sigma[ir] : fallback_fractional_sigma
+            density_sigma[row] = max(abs(density_target[row]) * frac_sigma, 1.0e-12)
+        end
+    else
+        @inbounds for row in eachindex(density_target)
+            density_sigma[row] = max(abs(density_target[row]) * fallback_fractional_sigma, 1.0e-12)
+        end
+    end
+
     return density_target, density_sigma
 end
 
-function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{Float64}, target::Vector{Float64}, sigma::Vector{Float64}, constraint_edges::Vector{Float64}; model_index::Int=1, print_bins::Bool=false)
+function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{Float64}, target::Vector{Float64}, sigma::Vector{Float64}, constraint_edges::Vector{Float64}; model_index::Int=1, print_bins::Bool=false, d3_constraints=nothing)
     size(A_constraint, 1) == length(target) || error("Tracer diagnostic target length mismatch")
     length(target) == length(sigma) || error("Tracer diagnostic sigma length mismatch")
     size(A_constraint, 2) == length(w) || error("Tracer diagnostic weight length mismatch")
-    length(constraint_edges) == length(target) + 1 || error("Tracer diagnostic edge length mismatch")
+    d3_constraints === nothing ? (length(constraint_edges) == length(target) + 1 || error("Tracer diagnostic edge length mismatch")) : (length(d3_constraints.target) == length(target) || error("Tracer diagnostic d3 row mismatch"))
     iseven(length(w)) || error("Tracer diagnostic requires prograde/retrograde orbit pairs")
 
     model = A_constraint * w
@@ -139,16 +133,15 @@ function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{
         support_fraction[ib] = n_support / Nbase
 
         if print_bins
-            println("[TRACER BIN]",
-                " i=", model_index,
-                " bin=", ib,
-                " R_inner_pc=", constraint_edges[ib] / pc,
-                " R_outer_pc=", constraint_edges[ib + 1] / pc,
-                " target=", target[ib],
-                " model=", model[ib],
-                " sigma_residual=", sigma_residual[ib],
-                " support_fraction=", support_fraction[ib],
-                " effective_N_base_orbits=", effective_support[ib])
+            if d3_constraints === nothing
+                println("[TRACER BIN]", " i=", model_index, " bin=", ib, " R_inner_pc=", constraint_edges[ib] / pc, " R_outer_pc=", constraint_edges[ib + 1] / pc, " target=", target[ib], " model=", model[ib], " sigma_residual=", sigma_residual[ib], " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+            else
+                ir = d3_constraints.row_radial[ib]
+                iv = d3_constraints.row_angular[ib]
+                vinner = iv == 0 ? d3_constraints.angular_edges[1] : d3_constraints.angular_edges[iv]
+                vouter = iv == 0 ? d3_constraints.angular_edges[end] : d3_constraints.angular_edges[iv + 1]
+                println("[TRACER BIN]", " i=", model_index, " bin=", ib, " radial_bin=", ir, " angular_bin=", iv, " R_inner_pc=", d3_constraints.radial_edges_m[ir] / pc, " R_outer_pc=", d3_constraints.radial_edges_m[ir + 1] / pc, " vcoord_inner=", vinner, " vcoord_outer=", vouter, " target=", target[ib], " model=", model[ib], " sigma_residual=", sigma_residual[ib], " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+            end
         end
     end
 
@@ -260,7 +253,7 @@ mutable struct OrbitWorkState
     Lfrac
     force_geometry::Symbol
     tracer_constraint_mode::Symbol
-    tracer_axis_ratio::Float64
+    d3_constraints
     losvd_target_mode::Symbol
     losvd_aperture_ranges::Vector{Tuple{Float64,Float64}}
     karl_observables
@@ -348,21 +341,36 @@ end
     return shell_id + Nshells * ((lfrac_id - 1) + regular_lfrac * (third_id - 1))
 end
 
-function _build_family_launch_grid( Nbase_orbit::Int, shells::Vector{Float64}, Lfrac, third_launches::Vector{Float64}, pot, frc, force_geometry::Symbol)
+function _build_family_launch_grid(Nbase_orbit::Int, shells::Vector{Float64}, Lfrac, third_launches::Vector{Float64}, pot, frc, force_geometry::Symbol)
     Nshells = length(shells)
     nlfrac = length(Lfrac)
     nthird = length(third_launches)
-    nlfrac >= 2 || error("Karl phase grid requires at least one regular Lz family " * "and one circular boundary family" )
-    nthird > 0 || error("Karl phase grid requires a third-integral coordinate")
+
+    nlfrac >= 2 ||
+        error("Karl phase grid requires at least one regular Lz family and one circular boundary family")
+
+    nthird > 0 ||
+        error("Karl phase grid requires a third-integral coordinate")
+
     full_phase_grid = Nshells * ((nlfrac - 1) * nthird + 1)
-    Nbase_orbit >= full_phase_grid || error("Orbit library has $Nbase_orbit base slots for " * "$full_phase_grid normalized family cells")
+
+    Nbase_orbit >= full_phase_grid ||
+        error(
+            "Orbit library has $Nbase_orbit base slots for " *
+            "$full_phase_grid normalized family cells"
+        )
 
     launch_r0 = fill(NaN, Nbase_orbit)
     launch_theta0 = fill(NaN, Nbase_orbit)
     launch_energy = fill(NaN, Nbase_orbit)
     launch_lz = fill(NaN, Nbase_orbit)
-    planned_indices = Int[]
-    sizehint!(planned_indices, full_phase_grid)
+
+    # _orbit_grid_index maps the normalized Karl grid uniquely onto the
+    # contiguous range 1:full_phase_grid. The old implementation pushed
+    # these values serially and then sorted/uniqued them. Constructing the
+    # final range directly removes the only shared mutable object that
+    # prevented safe shell-level parallelism.
+    planned_indices = collect(1:full_phase_grid)
 
     axisymmetric = force_geometry === :axisymmetric_density_grid
     theta_equator = f64(pi / 2)
@@ -371,77 +379,183 @@ function _build_family_launch_grid( Nbase_orbit::Int, shells::Vector{Float64}, L
     if axisymmetric
         abs(first(third_launches)) <= 1.0e-12 ||
             error("Normalized third-integral launches must begin at u=0")
+
         abs(last(third_launches) - 1.0) <= 1.0e-12 ||
             error("Normalized third-integral launches must end at u=1")
     elseif nthird != 1
-        error("A spherical orbit family must use exactly one " * "third-integral launch")
+        error("A spherical orbit family must use exactly one third-integral launch")
     end
 
-    @inbounds for shell_id in 1:Nshells
+    function build_shell!(shell_id::Int)
         rapo = f64(shells[shell_id])
-        isfinite(rapo) && rapo > 0.0 || error("Orbit shell $shell_id has an invalid radius")
 
-        for lfrac_id in 1:nlfrac
+        isfinite(rapo) && rapo > 0.0 ||
+            error("Orbit shell $shell_id has an invalid radius")
+
+        @inbounds for lfrac_id in 1:nlfrac
             lf = f64(Lfrac[lfrac_id])
+
             Lz_family, E_family, vc_family, family_state =
-                karl_orbit_family_integrals( rapo=rapo, Lz_frac=lf, pot=pot, frc=frc)
+                karl_orbit_family_integrals(
+                    rapo=rapo,
+                    Lz_frac=lf,
+                    pot=pot,
+                    frc=frc,
+                )
+
             family_state == :ok ||
-                error("Unable to construct Karl orbit family at " * "shell_id=$shell_id lfrac_id=$lfrac_id " * "state=$family_state")
+                error(
+                    "Unable to construct Karl orbit family at " *
+                    "shell_id=$shell_id lfrac_id=$lfrac_id " *
+                    "state=$family_state"
+                )
+
             circular_boundary = lfrac_id == nlfrac
+
             if !axisymmetric
-                rturn, turning_state = _karl_outer_zero_velocity_radius(energy=E_family, lz=Lz_family, theta0=theta_equator, rapo_max=rapo, pot=pot)
-                turning_state == :ok || error("Unable to construct spherical ZVC launch at " * "shell_id=$shell_id lfrac_id=$lfrac_id " * "state=$turning_state")
+                rturn, turning_state =
+                    _karl_outer_zero_velocity_radius(
+                        energy=E_family,
+                        lz=Lz_family,
+                        theta0=theta_equator,
+                        rapo_max=rapo,
+                        pot=pot,
+                    )
+
+                turning_state == :ok ||
+                    error(
+                        "Unable to construct spherical ZVC launch at " *
+                        "shell_id=$shell_id lfrac_id=$lfrac_id " *
+                        "state=$turning_state"
+                    )
+
                 third_id = 1
-                c = _orbit_grid_index(shell_id, lfrac_id, third_id, Nshells, nlfrac, nthird)
-                push!(planned_indices, c)
+
+                c = _orbit_grid_index(
+                    shell_id,
+                    lfrac_id,
+                    third_id,
+                    Nshells,
+                    nlfrac,
+                    nthird,
+                )
+
                 launch_r0[c] = rturn
                 launch_theta0[c] = theta_equator
                 launch_energy[c] = E_family
                 launch_lz[c] = Lz_family
+
                 continue
             end
-            family_points = _karl_family_zvc_launches(energy=E_family, lz=Lz_family, rapo=rapo, pot=pot, Nlaunch=circular_boundary ? 1 : nthird, circular_boundary=circular_boundary, ncurve=circular_boundary ? 0 : ncurve)
+
+            family_points =
+                _karl_family_zvc_launches(
+                    energy=E_family,
+                    lz=Lz_family,
+                    rapo=rapo,
+                    pot=pot,
+                    Nlaunch=circular_boundary ? 1 : nthird,
+                    circular_boundary=circular_boundary,
+                    ncurve=circular_boundary ? 0 : ncurve,
+                )
+
             family_points.state == :ok ||
-                error("Unable to construct normalized family ZVC at " * "shell_id=$shell_id lfrac_id=$lfrac_id " *"state=$(family_points.state)")
+                error(
+                    "Unable to construct normalized family ZVC at " *
+                    "shell_id=$shell_id lfrac_id=$lfrac_id " *
+                    "state=$(family_points.state)"
+                )
+
             if circular_boundary
                 third_id = nthird
-                c = _orbit_grid_index(shell_id, lfrac_id, third_id, Nshells, nlfrac, nthird)
-                push!(planned_indices, c)
+
+                c = _orbit_grid_index(
+                    shell_id,
+                    lfrac_id,
+                    third_id,
+                    Nshells,
+                    nlfrac,
+                    nthird,
+                )
+
                 launch_r0[c] = only(family_points.r)
                 launch_theta0[c] = only(family_points.theta)
                 launch_energy[c] = E_family
                 launch_lz[c] = Lz_family
+
                 continue
             end
 
             length(family_points.r) == nthird ||
                 error("Family ZVC radius count does not match nthird")
+
             length(family_points.theta) == nthird ||
                 error("Family ZVC theta count does not match nthird")
+
             length(family_points.u) == nthird ||
                 error("Family ZVC normalized-coordinate count does not match nthird")
+
             maximum(abs.(family_points.u .- third_launches)) <= 1.0e-12 ||
                 error("Family ZVC normalized coordinates do not match the common grid")
 
             for third_id in 1:nthird
-                c = _orbit_grid_index(shell_id, lfrac_id, third_id, Nshells, nlfrac, nthird)
-                push!(planned_indices, c)
+                c = _orbit_grid_index(
+                    shell_id,
+                    lfrac_id,
+                    third_id,
+                    Nshells,
+                    nlfrac,
+                    nthird,
+                )
+
                 launch_r0[c] = family_points.r[third_id]
                 launch_theta0[c] = family_points.theta[third_id]
                 launch_energy[c] = E_family
                 launch_lz[c] = Lz_family
             end
         end
+
+        return nothing
     end
 
-    length(planned_indices) == full_phase_grid ||
-        error("Normalized family grid built $(length(planned_indices)) cells " * "but expected $full_phase_grid")
-    sort!(planned_indices)
-    unique!(planned_indices)
-    length(planned_indices) == full_phase_grid ||
-        error("Normalized family grid contains duplicate orbit indices")
+    if Threads.nthreads() > 1 && Nshells > 1
+        next_shell = Threads.Atomic{Int}(1)
+        nworkers = min(Threads.nthreads(), Nshells)
 
-    return (planned_indices=planned_indices, launch_r0=launch_r0, launch_theta0=launch_theta0, launch_energy=launch_energy, launch_lz=launch_lz)
+        @sync for _ in 1:nworkers
+            Threads.@spawn begin
+                while true
+                    shell_id = Threads.atomic_add!(next_shell, 1)
+                    shell_id > Nshells && break
+                    build_shell!(shell_id)
+                end
+            end
+        end
+    else
+        @inbounds for shell_id in 1:Nshells
+            build_shell!(shell_id)
+        end
+    end
+
+    all(isfinite, @view launch_r0[planned_indices]) ||
+        error("Normalized family grid contains nonfinite launch radii")
+
+    all(isfinite, @view launch_theta0[planned_indices]) ||
+        error("Normalized family grid contains nonfinite launch theta values")
+
+    all(isfinite, @view launch_energy[planned_indices]) ||
+        error("Normalized family grid contains nonfinite launch energies")
+
+    all(isfinite, @view launch_lz[planned_indices]) ||
+        error("Normalized family grid contains nonfinite launch angular momenta")
+
+    return (
+        planned_indices=planned_indices,
+        launch_r0=launch_r0,
+        launch_theta0=launch_theta0,
+        launch_energy=launch_energy,
+        launch_lz=launch_lz,
+    )
 end
 
 function _balanced_launch_order(planned_indices::Vector{Int}, shells::Vector{Float64}, Lfrac, third_launches::Vector{Float64}, shell_band_count::Int,)
@@ -628,12 +742,22 @@ function _init_orbit_work(
     max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP,
     shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS,
     coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY,
-    tracer_constraint_mode="projected_light", losvd_target_mode=:current, karl_observables=nothing)
-    iseven(Norbit) || error("Karl prograde/retrograde orbit pairing requires even Norbit because " * "Norbit is the final A-matrix column count")
+    tracer_constraint_mode="projected_light",
+    losvd_target_mode=:current,
+    karl_observables=nothing,
+    precomputed_d3_constraints=nothing,
+    parallel_init::Bool=true,
+)
+    iseven(Norbit) || error(
+        "Karl prograde/retrograde orbit pairing requires even Norbit because " *
+        "Norbit is the final A-matrix column count"
+    )
 
     max_attempts_factor > 0 || error("max_attempts_factor must be positive")
+
     Nbase_orbit = Norbit ÷ 2
     Nstar = length(R_star_m)
+
     valid_vec = collect(Bool, valid_vlos)
     vlos_idx = Int[]
 
@@ -642,76 +766,245 @@ function _init_orbit_work(
     end
 
     losvd_mode = _normalize_losvd_target_mode(losvd_target_mode)
+
     if losvd_mode === :karl_mode0_observables
-        karl_observables === nothing && error("Karl observables runtime state is required by _init_orbit_work")
-        losvd_aperture_ranges = karl_observables_aperture_ranges_m(karl_observables)
+        karl_observables === nothing &&
+            error("Karl observables runtime state is required by _init_orbit_work")
+
+        losvd_aperture_ranges =
+            karl_observables_aperture_ranges_m(karl_observables)
+
         Nspatial = length(karl_observables.aperture_ids)
-        length(losvd_aperture_ranges) == Nspatial || error("Karl observables aperture-range count does not match aperture count")
-        spatial_edges = vcat(0.0, [range[2] for range in losvd_aperture_ranges])
-        any(diff(spatial_edges) .<= 0.0) && error("Karl observables aperture outer radii must be strictly increasing for the orbit shell/diagnostic grid")
-        light_bin_edges === nothing && error("light_bin_edges is required for Karl observables mode so the existing tracer constraints remain unchanged")
+
+        length(losvd_aperture_ranges) == Nspatial ||
+            error("Karl observables aperture-range count does not match aperture count")
+
+        spatial_edges = vcat(
+            0.0,
+            [range[2] for range in losvd_aperture_ranges],
+        )
+
+        any(diff(spatial_edges) .<= 0.0) &&
+            error(
+                "Karl observables aperture outer radii must be strictly increasing " *
+                "for the orbit shell/diagnostic grid"
+            )
+
+        light_bin_edges === nothing &&
+            error(
+                "light_bin_edges is required for Karl observables mode so the " *
+                "existing tracer constraints remain unchanged"
+            )
+
         light_edges = resolve_karl_light_edges(light_bin_edges)
         velocity_edges_use = copy(karl_observables.velocity_edges_mps)
+
         if velocity_edges !== nothing
             supplied_velocity_edges = Float64.(velocity_edges)
-            length(supplied_velocity_edges) == length(velocity_edges_use) || error("Supplied velocity grid does not match the Karl observables CSV")
-            maximum(abs.(supplied_velocity_edges .- velocity_edges_use)) <= 1.0e-9 || error("Supplied velocity grid does not match the Karl observables CSV")
+
+            length(supplied_velocity_edges) == length(velocity_edges_use) ||
+                error("Supplied velocity grid does not match the Karl observables CSV")
+
+            maximum(abs.(supplied_velocity_edges .- velocity_edges_use)) <= 1.0e-9 ||
+                error("Supplied velocity grid does not match the Karl observables CSV")
         end
     else
         spatial_edges = resolve_karl_spatial_edges(kinematic_bin_edges)
-        light_edges = light_bin_edges === nothing ? spatial_edges : resolve_karl_light_edges(light_bin_edges)
+
+        light_edges =
+            light_bin_edges === nothing ?
+            spatial_edges :
+            resolve_karl_light_edges(light_bin_edges)
+
         Nspatial = length(spatial_edges) - 1
-        losvd_aperture_ranges = [(spatial_edges[ib], spatial_edges[ib + 1]) for ib in 1:Nspatial]
-        velocity_edges_use = velocity_edges === nothing ? build_velocity_edges_auto(v_star_mps[vlos_idx], verr_star_mps[vlos_idx]; Nvbin=Nvbin) : Float64.(velocity_edges)
+
+        losvd_aperture_ranges = [
+            (spatial_edges[ib], spatial_edges[ib + 1])
+            for ib in 1:Nspatial
+        ]
+
+        velocity_edges_use =
+            velocity_edges === nothing ?
+            build_velocity_edges_auto(
+                v_star_mps[vlos_idx],
+                verr_star_mps[vlos_idx];
+                Nvbin=Nvbin,
+            ) :
+            Float64.(velocity_edges)
     end
 
-    Nlight = length(light_edges) - 1
+    Nlight_projected = length(light_edges) - 1
     Nvbin_eff = length(velocity_edges_use) - 1
-    losvd_mode === :karl_mode0_observables && Nvbin_eff != karl_observables.nvel && error("Karl observables velocity-bin count does not match the CSV metadata")
+
+    losvd_mode === :karl_mode0_observables &&
+        Nvbin_eff != karl_observables.nvel &&
+        error("Karl observables velocity-bin count does not match the CSV metadata")
+
     Nlosvd = Nspatial * Nvbin_eff
 
-    force_geometry = haskey(ctx.halo, :stellar_model) ?
+    force_geometry =
+        haskey(ctx.halo, :stellar_model) ?
         stellar_model_geometry(ctx.halo[:stellar_model]) :
         :spherical_shell_grid
-    tracer_mode = _normalize_tracer_constraint_mode(tracer_constraint_mode)
-    stellar_model_state = haskey(ctx.halo, :stellar_model) ? normalize_stellar_model(ctx.halo[:stellar_model]) : nothing
-    tracer_axis_ratio = stellar_model_state === nothing ? 1.0 : max(abs(f64(get(stellar_model_state, :q_axis_ratio, 1.0))), 1.0e-6)
-    tracer_mode === :density_3d && stellar_model_state === nothing && error("density_3d tracer constraint requires a 3-D stellar model")
-    tracer_mode === :density_3d && force_geometry !== :axisymmetric_density_grid && error("density_3d tracer constraint requires geometry=axisymmetric_density_grid")
 
-    third_launches = force_geometry === :axisymmetric_density_grid ?
+    tracer_mode = _normalize_tracer_constraint_mode(tracer_constraint_mode)
+
+    stellar_model_state =
+        haskey(ctx.halo, :stellar_model) ?
+        normalize_stellar_model(ctx.halo[:stellar_model]) :
+        nothing
+
+    tracer_mode === :density_3d &&
+        stellar_model_state === nothing &&
+        error("density_3d tracer constraint requires a 3-D stellar model")
+
+    tracer_mode === :density_3d &&
+        force_geometry !== :axisymmetric_density_grid &&
+        error("density_3d tracer constraint requires geometry=axisymmetric_density_grid")
+
+    d3_radial_edges =
+        losvd_mode === :karl_mode0_observables ?
+        copy(karl_observables.radial_edges_m) :
+        copy(light_edges)
+
+    d3_angular_edges =
+        losvd_mode === :karl_mode0_observables ?
+        copy(karl_observables.angular_edges) :
+        collect(range(0.0, 1.0; length=6))
+
+    # ------------------------------------------------------------------------------------------------
+    # Start D3 tracer construction early.
+    #
+    # This is independent of the model's orbit-family launch construction, so
+    # let another Julia task work on it while this task continues preparing the
+    # shell/family geometry.
+    #
+    # Eventually the normal batch path should pass precomputed_d3_constraints,
+    # because these tracer constraints are observational and do not depend on
+    # MBH / halo parameters.
+    # ------------------------------------------------------------------------------------------------
+
+    d3_task = nothing
+
+    if tracer_mode === :density_3d &&
+       precomputed_d3_constraints === nothing &&
+       parallel_init &&
+       Threads.nthreads() > 1
+
+        d3_task = Threads.@spawn load_karl_d3_tracer_constraints(
+            stellar_model_state,
+            d3_radial_edges,
+            d3_angular_edges,
+        )
+    end
+
+    third_launches =
+        force_geometry === :axisymmetric_density_grid ?
         collect(range(0.0, 1.0; length=max(3, Ntheta_launch))) :
         [1.0]
 
-    families_per_shell = (length(Lfrac) - 1) * length(third_launches) + 1
-    families_per_shell > 0 || error("Karl family grid requires at least one family per radial shell")
+    families_per_shell =
+        (length(Lfrac) - 1) * length(third_launches) + 1
+
+    families_per_shell > 0 ||
+        error("Karl family grid requires at least one family per radial shell")
 
     max_shells = Nbase_orbit ÷ families_per_shell
-    max_shells > 0 || error("Orbit library has only $Nbase_orbit base slots but requires $families_per_shell base slots per radial shell; increase Norbit")
 
-    shells = _build_orbit_shells(R_star_m, light_edges, spatial_edges, max_shells)
-    isempty(shells) && error("Orbit shell grid has no finite positive radii")
-    ctx.R[end] > shells[end] || error("Force grid does not cover orbit shell grid: force_rmax=$(ctx.R[end] / pc) pc shell_rmax=$(shells[end] / pc) pc")
+    max_shells > 0 ||
+        error(
+            "Orbit library has only $Nbase_orbit base slots but requires " *
+            "$families_per_shell base slots per radial shell; increase Norbit"
+        )
+
+    shell_support_edges =
+        tracer_mode === :density_3d ?
+        d3_radial_edges :
+        light_edges
+
+    shells = _build_orbit_shells(
+        R_star_m,
+        shell_support_edges,
+        spatial_edges,
+        max_shells,
+    )
+
+    isempty(shells) &&
+        error("Orbit shell grid has no finite positive radii")
+
+    if tracer_mode === :density_3d
+        shells[end] >= d3_radial_edges[end] ||
+            error(
+                "Orbit shell grid does not cover the D3 tracer grid: " *
+                "shell_rmax=$(shells[end] / pc) pc " *
+                "d3_rmax=$(d3_radial_edges[end] / pc) pc"
+            )
+    end
+
+    ctx.R[end] > shells[end] ||
+        error(
+            "Force grid does not cover orbit shell grid: " *
+            "force_rmax=$(ctx.R[end] / pc) pc " *
+            "shell_rmax=$(shells[end] / pc) pc"
+        )
 
     Nshells = length(shells)
 
-    Nbase_orbit >= Nshells || error("Orbit library has $Nbase_orbit base slots for $Nshells required radial shells; increase Norbit")
+    Nbase_orbit >= Nshells ||
+        error(
+            "Orbit library has $Nbase_orbit base slots for $Nshells " *
+            "required radial shells; increase Norbit"
+        )
 
     full_phase_grid = Nshells * families_per_shell
 
-    Nbase_orbit >= full_phase_grid || error(
-        "Karl normalized family grid requires at least $full_phase_grid base orbits " *
-        "for Nshells=$Nshells, NLfrac=$(length(Lfrac)), and " *
-        "Nthird=$(length(third_launches)); got Nbase_orbit=$Nbase_orbit. " *
-        "Increase Norbit to at least $(2 * full_phase_grid).",
-    )
+    Nbase_orbit >= full_phase_grid ||
+        error(
+            "Karl normalized family grid requires at least $full_phase_grid base orbits " *
+            "for Nshells=$Nshells, NLfrac=$(length(Lfrac)), and " *
+            "Nthird=$(length(third_launches)); got Nbase_orbit=$Nbase_orbit. " *
+            "Increase Norbit to at least $(2 * full_phase_grid)."
+        )
+
+    # ------------------------------------------------------------------------------------------------
+    # Launch family-grid construction as a separate Julia task.
+    #
+    # This lets it overlap D3 tracer loading. After _build_family_launch_grid
+    # itself is threaded across shell_id, this task will fan out across the
+    # available Julia worker pool.
+    # ------------------------------------------------------------------------------------------------
+
+    family_task = nothing
+
+    if parallel_init && Threads.nthreads() > 1
+        family_task = Threads.@spawn _build_family_launch_grid(
+            Nbase_orbit,
+            shells,
+            Lfrac,
+            third_launches,
+            ctx.pot,
+            ctx.frc,
+            force_geometry,
+        )
+    end
+
+    # ------------------------------------------------------------------------------------------------
+    # Do cheap independent allocations while the expensive initialization
+    # tasks are running.
+    # ------------------------------------------------------------------------------------------------
 
     A_losvd = zeros(Float64, Nlosvd, Norbit)
     A_kinematic = zeros(Float64, Nspatial, Norbit)
-    A_light = zeros(Float64, Nlight, Norbit)
 
-    projection_diag_enabled = get(ENV, "OSPM_DIAG_ORBIT_FAMILIES", "0") == "1" && losvd_mode !== :karl_mode0_observables
-    projection_shape = projection_diag_enabled ? (Nspatial, Norbit) : (0, 0)
+    projection_diag_enabled =
+        get(ENV, "OSPM_DIAG_ORBIT_FAMILIES", "0") == "1" &&
+        losvd_mode !== :karl_mode0_observables
+
+    projection_shape =
+        projection_diag_enabled ?
+        (Nspatial, Norbit) :
+        (0, 0)
+
     projection_v3d_mean = fill(NaN, projection_shape...)
     projection_v3d_rms = fill(NaN, projection_shape...)
     projection_abs_vlos_mean = fill(NaN, projection_shape...)
@@ -738,25 +1031,152 @@ function _init_orbit_work(
 
     phase_volume_state = init_karl_phase_volume_state(Nbase_orbit)
 
-    family_grid = _build_family_launch_grid(Nbase_orbit, shells, Lfrac, third_launches, ctx.pot, ctx.frc, force_geometry)
-    launch_order = _balanced_launch_order(family_grid.planned_indices, shells, Lfrac, third_launches, shell_band_count)
-    first_coverage_check = max(1, ceil(Int, fill_pct * length(launch_order)))
+    # ------------------------------------------------------------------------------------------------
+    # Join the expensive initialization tasks.
+    # ------------------------------------------------------------------------------------------------
+
+    d3_constraints =
+        tracer_mode !== :density_3d ?
+        nothing :
+        precomputed_d3_constraints !== nothing ?
+        precomputed_d3_constraints :
+        d3_task !== nothing ?
+        fetch(d3_task) :
+        load_karl_d3_tracer_constraints(
+            stellar_model_state,
+            d3_radial_edges,
+            d3_angular_edges,
+        )
+
+    Nlight =
+        d3_constraints === nothing ?
+        Nlight_projected :
+        length(d3_constraints.target)
+
+    A_light = zeros(Float64, Nlight, Norbit)
+
+    family_grid =
+        family_task !== nothing ?
+        fetch(family_task) :
+        _build_family_launch_grid(
+            Nbase_orbit,
+            shells,
+            Lfrac,
+            third_launches,
+            ctx.pot,
+            ctx.frc,
+            force_geometry,
+        )
+
+    launch_order = _balanced_launch_order(
+        family_grid.planned_indices,
+        shells,
+        Lfrac,
+        third_launches,
+        shell_band_count,
+    )
+
+    first_coverage_check =
+        max(1, ceil(Int, fill_pct * length(launch_order)))
+
     sini_use = clamp01(f64(sini))
     cosi_use = sqrt(max(0.0, 1.0 - sini_use * sini_use))
-    orbit_ctx = (frc=ctx.frc, R_pos=ctx.R, halo=ctx.halo, force_geometry=force_geometry)
 
-    return OrbitWorkState(Norbit, Nbase_orbit, Nstar, Nspatial, Nvbin_eff, Nlosvd, Nlight, Nshells, nsteps, max_attempts_factor,
-        third_launches, family_grid.launch_r0, family_grid.launch_theta0, family_grid.launch_energy, family_grid.launch_lz,
-        sini_use, cosi_use, R_star_m, valid_vec, v_star_mps, verr_star_mps,
-        spatial_edges, light_edges, velocity_edges_use, shells, launch_order,
-        orbit_ctx, ctx.pot, ctx.frc, Lfrac, force_geometry, tracer_mode, tracer_axis_ratio, losvd_mode, losvd_aperture_ranges,
-        losvd_mode === :karl_mode0_observables ? karl_observables : nothing,
-        dt_frac_orbit, t_deadline, fill_pct, regional_floor, max_regional_gap, shell_band_count, max(1, coverage_check_every), Threads.Atomic{Int}(first_coverage_check),
-        A_losvd, A_kinematic, A_light,
-        projection_diag_enabled, projection_v3d_mean, projection_v3d_rms, projection_abs_vlos_mean, projection_vlos_rms, projection_abs_vlos_over_v3d_mean, projection_los_ratio_lt_0p25, projection_los_ratio_lt_0p5,
-        success_flags, attempts_used, min_r_reached, rapo_list, failure_stage, launch_failure_state, sos_points, integration_points, integration_termination,
-        initial_energy_diag, final_energy_diag, max_energy_drift, max_relative_energy_drift,
-        phase_volume_state, Threads.Atomic{Int}(1), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), Threads.Atomic{Int}(0), ReentrantLock(),
+    orbit_ctx = (
+        frc=ctx.frc,
+        R_pos=ctx.R,
+        halo=ctx.halo,
+        force_geometry=force_geometry,
+    )
+
+    return OrbitWorkState(
+        Norbit,
+        Nbase_orbit,
+        Nstar,
+        Nspatial,
+        Nvbin_eff,
+        Nlosvd,
+        Nlight,
+        Nshells,
+        nsteps,
+        max_attempts_factor,
+
+        third_launches,
+        family_grid.launch_r0,
+        family_grid.launch_theta0,
+        family_grid.launch_energy,
+        family_grid.launch_lz,
+
+        sini_use,
+        cosi_use,
+        R_star_m,
+        valid_vec,
+        v_star_mps,
+        verr_star_mps,
+
+        spatial_edges,
+        light_edges,
+        velocity_edges_use,
+        shells,
+        launch_order,
+
+        orbit_ctx,
+        ctx.pot,
+        ctx.frc,
+        Lfrac,
+        force_geometry,
+        tracer_mode,
+        d3_constraints,
+        losvd_mode,
+        losvd_aperture_ranges,
+
+        losvd_mode === :karl_mode0_observables ?
+        karl_observables :
+        nothing,
+
+        dt_frac_orbit,
+        t_deadline,
+        fill_pct,
+        regional_floor,
+        max_regional_gap,
+        shell_band_count,
+        max(1, coverage_check_every),
+        Threads.Atomic{Int}(first_coverage_check),
+
+        A_losvd,
+        A_kinematic,
+        A_light,
+
+        projection_diag_enabled,
+        projection_v3d_mean,
+        projection_v3d_rms,
+        projection_abs_vlos_mean,
+        projection_vlos_rms,
+        projection_abs_vlos_over_v3d_mean,
+        projection_los_ratio_lt_0p25,
+        projection_los_ratio_lt_0p5,
+
+        success_flags,
+        attempts_used,
+        min_r_reached,
+        rapo_list,
+        failure_stage,
+        launch_failure_state,
+        sos_points,
+        integration_points,
+        integration_termination,
+
+        initial_energy_diag,
+        final_energy_diag,
+        max_energy_drift,
+        max_relative_energy_drift,
+
+        phase_volume_state,
+        Threads.Atomic{Int}(1),
+        Threads.Atomic{Int}(0),
+        Threads.Atomic{Int}(0),
+        Threads.Atomic{Int}(0),
+        ReentrantLock(),
     )
 end
 
@@ -1189,13 +1609,13 @@ function _orbit_library_usable(st::OrbitWorkState, successful_columns::Vector{In
         activity = sum(abs, @view(st.A_light[row, successful_columns]))
         if !(isfinite(activity) && activity > 0.0)
             push!(bad_light_rows, row)
-            println(
-                "[ORBIT LIBRARY BAD LIGHT ROW]",
-                " row=", row,
-                " constraint_inner_pc=", st.light_edges[row] / pc,
-                " constraint_outer_pc=", st.light_edges[row + 1] / pc,
-                " activity=", activity,
-            )
+            if st.d3_constraints === nothing
+                println("[ORBIT LIBRARY BAD LIGHT ROW]", " row=", row, " constraint_inner_pc=", st.light_edges[row] / pc, " constraint_outer_pc=", st.light_edges[row + 1] / pc, " activity=", activity)
+            else
+                ir = st.d3_constraints.row_radial[row]
+                iv = st.d3_constraints.row_angular[row]
+                println("[ORBIT LIBRARY BAD LIGHT ROW]", " row=", row, " radial_bin=", ir, " angular_bin=", iv, " constraint_inner_pc=", st.d3_constraints.radial_edges_m[ir] / pc, " constraint_outer_pc=", st.d3_constraints.radial_edges_m[ir + 1] / pc, " activity=", activity)
+            end
         end
     end
     if !isempty(bad_columns) || !isempty(bad_light_rows)
@@ -2143,15 +2563,7 @@ function _orbit_worker!(st::OrbitWorkState)
         fill!(projection_ratio_ret_lt_0p5, 0)
 
         @inbounds for k in 1:Nhits
-            constraint_radius = s_arr[k]
-            if st.tracer_constraint_mode === :density_3d
-                rk = f64(r[k])
-                sk, ck = _sincos_safe(f64(theta[k]))
-                R_intrinsic = rk * sk
-                z_intrinsic = rk * ck
-                constraint_radius = sqrt(R_intrinsic * R_intrinsic + (z_intrinsic / st.tracer_axis_ratio) * (z_intrinsic / st.tracer_axis_ratio))
-            end
-            il = _bin_index(st.light_edges, constraint_radius)
+            il = st.tracer_constraint_mode === :density_3d ? karl_d3_tracer_row(st.d3_constraints, f64(r[k]), f64(theta[k])) : _bin_index(st.light_edges, s_arr[k])
             il > 0 && (col_light[il] += 1.0)
 
             if st.losvd_target_mode === :karl_mode0_observables
@@ -2392,7 +2804,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     A = vcat(A_losvd, A_light)
     if diag
         losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = _observed_targets_for_mode(R_star_m, has_vlos, v_star_mps, verr_star_mps, st, surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
-        light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, stellar_model_jl, projected_light_target, projected_light_sigma, st.light_edges)
+        light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, projected_light_target, projected_light_sigma, st.d3_constraints)
         return (
             A,
             Dict(
@@ -2502,8 +2914,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         " slurm_cpus=", get(ENV, "SLURM_CPUS_PER_TASK", "local"),
         " threads_per_model=", threads_per_model,
         " model_owner_limit_requested=", model_owner_limit,
-        " losvd_target_mode=", losvd_target_mode_sym,
-    )
+        " losvd_target_mode=", losvd_target_mode_sym)
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
     tracer_constraint_mode_sym = _normalize_tracer_constraint_mode(tracer_constraint_mode)
@@ -2565,21 +2976,17 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     wphase_pair_max_relative_mismatch = fill(NaN, nbatch)
     work_states = Vector{Union{Nothing, OrbitWorkState}}(undef, nbatch)
     fill!(work_states, nothing)
+    work_states_lock = ReentrantLock()
     next_theta = Threads.Atomic{Int}(1)
     nthreads = Threads.nthreads()
 
-    owner_limit = if model_owner_limit > 0
-        clamp(model_owner_limit, 1, min(nthreads, nbatch))
-    else
-        min(nbatch, max(1, cld(nthreads, threads_per_model)))
-    end
+    workers_per_model = min(threads_per_model, nthreads)
+    max_parallel_models = max(1, fld(nthreads, workers_per_model))
+    owner_limit = model_owner_limit > 0 ? min(model_owner_limit, nbatch, max_parallel_models) : min(nbatch, max_parallel_models)
 
-    group_base = fld(nthreads, owner_limit)
-    group_remainder = rem(nthreads, owner_limit)
-    group_sizes = [group_base + (igroup <= group_remainder ? 1 : 0) for igroup in 1:owner_limit]
     scheduler_counters = (orbit_models=Threads.Atomic{Int}(0), orbit_workers=Threads.Atomic{Int}(0), helper_workers=Threads.Atomic{Int}(0), weight_models=Threads.Atomic{Int}(0), active_model_owners=Threads.Atomic{Int}(0), completed_models=Threads.Atomic{Int}(0), stop_monitor=Threads.Atomic{Int}(0))
     scheduler_started_ns = time_ns()
-    println("[SCHED] julia_threads=", nthreads, " threads_per_model=", threads_per_model, " model_groups=", owner_limit, " group_sizes=", join(group_sizes, ","))
+    println("[SCHED] julia_threads=", nthreads, " workers_per_model=", workers_per_model, " max_parallel_models=", max_parallel_models, " active_model_limit=", owner_limit)
     if get(ENV, "OSPM_DIAG_JULIA_HANDOFF", "0") == "1"
         if losvd_target_mode_sym === :karl_resolved_stars
             println("[JULIA OBSERVABLES] mode=", losvd_target_mode_sym, " Nvbin=", Nvbin, " kde_grid=", karl_resolved_kde_grid, " kde_width_bins=", karl_resolved_kde_width_bins, " vmin_kms=", karl_resolved_vmin_kms, " vmax_kms=", karl_resolved_vmax_kms)
@@ -2598,7 +3005,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         weight_models = scheduler_counters.weight_models[]
         other_models = max(0, claimed - completed - orbit_models - weight_models)
         elapsed_s = (time_ns() - scheduler_started_ns) / 1e9
-        println("[SCHED DIAG] elapsed_s=", round(elapsed_s; digits=1), " claimed=", claimed, " queued=", nbatch - claimed, " completed=", completed, " orbit_models=", orbit_models, " orbit_workers=", scheduler_counters.orbit_workers[], " helper_workers=", scheduler_counters.helper_workers[], " weight_models=", weight_models, " active_model_owners=", scheduler_counters.active_model_owners[], " model_owner_limit=", owner_limit, " threads_per_model_target=", threads_per_model, " group_sizes=", join(group_sizes, ","), " other_models=", other_models, " julia_threads=", nthreads)
+        println("[SCHED DIAG] elapsed_s=", round(elapsed_s; digits=1), " claimed=", claimed, " queued=", nbatch - claimed, " completed=", completed, " orbit_models=", orbit_models, " orbit_workers=", scheduler_counters.orbit_workers[], " helper_workers=", scheduler_counters.helper_workers[], " weight_models=", weight_models, " active_model_owners=", scheduler_counters.active_model_owners[], " workers_per_model=", workers_per_model, " max_parallel_models=", max_parallel_models, " active_model_limit=", owner_limit, " other_models=", other_models, " julia_threads=", nthreads)
         return nothing
     end
     function _store_weight_diagnostics!(i::Int, w_best::Vector{Float64})
@@ -2726,15 +3133,25 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     end
                     ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, required_rmax_m=required_force_rmax_m, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
                     ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables)
-                    work_states[i] = ws
+                    lock(work_states_lock)
+                    try
+                        work_states[i] = ws
+                    finally
+                        unlock(work_states_lock)
+                    end
                     planned_base_orbits[i] = length(ws.launch_order)
                     if i == 1
-                        println("[MODEL GRID] tracer_bins=", ws.Nlight, " apertures=", ws.Nspatial, " Nvbin=", ws.Nvbin, " shells=", ws.Nshells, " constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin, " R_tracer_max_pc=", ws.light_edges[end] / pc, " R_aperture_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc, " R_shell_max_pc=", ws.shells[end] / pc)
+                        println("[MODEL GRID] tracer_bins=", ws.Nlight, " apertures=", ws.Nspatial, " Nvbin=", ws.Nvbin, " shells=", ws.Nshells, " constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin, " R_tracer_max_pc=", (ws.d3_constraints === nothing ? ws.light_edges[end] : ws.d3_constraints.radial_edges_m[end]) / pc, " R_aperture_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc, " R_shell_max_pc=", ws.shells[end] / pc)
                     end
+
                     Threads.atomic_add!(scheduler_counters.orbit_models, 1)
                     try
                         Threads.atomic_xchg!(ws.phase, 1)
-                        _run_orbit_worker!(ws; scheduler_counters=scheduler_counters)
+
+                        @sync for _ in 1:workers_per_model
+                            Threads.@spawn _run_orbit_worker!(ws; scheduler_counters=scheduler_counters)
+                        end
+
                         _close_orbit_phase!(ws)
                     finally
                         Threads.atomic_add!(scheduler_counters.orbit_models, -1)
@@ -2743,6 +3160,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                             orbit_owner_slot_held = false
                         end
                     end
+
                     coverage = _assess_orbit_coverage(ws; fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count)
                     coverage_deadline_hit[i] = time_ns() > theta_deadline
                     successful_base_orbits[i] = coverage.succeeded
@@ -2765,10 +3183,10 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     if !coverage.accepted
                         _print_orbit_failure_diagnostics(ws, i)
 
-                        println("[ORBIT COVERAGE WARNING] i=", i, " region=", coverage_meta.issue_region, " axis=", coverage_meta.issue_axis, " shell_bands=", isempty(coverage_meta.issue_shell_bands) ? "none" : coverage_meta.issue_shell_bands, 
-                        " succeeded=", coverage.succeeded, " attempted=", coverage.attempted, " planned=", coverage.planned, " required=", coverage.required, " coverage_fraction=", coverage.coverage_fraction, " attempted_fraction=", 
-                        coverage.attempted_fraction, " success_fraction=", coverage.success_fraction, " shell_min=", coverage.shell_minimum_coverage, " lfrac_min=", coverage.lfrac_minimum_coverage, " theta_min=", coverage.theta_minimum_coverage, 
-                        " shell_gap=", coverage.shell_coverage_gap, " lfrac_gap=", coverage.lfrac_coverage_gap, " theta_gap=", coverage.theta_coverage_gap, " joint_holes=", length(coverage.joint_holes), " deadline_hit=", coverage_deadline_hit[i], 
+                        println("[ORBIT COVERAGE WARNING] i=", i, " region=", coverage_meta.issue_region, " axis=", coverage_meta.issue_axis, " shell_bands=", isempty(coverage_meta.issue_shell_bands) ? "none" : coverage_meta.issue_shell_bands,
+                        " succeeded=", coverage.succeeded, " attempted=", coverage.attempted, " planned=", coverage.planned, " required=", coverage.required, " coverage_fraction=", coverage.coverage_fraction, " attempted_fraction=",
+                        coverage.attempted_fraction, " success_fraction=", coverage.success_fraction, " shell_min=", coverage.shell_minimum_coverage, " lfrac_min=", coverage.lfrac_minimum_coverage, " theta_min=", coverage.theta_minimum_coverage,
+                        " shell_gap=", coverage.shell_coverage_gap, " lfrac_gap=", coverage.lfrac_coverage_gap, " theta_gap=", coverage.theta_coverage_gap, " joint_holes=", length(coverage.joint_holes), " deadline_hit=", coverage_deadline_hit[i],
                         " reasons=", isempty(coverage_meta.reasons) ? "none" : coverage_meta.reasons)
                     end
                     if !_orbit_library_usable(ws, coverage.successful_columns)
@@ -2824,27 +3242,29 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
-                    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = _observed_targets_for_mode(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws, 
-                    surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, 
+                    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = _observed_targets_for_mode(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws,
+                    surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins,
                     karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
-                    light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, stellar_model_jl, projected_light_target, projected_light_sigma, ws.light_edges)
+                    light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, projected_light_target, projected_light_sigma, ws.d3_constraints)
                     light_fit_mask = trues(length(light_target))
                     any(light_fit_mask) || error("No tracer-constraint bins are available")
                     A_light_fit = A_light
                     light_target_fit = light_target
                     light_sigma_fit = light_sigma
                     if i == 1
+                        tracer_rmax_m = ws.d3_constraints === nothing ? ws.light_edges[end] : ws.d3_constraints.radial_edges_m[end]
                         println("[TRACER CONFIG]",
                             " mode=", tracer_constraint_mode_sym,
                             " bins=", length(light_target_fit),
-                            " Rmax_pc=", ws.light_edges[end] / pc,
+                            " Rmax_pc=", tracer_rmax_m / pc,
                             " target_sum=", sum(light_target_fit))
                         if get(ENV, "OSPM_DIAG_TRACER", "0") == "1"
-                            println("[TRACER CONFIG DETAIL]",
-                                " projected_target_l1=", sum(abs.(light_target_fit .- projected_light_target)),
-                                " sigma_min=", minimum(light_sigma_fit),
-                                " sigma_max=", maximum(light_sigma_fit),
-                                " R_kin_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc)
+                            if ws.d3_constraints === nothing
+                                println("[TRACER CONFIG DETAIL]", " projected_target_l1=", sum(abs.(light_target_fit .- projected_light_target)), " sigma_min=", minimum(light_sigma_fit), " sigma_max=", maximum(light_sigma_fit), " R_kin_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc)
+                            else
+                                d3_radial_target = karl_d3_radial_target(ws.d3_constraints)
+                                println("[TRACER CONFIG DETAIL]", " radial_target_l1_vs_projected=", sum(abs.(d3_radial_target .- projected_light_target)), " radial_bins=", ws.d3_constraints.nradial, " angular_bins=", ws.d3_constraints.nangular, " inner_theta_collapsed=true", " sigma_min=", minimum(light_sigma_fit), " sigma_max=", maximum(light_sigma_fit), " R_kin_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc)
+                            end
                         end
                     end
                     Threads.atomic_add!(scheduler_counters.weight_models, 1)
@@ -2852,8 +3272,8 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     ok = false
                     wdiag = nothing
                     try
-                        w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin, 
-                        alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i), 
+                        w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin,
+                        alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i),
                         entropy_floor=entropy_floor, apfac=apfac, return_diag=true)
                     finally
                         Threads.atomic_add!(scheduler_counters.weight_models, -1)
@@ -2862,7 +3282,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                 _store_solver_diagnostics!(i, wdiag)
                 if length(w) == size(A_light_fit, 2) && all(isfinite, w)
                     print_tracer_bins = get(ENV, "OSPM_DIAG_TRACER", "0") == "1"
-                    _print_tracer_bin_diagnostics(A_light_fit, w, light_target_fit, light_sigma_fit, ws.light_edges; model_index=i, print_bins=print_tracer_bins)
+                    _print_tracer_bin_diagnostics(A_light_fit, w, light_target_fit, light_sigma_fit, ws.light_edges; model_index=i, print_bins=print_tracer_bins, d3_constraints=ws.d3_constraints)
                 end
                 finite_weight_solution = length(w) == size(A_losvd, 2) && all(isfinite, w)
                 cl = Inf
@@ -2917,22 +3337,13 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         jfit = argmax(light_sigma_residual_fit)
                         fitted_indices = findall(light_fit_mask)
                         jfull = fitted_indices[jfit]
-                        println(
-                            "[KARL TRACER FAIL BIN]",
-                            " fit_idx=", jfit,
-                            " full_idx=", jfull,
-                            " constraint_inner_pc=", ws.light_edges[jfull] / pc,
-                            " constraint_outer_pc=", ws.light_edges[jfull + 1] / pc,
-                            " target=", light_target_fit[jfit],
-                            " model=", light_model_fit[jfit],
-                            " relative_error=", light_relative_fit[jfit],
-                            " normalization_error=", _wdiag_value(wdiag, :normalization_error, NaN),
-                            " N_active_bound=", _wdiag_value(wdiag, :n_active_bound, 0),
-                            " active_passes=", _wdiag_value(wdiag, :active_passes, 0),
-                            " sigma=", light_sigma_fit[jfit],
-                            " sigma_residual=", light_sigma_residual_fit[jfit],
-                            " chi2_losvd=", chi2_losvd[i],
-                        )
+                        if ws.d3_constraints === nothing
+                            println("[KARL TRACER FAIL BIN]", " fit_idx=", jfit, " full_idx=", jfull, " constraint_inner_pc=", ws.light_edges[jfull] / pc, " constraint_outer_pc=", ws.light_edges[jfull + 1] / pc, " target=", light_target_fit[jfit], " model=", light_model_fit[jfit], " relative_error=", light_relative_fit[jfit], " normalization_error=", _wdiag_value(wdiag, :normalization_error, NaN), " N_active_bound=", _wdiag_value(wdiag, :n_active_bound, 0), " active_passes=", _wdiag_value(wdiag, :active_passes, 0), " sigma=", light_sigma_fit[jfit], " sigma_residual=", light_sigma_residual_fit[jfit], " chi2_losvd=", chi2_losvd[i])
+                        else
+                            ir = ws.d3_constraints.row_radial[jfull]
+                            iv = ws.d3_constraints.row_angular[jfull]
+                            println("[KARL TRACER FAIL BIN]", " fit_idx=", jfit, " full_idx=", jfull, " radial_bin=", ir, " angular_bin=", iv, " constraint_inner_pc=", ws.d3_constraints.radial_edges_m[ir] / pc, " constraint_outer_pc=", ws.d3_constraints.radial_edges_m[ir + 1] / pc, " target=", light_target_fit[jfit], " model=", light_model_fit[jfit], " relative_error=", light_relative_fit[jfit], " normalization_error=", _wdiag_value(wdiag, :normalization_error, NaN), " N_active_bound=", _wdiag_value(wdiag, :n_active_bound, 0), " active_passes=", _wdiag_value(wdiag, :active_passes, 0), " sigma=", light_sigma_fit[jfit], " sigma_residual=", light_sigma_residual_fit[jfit], " chi2_losvd=", chi2_losvd[i])
+                        end
                     else
                         println(
                             "[KARL TRACER FAIL BIN] unavailable=true",
@@ -2972,28 +3383,12 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                 end
                 continue
             end
-            helped = false
-            scan_start = mod1(tid, nbatch)
-            for offset in 0:(nbatch - 1)
-                scan = mod1(scan_start + offset, nbatch)
-                ws_scan = work_states[scan]
-                ws_scan === nothing && continue
-                ws_scan.phase[] != 1 && continue
-                time_ns() > ws_scan.t_deadline && continue
-                ws_scan.next_orbit[] > length(ws_scan.launch_order) && continue
-                try
-                    helped = _run_orbit_worker!(ws_scan; scheduler_counters=scheduler_counters, helper=true)
-                catch e
-                    @warn "tail orbit helper exception on i=$scan" exception=(e, catch_backtrace())
-                end
-                helped && break
-            end
-            if !helped
-                scheduler_counters.completed_models[] >= nbatch && break
-                sleep(0.001)
-            end
+
+            scheduler_counters.completed_models[] >= nbatch && break
+            sleep(0.001)
         end
     end
+
     monitor_task = Threads.@spawn begin
         last_report_ns = scheduler_started_ns
         while scheduler_counters.stop_monitor[] == 0
@@ -3014,13 +3409,14 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         wait(monitor_task)
     end
     _print_scheduler_diagnostics!()
-    return (status, chi2_losvd, chi2_inner, chi2_outer, delta_chi2_iteration, max_light_relative_residual, max_light_sigma_residual, light_constraint_ok, solver_converged, solver_iterations, 
-    solver_failure_reason, N_inner, N_outer, N_nonzero_weights, effective_N_orbits, max_weight_fraction, coverage_status, coverage_issue_region, coverage_issue_axis, 
-    coverage_issue_shell_bands, coverage_reasons, coverage_fraction, coverage_attempted_fraction, coverage_success_fraction, coverage_shell_min, coverage_lfrac_min, 
-    coverage_theta_min, coverage_shell_gap, coverage_lfrac_gap, coverage_theta_gap, coverage_joint_holes, coverage_deadline_hit, successful_base_orbits, planned_base_orbits, 
-    phase_volume_valid, phase_volume_convention, phase_volume_normalization, phase_volume_launches_recorded, phase_volume_sos_recorded, phase_volume_valid_base_orbits, 
-    phase_volume_invalid_recorded_orbits, phase_volume_nested_groups, phase_volume_duplicate_area_clusters, phase_volume_duplicate_area_orbits, raw_phase_volume_min, 
+    return (status, chi2_losvd, chi2_inner, chi2_outer, delta_chi2_iteration, max_light_relative_residual, max_light_sigma_residual, light_constraint_ok, solver_converged, solver_iterations,
+    solver_failure_reason, N_inner, N_outer, N_nonzero_weights, effective_N_orbits, max_weight_fraction, coverage_status, coverage_issue_region, coverage_issue_axis,
+    coverage_issue_shell_bands, coverage_reasons, coverage_fraction, coverage_attempted_fraction, coverage_success_fraction, coverage_shell_min, coverage_lfrac_min,
+    coverage_theta_min, coverage_shell_gap, coverage_lfrac_gap, coverage_theta_gap, coverage_joint_holes, coverage_deadline_hit, successful_base_orbits, planned_base_orbits,
+    phase_volume_valid, phase_volume_convention, phase_volume_normalization, phase_volume_launches_recorded, phase_volume_sos_recorded, phase_volume_valid_base_orbits,
+    phase_volume_invalid_recorded_orbits, phase_volume_nested_groups, phase_volume_duplicate_area_clusters, phase_volume_duplicate_area_orbits, raw_phase_volume_min,
     raw_phase_volume_max, raw_phase_volume_dynamic_range, normalized_phase_volume_min, normalized_phase_volume_max, wphase_min, wphase_max, wphase_dynamic_range, wphase_pair_max_relative_mismatch)
 end
+
 
 end # module
