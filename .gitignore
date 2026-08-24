@@ -43,3 +43,5 @@ utils/local_cockpit
 utils/local_snapshot
 utils/plot_reduced
 Data/Galaxy_Profiles/*/default/*.png
+OSPM_V2.sublime-project
+OSPM_V2.sublime-workspace
