@@ -1,0 +1,120 @@
+import argparse
+import numpy as np
+import pandas as pd
+
+
+def interp_log_sigma(r_eval, r_prof, sigma_prof):
+    """
+    Interpolate Sigma(R) in log-log space.
+    This is safer for a steep dwarf-galaxy profile.
+    """
+    good = (r_prof > 0) & (sigma_prof > 0)
+
+    r_prof = r_prof[good]
+    sigma_prof = sigma_prof[good]
+
+    log_r = np.log(r_prof)
+    log_s = np.log(sigma_prof)
+
+    log_eval = np.log(r_eval)
+
+    log_sigma_eval = np.interp(
+        log_eval,
+        log_r,
+        log_s,
+        left=log_s[0],
+        right=log_s[-1],
+    )
+
+    return np.exp(log_sigma_eval)
+
+
+def integrate_annulus(rin, rout, r_prof, sigma_prof, n_grid=2048):
+    """
+    Compute 2 pi int Sigma(R) R dR over one projected annulus.
+    """
+    if rin <= 0:
+        r_grid = np.linspace(1.0e-6, rout, n_grid)
+    else:
+        r_grid = np.linspace(rin, rout, n_grid)
+
+    sigma_grid = interp_log_sigma(r_grid, r_prof, sigma_prof)
+
+    integrand = 2.0 * np.pi * sigma_grid * r_grid
+
+    return np.trapezoid(integrand, r_grid)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Map Segue 1 digitized surface-density profile onto LOSVD bins."
+    )
+
+    parser.add_argument(
+        "--sb",
+        default="Segue1_NO09_digitized_profile.csv",
+        help="Digitized Segue 1 tracer profile CSV.",
+    )
+
+    parser.add_argument(
+        "--bins",
+        default="Segue1_Simon_kinematic_bins_v2.csv",
+        help="LOSVD radial-bin CSV.",
+    )
+
+    parser.add_argument(
+        "--out",
+        default="Segue1_SB_mapped_to_LOSVD_bins.csv",
+        help="Output CSV.",
+    )
+
+    args = parser.parse_args()
+
+    sb = pd.read_csv(args.sb)
+    bins = pd.read_csv(args.bins)
+
+    # Use the physical projected profile.
+    r_prof = sb["rmid_pc"].to_numpy()
+    sigma_prof = sb["sigma_pc2"].to_numpy()
+
+    # Use the clean bin edges if they exist.
+    if {"rin_pc_edge", "rout_pc_edge"}.issubset(bins.columns):
+        rin_col = "rin_pc_edge"
+        rout_col = "rout_pc_edge"
+    else:
+        rin_col = "rin_pc_data_min"
+        rout_col = "rout_pc_data_max"
+
+    rows = []
+
+    for _, b in bins.iterrows():
+        kin_bin = int(b["kin_bin"])
+        rin = float(b[rin_col])
+        rout = float(b[rout_col])
+
+        tracer_weight = integrate_annulus(rin, rout, r_prof, sigma_prof)
+
+        rows.append(
+            {
+                "kin_bin": kin_bin,
+                "rin_pc": rin,
+                "rout_pc": rout,
+                "rmid_pc": 0.5 * (rin + rout),
+                "tracer_weight": tracer_weight,
+            }
+        )
+
+    out = pd.DataFrame(rows)
+
+    total = out["tracer_weight"].sum()
+    out["tracer_fraction"] = out["tracer_weight"] / total
+
+    out.to_csv(args.out, index=False)
+
+    print(f"Saved {args.out}")
+    print()
+    print(out.to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

@@ -7,11 +7,9 @@
 # closures, halo-context caching, and direct force/mass diagnostics.
 # Function names and public contracts are preserved.
 # ============================================================
-
 # ============================================================
 # §4  HALO PHYSICS
 # ============================================================
-
 
 @inline function karl_m_ellipsoidal(r::Float64, theta::Float64, qdm::Float64)
     q = max(abs(qdm), 1e-6)
@@ -55,26 +53,16 @@ end
     return xrho * num / max(den, 1e-30)
 end
 
-@inline function nonsingular_isothermal_density_cylindrical(
-    R::Float64,
-    z::Float64,
-    halo,
-)
+@inline function nonsingular_isothermal_density_cylindrical( R::Float64, z::Float64, halo)
     q = halo_q_axis_ratio(halo)
     v0 = f64(halo[:v0_ms])
     rc = max(f64(halo[:rc_m]), 1e-30)
-
     q2 = q * q
     R2 = R * R
     z2 = z * z
     rc2 = rc * rc
-
-    numerator =
-        (2.0 * q2 + 1.0) * rc2 +
-        R2 +
-        (2.0 - 1.0 / q2) * z2
+    numerator = (2.0 * q2 + 1.0) * rc2 + R2 + (2.0 - 1.0 / q2) * z2
     denominator = (rc2 + R2 + z2 / q2)^2
-
     return (v0 * v0 / (4.0 * pi * G * q2)) *
            numerator / max(denominator, 1e-30)
 end
@@ -82,7 +70,6 @@ end
 function karl_halo_from_params(; ihalo::Int=4, qdm::Float64=1.0, dis::Float64=1.0, v0::Float64=0.0, rc_pc::Float64=1.0, xmgamma::Float64=0.0, rsgamma_pc::Float64=1.0, gamma::Float64=1.0, cnfw::Float64=1.0, rsnfw_pc::Float64=1.0, gdennorm::Float64=1.0)
     return Dict{Symbol,Any}( :type => :karl_halo, :ihalo => ihalo, :qdm => qdm, :dis => dis, :v0 => v0, :rc_pc => rc_pc, :xmgamma => xmgamma, :rsgamma_pc => rsgamma_pc, :gamma => gamma, :cnfw => cnfw, :rsnfw_pc => rsnfw_pc, :gdennorm => gdennorm)
 end
-
 
 @inline function karl_halo_sig(halo)
     h = normalize_halo(halo)
@@ -208,9 +195,9 @@ end
     if stype === :plummer
         return hash((stype, geom, get(sm, :Ltot, nothing), get(sm, :a_pc, nothing)))
     elseif stype === :karl_light_grid
-        return hash((stype, geom, get(sm, :grid_csv, nothing), get(sm, :Ltot, nothing), get(sm, :radius_col, nothing), 
-        get(sm, :theta_col, nothing), get(sm, :nu_col, nothing), get(sm, :lenc_frac_col, nothing), get(sm, :R_cyl_col, nothing), 
-        get(sm, :z_col, nothing), get(sm, :volume_col, nothing), get(sm, :luminosity_col, nothing), get(sm, :q_axis_ratio, nothing), 
+        return hash((stype, geom, get(sm, :grid_csv, nothing), get(sm, :Ltot, nothing), get(sm, :radius_col, nothing),
+        get(sm, :theta_col, nothing), get(sm, :nu_col, nothing), get(sm, :lenc_frac_col, nothing), get(sm, :R_cyl_col, nothing),
+        get(sm, :z_col, nothing), get(sm, :volume_col, nothing), get(sm, :luminosity_col, nothing), get(sm, :q_axis_ratio, nothing),
         get(sm, :force_softening_pc, nothing), get(sm, :force_nR, nothing), get(sm, :force_nZ, nothing), get(sm, :force_nphi, nothing)))
     end
     return hash((stype, geom, get(sm, :Ltot, nothing)))
@@ -400,9 +387,11 @@ function build_axisymmetric_force_table( grid, ML::Float64; nR::Int=96, nZ::Int=
     FZ = zeros(Float64, nR, nZ)
     Phi = zeros(Float64, nR, nZ)
     M_cells = Float64.( ML .* grid.L_cell .* Msun)
-    @inbounds for i in 1:nR
+    # Every table cell is independent.  This table is now built only once for
+    # a given stellar model, so use the full Julia pool for that one-time cost.
+    Threads.@threads :dynamic for i in 1:nR
         Rf = R_axis[i]
-        for j in 1:nZ
+        @inbounds for j in 1:nZ
             zf = z_axis[j]
             fr, fz, phi =
                 _axisym_force_from_mass_cells( Rf, zf, grid.R_m, grid.z_m, M_cells, grid.soft_m; nphi=nphi, return_potential=true)
@@ -487,8 +476,6 @@ end
     Phi22 = table.Phi[i + 1, j + 1]
     return (1.0 - t) * (1.0 - u) * Phi11 + t * (1.0 - u) * Phi21 + (1.0 - t) * u * Phi12 + t * u * Phi22
 end
-
-
 
 @inline function _interp_axisym_force(table, Rf::Float64, zf::Float64)
     R = max(abs(Rf), table.R_axis[1])
@@ -593,6 +580,20 @@ end
 function halo_from_theta(rho_s, r_s, MBH, ML; halo_type="nfw", alpha=nothing, stellar_model=nothing, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
     ht = Symbol(lowercase(String(halo_type)))
     qh = max(abs(f64(halo_q_axis_ratio)), 1e-6)
+    if ht === :karl_halo
+        error(
+            "halo_type='karl_halo' is disabled: its density functions use parsec-valued " *
+            "radii, while the current halo-table path supplies radii in meters. Repair and " *
+            "validate that unit contract before enabling this mode."
+        )
+    end
+    if abs(qh - 1.0) > 1e-8
+        error(
+            "Flattened halo forces are disabled: the axisymmetric halo force table is not " *
+            "paired with the same axisymmetric potential used for orbit launch energy. " *
+            "Use halo_q_axis_ratio=1.0 until that force-potential pair is repaired."
+        )
+    end
     rs_pc = f64(r_s)
     if ht === :nonsingular_isothermal
         rc_pc = max(rs_pc, 1e-12)
@@ -723,6 +724,71 @@ function build_karl_light_grid_model(stellar_model)
     return ( R_m = Float64.(rs) .* pc, Lenc_frac = Float64.(fs), Ltot = f64(sm[:Ltot]) )
 end
 
+# The stellar geometry is fixed throughout a daemon run.  Its force and
+# potential are exactly linear in M/L, so cache a unit-M/L component instead
+# of rebuilding the same 96×96×32 table for every proposed parameter point.
+const _STELLAR_COMPONENT_CACHE = Dict{UInt64,Any}()
+const _STELLAR_COMPONENT_LOCK = ReentrantLock()
+
+function _build_unit_stellar_component(stellar_model)
+    sm = normalize_stellar_model(stellar_model)
+    stype = stellar_model_type(sm)
+    geom = stellar_model_geometry(sm)
+
+    stype === :karl_light_grid ||
+        error("Unit stellar-component caching is only used for karl_light_grid models")
+
+    if geom === :axisymmetric_density_grid
+        grid = build_axisymmetric_light_grid_model(sm)
+        nR = haskey(sm, :force_nR) ? Int(f64(sm[:force_nR])) : 96
+        nZ = haskey(sm, :force_nZ) ? Int(f64(sm[:force_nZ])) : 96
+        nphi = haskey(sm, :force_nphi) ? Int(f64(sm[:force_nphi])) : 32
+        table = build_axisymmetric_force_table(grid, 1.0; nR=nR, nZ=nZ, nphi=nphi)
+        return (grid=grid, axis_table=table, geometry=geom)
+    end
+
+    grid = build_karl_light_grid_model(sm)
+    return (grid=grid, axis_table=nothing, geometry=geom)
+end
+
+function _get_unit_stellar_component(stellar_model)
+    sig = stellar_model_sig(stellar_model)
+
+    lock(_STELLAR_COMPONENT_LOCK)
+    try
+        cached = get(_STELLAR_COMPONENT_CACHE, sig, nothing)
+        cached !== nothing && return cached
+
+        started_ns = time_ns()
+        println(
+            "[STELLAR FORCE CACHE] building unit-ML component",
+            " geometry=", stellar_model_geometry(stellar_model),
+            " julia_threads=", Threads.nthreads(),
+        )
+        flush(stdout)
+
+        component = _build_unit_stellar_component(stellar_model)
+        _STELLAR_COMPONENT_CACHE[sig] = component
+
+        println(
+            "[STELLAR FORCE CACHE] ready",
+            " elapsed_s=", round((time_ns() - started_ns) / 1e9; digits=2),
+        )
+        flush(stdout)
+        return component
+    finally
+        unlock(_STELLAR_COMPONENT_LOCK)
+    end
+end
+
+function prewarm_stellar_force_cache(stellar_model)
+    stellar_model === nothing && return nothing
+    sm = normalize_stellar_model(stellar_model)
+    stellar_model_type(sm) === :karl_light_grid || return nothing
+    _get_unit_stellar_component(sm)
+    return nothing
+end
+
 function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
     halo = normalize_halo(halo)
     MBH  = f64(halo[:MBH])
@@ -739,16 +805,9 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
     if has_stars
         stype0 = stellar_model_type(stellar_model)
         if stype0 === :karl_light_grid
-            if stellar_geom === :axisymmetric_density_grid
-                sm = normalize_stellar_model(stellar_model)
-                stellar_grid = build_axisymmetric_light_grid_model(sm)
-                nR = haskey(sm, :force_nR) ? Int(f64(sm[:force_nR])) : 96
-                nZ = haskey(sm, :force_nZ) ? Int(f64(sm[:force_nZ])) : 96
-                nphi = haskey(sm, :force_nphi) ? Int(f64(sm[:force_nphi])) : 32
-                stellar_axis_table = build_axisymmetric_force_table( stellar_grid, ML; nR=nR, nZ=nZ, nphi=nphi )
-            else
-                stellar_grid = build_karl_light_grid_model(stellar_model)
-            end
+            component = _get_unit_stellar_component(stellar_model)
+            stellar_grid = component.grid
+            stellar_axis_table = component.axis_table
         elseif stype0 === :plummer
             stellar_grid = nothing
         else
@@ -810,7 +869,7 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
                 st, ct = _sincos_safe(theta)
                 Rf = rr * st
                 zf = rr * ct
-                return _interp_axisym_potential(stellar_axis_table, Rf, zf)
+                return ML * _interp_axisym_potential(stellar_axis_table, Rf, zf)
             end
             return stellar_Phi_karl_light_grid(rr, ML, stellar_grid)
         else
@@ -848,7 +907,10 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
                 frst = -G * Mst / (rr * rr)
             elseif stype === :karl_light_grid
                 if stellar_geom === :axisymmetric_density_grid
-                    frst, fth_st = stellar_force_axisymmetric_spherical(rr, f64(theta), stellar_axis_table)
+                    fr_unit, fth_unit =
+                        stellar_force_axisymmetric_spherical(rr, f64(theta), stellar_axis_table)
+                    frst = ML * fr_unit
+                    fth_st = ML * fth_unit
                 else
                     Mst = stellar_Menc_karl_light_grid(rr, ML, stellar_grid)
                     frst = -G * Mst / (rr * rr)
@@ -862,30 +924,37 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
     return pot, frc, R
 end
 
-function build_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+function build_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, required_rmax_m::Float64=0.0, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+    isfinite(required_rmax_m) && required_rmax_m >= 0.0 || error("required_rmax_m must be finite and nonnegative")
     halo = halo_from_theta(rho_s, r_s, MBH, ML; halo_type=halo_type, stellar_model=stellar_model, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
-    R = build_R_halo_physical(nR; rmin=halo[:rmin], rmax=rmax_factor * halo[:rs])
+    halo_scaled_rmax = rmax_factor * halo[:rs]
+    rmax_use = max(halo_scaled_rmax, required_rmax_m)
+    R = build_R_halo_physical(nR; rmin=halo[:rmin], rmax=rmax_use)
     tabv, tabfr, Menc = tables_spherical(R, 1, halo, rho_interp)
     pot, frc, _ = make_potential_force_funcs(halo, R, 1, tabv, tabfr, Menc)
     HaloContext(halo, f64.(R), tabv, tabfr, Menc, pot, frc)
 end
 
-function get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+function get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=nothing, nR=DEFAULT_NR, rmax_factor=DEFAULT_RMAX_FACTOR, required_rmax_m::Float64=0.0, halo_q_axis_ratio=1.0, karl_halo_params=nothing)
+    isfinite(required_rmax_m) && required_rmax_m >= 0.0 || error("required_rmax_m must be finite and nonnegative")
     ht = Symbol(lowercase(String(halo_type)))
     sig = stellar_model_sig(stellar_model)
     qh = max(abs(f64(halo_q_axis_ratio)), 1e-6)
     halo_for_sig = halo_from_theta(rho_s, r_s, MBH, ML; halo_type=ht, stellar_model=nothing, halo_q_axis_ratio=qh, karl_halo_params=karl_halo_params)
     ksig = ht === :karl_halo ? karl_halo_sig(halo_for_sig) : UInt(0)
     combined_sig = hash((sig, ksig))
-    key = (_quant(f64(rho_s)), _quant(f64(r_s)), _quant(f64(MBH)), _quant(f64(ML)), combined_sig, ht, _quant(qh), nR, _quant(f64(rmax_factor)))
+    key = (_quant(f64(rho_s)), _quant(f64(r_s)), _quant(f64(MBH)), _quant(f64(ML)), combined_sig, ht, _quant(qh), nR, _quant(f64(rmax_factor)), _quant(required_rmax_m / pc))
     lock(_HALO_LOCK)
     ctx = get(_HALO_CTX_CACHE, key, nothing)
     unlock(_HALO_LOCK)
     ctx !== nothing && return ctx
-    newctx = build_halo_context(rho_s, r_s, MBH, ML, ht; stellar_model=stellar_model, nR=nR, rmax_factor=rmax_factor, halo_q_axis_ratio=qh, karl_halo_params=karl_halo_params)
+    newctx = build_halo_context(rho_s, r_s, MBH, ML, ht; stellar_model=stellar_model, nR=nR, rmax_factor=rmax_factor, required_rmax_m=required_rmax_m, halo_q_axis_ratio=qh, karl_halo_params=karl_halo_params)
     lock(_HALO_LOCK)
     ctx = get(_HALO_CTX_CACHE, key, nothing)
     if ctx === nothing
+        if length(_HALO_CTX_CACHE) >= 256
+            delete!(_HALO_CTX_CACHE, first(keys(_HALO_CTX_CACHE)))
+        end
         _HALO_CTX_CACHE[key] = newctx
         ctx = newctx
     end

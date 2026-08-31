@@ -1,0 +1,7 @@
+Local note for next OSPM session:
+
+- The current intended model-data rule is: only status == "pass_full" is a real model row.
+- Diagnostic pass_* variants should remain saved, but should not drive AI training, best-model tracking, convergence, posterior-like plots, or proposal bases.
+- Recent Segue1 smoke showed diagnostics can beat pass_full numerically, especially pass_halo_only with MBH=0, so always separate real rows from diagnostics when interpreting black-hole preference.
+- Active decks should stay vcirc_rs for Draco and Segue1 unless we intentionally change parameterization again.
+- Do not rewrite historical decks; archive old deck files instead.

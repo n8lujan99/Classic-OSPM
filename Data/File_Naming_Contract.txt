@@ -1,0 +1,362 @@
+OSPM GALAXY DATA / FILE NAMING CONTRACT
+======================================
+
+PURPOSE
+-------
+
+Keep every galaxy profile organized the same way so configs, Data_Prep tools,
+and the runtime always know which product they are using.
+
+The active filename should describe WHAT the file is, not HOW it was created
+or which paper originally supplied it.
+
+Galaxy-specific provenance, literature source, geometry, Abel/shell method,
+etc. belong inside the CSV metadata or galaxy config, not in the active
+runtime filename.
+
+
+DIRECTORY LAYOUT
+----------------
+
+Data/Galaxy_Profiles/<Galaxy>/
+
+    <Galaxy>_OSPM_Config.py
+    <Galaxy>_stars.csv
+    <Galaxy>_surface_brightness.csv
+    <Galaxy>_losvd_bins.csv
+    <Galaxy>_stellar_force_grid.csv
+    <Galaxy>_tracer_density_3d.csv
+    <Galaxy>_karl_observables.csv
+
+    default/
+    plots/
+    archive/
+
+
+EXAMPLES
+--------
+
+Draco:
+
+    Draco_OSPM_Config.py
+    Draco_stars.csv
+    Draco_surface_brightness.csv
+    Draco_losvd_bins.csv
+    Draco_stellar_force_grid.csv
+    Draco_tracer_density_3d.csv
+    Draco_karl_observables.csv
+
+Segue1:
+
+    Segue1_OSPM_Config.py
+    Segue1_stars.csv
+    Segue1_surface_brightness.csv
+    Segue1_losvd_bins.csv
+    Segue1_stellar_force_grid.csv
+    Segue1_tracer_density_3d.csv
+    Segue1_karl_observables.csv
+
+Carina should eventually follow the same pattern.
+
+
+HARD NAMING RULES
+-----------------
+
+1. Preserve capitalization exactly.
+
+       Draco_stars.csv
+
+   NOT:
+
+       draco_stars.csv
+       DRACO_stars.csv
+
+   Linux paths are case-sensitive.
+
+
+2. Every active galaxy product begins with the canonical galaxy name.
+
+       Draco_...
+       Segue1_...
+       Carina_...
+
+
+3. Do not place literature/source names in active runtime filenames.
+
+   Avoid active names such as:
+
+       draco_oden_kirchen2001_axisymmetric_light_grid_full.csv
+       draco_walker2023_cleaned.csv
+
+   Use:
+
+       Draco_stellar_force_grid.csv
+       Draco_stars.csv
+
+   Preserve Odenkirchen2001, Walker2023, etc. in metadata/config fields.
+
+
+4. Do not encode implementation details in canonical filenames.
+
+   Avoid:
+
+       _abel
+       _shell
+       _full
+       _axisymmetric
+       _matched_bins
+       _walker2023
+       _oden_kirchen2001
+
+   These describe provenance or construction, not the semantic runtime role.
+
+
+5. One semantic runtime product gets one canonical active filename.
+
+   Do not keep two competing active files such as:
+
+       tracer_density_3d.csv
+       Draco_tracer_density_3d.csv
+
+   The canonical active file is:
+
+       Draco_tracer_density_3d.csv
+
+
+6. Old, alternate, diagnostic, or provenance products go in:
+
+       archive/
+
+   They should not remain as competing active runtime inputs.
+
+
+CANONICAL FILE MEANINGS
+-----------------------
+
+<Galaxy>_stars.csv
+
+    Fundamental stellar catalog used by OSPM.
+
+    Typical required quantities:
+        projected radius
+        LOS velocity
+        LOS velocity error
+
+    Additional astrometry/metadata may remain in the file.
+
+
+<Galaxy>_surface_brightness.csv
+
+    Adopted projected light / stellar-number-density profile.
+
+    Supplies the observed radial light distribution.
+
+
+<Galaxy>_losvd_bins.csv
+
+    Adopted radial kinematic-bin definition.
+
+    Contains the radial bin edges used to organize the LOSVD observations.
+
+
+<Galaxy>_stellar_force_grid.csv
+
+    Three-dimensional stellar luminosity-density representation used to
+    construct stellar gravity.
+
+    M/L is applied to this luminosity distribution during each model.
+
+
+<Galaxy>_tracer_density_3d.csv
+
+    Three-dimensional tracer/light target that the orbit weights must
+    reproduce when:
+
+        TRACER_CONSTRAINT_MODE = "density_3d"
+
+
+<Galaxy>_karl_observables.csv
+
+    Generated static Karl-style observational representation.
+
+    Contains:
+        metadata
+        projected spatial cells
+        seeing/identity transfer
+        aperture definitions
+        aperture light
+        aperture stellar counts
+        aperture dispersion estimates
+        finite velocity grid
+        mkherm LOSVD targets
+        LOSVD uncertainties
+        supported/unsupported velocity bins
+
+    This is generated once from the current galaxy data/config and then
+    consumed by the OSPM runtime.
+
+
+CONFIG PATH CONTRACT
+--------------------
+
+Each galaxy config should reference the canonical names directly.
+
+Example for Draco:
+
+    "DATA_CSV": str(PROFILE_ROOT / "Draco_stars.csv"),
+
+    "SURFACE_BRIGHTNESS_CSV":
+        str(PROFILE_ROOT / "Draco_surface_brightness.csv"),
+
+    "KINEMATIC_BINS_CSV":
+        str(PROFILE_ROOT / "Draco_losvd_bins.csv"),
+
+    "STELLAR_MODEL": {
+        "type": "karl_light_grid",
+
+        "grid_csv":
+            str(PROFILE_ROOT / "Draco_stellar_force_grid.csv"),
+
+        "tracer_grid_csv":
+            str(PROFILE_ROOT / "Draco_tracer_density_3d.csv"),
+
+        ...
+    },
+
+    "KARL_OBSERVABLES_CSV":
+        str(PROFILE_ROOT / "Draco_karl_observables.csv"),
+
+
+DATA PREP LOCATION
+------------------
+
+Reusable, galaxy-agnostic preparation code belongs under:
+
+    OSPM/Data_Prep/
+
+Galaxy-specific data and generated products belong under:
+
+    Data/Galaxy_Profiles/<Galaxy>/
+
+
+Data_Prep scripts must not hard-code:
+
+    Draco
+    Segue1
+    Carina
+    galaxy distances
+    galaxy-specific filenames
+    galaxy-specific aperture definitions
+    galaxy-specific velocity grids
+
+Those values belong in the galaxy config.
+
+
+KARL OBSERVABLES GENERATOR
+--------------------------
+
+Canonical generator:
+
+    OSPM/Data_Prep/build_karl_observables.py
+
+The call should always provide only the galaxy config.
+
+Draco:
+
+    python OSPM/Data_Prep/build_karl_observables.py \\
+        --config Data/Galaxy_Profiles/Draco/Draco_OSPM_Config.py
+
+Segue1:
+
+    python OSPM/Data_Prep/build_karl_observables.py \\
+        --config Data/Galaxy_Profiles/Segue1/Segue1_OSPM_Config.py
+
+
+Do NOT pass the individual star, surface-brightness, bin, or output files on
+the command line.
+
+The galaxy config is the single source of truth.
+
+
+STATIC VS MODEL-DEPENDENT PRODUCTS
+----------------------------------
+
+Static galaxy inputs/products:
+
+    <Galaxy>_stars.csv
+    <Galaxy>_surface_brightness.csv
+    <Galaxy>_losvd_bins.csv
+    <Galaxy>_stellar_force_grid.csv
+    <Galaxy>_tracer_density_3d.csv
+    <Galaxy>_karl_observables.csv
+
+These describe the adopted galaxy observations and stellar representation.
+
+
+Generated during each trial theta:
+
+    total potential
+    orbit library
+    phase volumes
+    wphase
+    light A-matrix
+    LOSVD A-matrix
+    optimized orbit weights
+    model LOSVD
+    model tracer distribution
+    entropy
+    chi2
+    solver diagnostics
+    coverage diagnostics
+
+These are model-dependent and normally live in memory during evaluation.
+
+
+SEARCH / SCIENCE OUTPUT
+-----------------------
+
+The persistent run output is the Deck CSV under:
+
+    Data/Galaxy_Profiles/<Galaxy>/default/
+
+Run filenames may describe the experiment because these are analysis outputs,
+not canonical galaxy inputs.
+
+For example:
+
+    draco-try4-density3d-karl-observables.csv
+
+
+RECOMMENDED STARTUP PREFLIGHT
+-----------------------------
+
+Before starting orbit integration, OSPM should eventually verify that all
+required active files exist.
+
+For Karl-observables + density_3d mode, check:
+
+    DATA_CSV
+    SURFACE_BRIGHTNESS_CSV
+    KINEMATIC_BINS_CSV
+    STELLAR_MODEL["grid_csv"]
+    STELLAR_MODEL["tracer_grid_csv"]
+    KARL_OBSERVABLES_CSV
+
+A missing file should fail immediately with its exact expected canonical path,
+rather than failing later inside Julia.
+
+
+SUMMARY
+-------
+
+Active galaxy files answer:
+
+    WHAT IS THIS PRODUCT?
+
+Metadata/config answers:
+
+    WHERE DID IT COME FROM?
+    HOW WAS IT GENERATED?
+    WHICH PAPER / METHOD / GEOMETRY WAS USED?
+
+Use the same canonical filename pattern for every galaxy.

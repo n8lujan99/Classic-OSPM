@@ -1,6 +1,70 @@
-RA0_DEG 100.4029
-DEC0_DEG -50.9661
-DISTANCE_PC 105000.0
-R_HALF_LIGHT_PC 250
-AXIS_RATIO_Q 1.0
-PA_DEG 65.0
+
+
+File	Role
+OSPM_PhysicsEngine.py	Validates observations and packages configuration
+OSPM_Physics.py	Converts parameters and carries Python data into Julia
+OSPM_Physics_Spherical.jl	Builds orbit libraries and observable matrices
+OSPM_Physics_Support.jl	Constructs light and LOSVD targets
+OSPM_Physics_Force.jl	Builds halo, stellar, and black-hole gravity
+OSPM_Physics_Weights.jl	Finds the orbit mixture and calculates χ²
+
+The uploaded daemon removes the stellar model
+It sets:
+
+_stellar_model_jl = nothing
+
+Consequently,
+
+has_stars = stellar_model !== nothing && ML > 0.0
+
+is always false. M/L cannot affect the gravitational potential. This could directly explain the completely flat M/L direction we saw. Karl halo parameters and explicit velocity edges are also discarded.
+
+The orbit library is intentionally incomplete
+
+fill_pct=0.80 stops construction after only 80% of the base-orbit slots succeed. Remaining columns stay zero. A timeout or lower fill can still reach the weight solver without being rejected.
+
+The missing fraction is not neutral. Orbits are attempted in an ordered sequence.
+
+The circular family cannot launch correctly
+
+The declared angular-momentum grid includes:
+
+Lfrac = (0.05, 0.2, 0.4, 0.7, 1.0)
+
+For Lfrac=1.0, the code calculates circular-orbit energy at rapo. It then starts inside that radius with the same energy and angular momentum. In a spherical potential that location is forbidden, giving a negative radial-velocity argument. This likely explains why the code was allowed to stop at 80%: roughly one of the five families cannot launch.
+
+That leaves a radially biased library.
+
+Full-light constraints can exceed orbit coverage
+
+The outermost orbit shell comes from:
+
+shells = sort(copy(R_star_m[isfinite.(R_star_m)]))
+
+The light target comes from independent light_edges. If the full-light profile extends farther than the stellar-radius sample, outer light rows exist without any orbit capable of filling them.
+
+The repaired expanded solver should reject that impossible system. The old behavior could hide it.
+
+Orbit evaluation is not deterministic
+
+Random launch radii depend on thread assignment and evaluation order. Helper threads can also attempt the same orbit slot concurrently. The same physical parameter point can produce a different matrix when its batch position changes.
+
+That noise can imitate small parameter sensitivity. In the current daemon, apparent differences between ml_up and ml_down could be entirely numerical because stellar gravity is absent.
+
+Two force options are unsafe as implemented
+
+The normal spherical nfw and spherical nonsingular_isothermal equations look physically and dimensionally consistent.
+
+Two optional paths do not:
+
+karl_halo density functions expect radii in parsecs. They receive meters.
+For flattened halos, force comes from an axisymmetric table while potential remains spherical. Orbit launch energy and integrated force no longer describe the same gravitational field.
+
+Those modes should be blocked until repaired.
+
+The repair order should be:
+
+Restore the stellar model, velocity edges, and Karl halo parameters at the daemon boundary.
+Make orbit construction deterministic and require a genuinely complete library.
+Repair the circular-orbit launch plus extend shell coverage through the full-light range.
+Test force–potential agreement, orbit energy conservation, matrix column coverage, and repeated-theta reproducibility.

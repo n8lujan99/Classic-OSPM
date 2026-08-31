@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+else
+    PYTHON="$(command -v python)"
+fi
+
+cd "$ROOT"
+
+echo "[LOCAL] starting V2 cockpit web stack"
+echo "[LOCAL] repo root: $ROOT"
+
+# Remove stale local cockpit processes.
+pkill -f "$ROOT/Cockpit/Large_Observer_Model.py" 2>/dev/null || true
+pkill -f "$ROOT/Cockpit/cockpit_web.py" 2>/dev/null || true
+
+LOM_PID=""
+
+cleanup() {
+    if [ -n "$LOM_PID" ]; then
+        kill "$LOM_PID" 2>/dev/null || true
+        wait "$LOM_PID" 2>/dev/null || true
+    fi
+}
+
+trap cleanup EXIT INT TERM
+
+echo "[LOCAL] starting live LOM updater"
+
+LOM_MODE=dev \
+LOM_MAKE_PLOTS=1 \
+LOM_SHOW_PLOTS=0 \
+"$PYTHON" "$ROOT/Cockpit/Large_Observer_Model.py" &
+
+LOM_PID=$!
+
+sleep 2
+
+if ! kill -0 "$LOM_PID" 2>/dev/null; then
+    echo "[ERROR] LOM updater exited during startup" >&2
+    exit 1
+fi
+
+echo "[LOCAL] web dashboard: http://localhost:8787"
+
+"$PYTHON" "$ROOT/Cockpit/cockpit_web.py"
+
+echo "[LOCAL] cockpit closed"

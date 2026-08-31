@@ -1,74 +1,52 @@
 # OSPM_Config_Center — Draco
-# Local development config for Karl-style Draco OSPM.
+# Galaxy-specific configuration only.
+# Shared solver, orbit-library, AI, deck, and runtime defaults come from OSPM/load_config.py.
 
 from pathlib import Path
-import os
-import multiprocessing as mp
-from Data.Data_Prep.Data_Paths import build_data_paths
-
-Galaxy = "Draco"
 LOCAL_DEBUG = False
-
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
-
-def detect_workers():
-    slurm = os.getenv("SLURM_CPUS_PER_TASK")
-    if slurm and slurm.isdigit():
-        return int(slurm)
-    return mp.cpu_count()
-
-WORKERS = detect_workers()
-
-NORBIT = 1000 if LOCAL_DEBUG else 10000
-BATCH_SIZE = 1 if LOCAL_DEBUG else 120
-MIN_BATCH_SIZE = 1 if LOCAL_DEBUG else 120
-MAX_BATCH_SIZE = 1 if LOCAL_DEBUG else 360
-CHUNK_SIZE = 1 if LOCAL_DEBUG else 60
-LOG_INTERVAL = 1 if LOCAL_DEBUG else 10
-PROF_EVERY = 1 if LOCAL_DEBUG else 20
-EVAL_TIMEOUT_S = 200.0 if LOCAL_DEBUG else 600.0
-MAX_RUNS = 1 if LOCAL_DEBUG else 300000
-
-if NORBIT % 2 != 0:
-    raise ValueError( f"Karl paired-orbit Spherical path requires even NORBIT because NORBIT is the final A-matrix column count; got {NORBIT}" )
+KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
+INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
+FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
 CONFIG = {
-    # =========================================================
-    # Parallelization
-    # =========================================================
-    "N_WORKERS": WORKERS,
-    
-    # =========================================================
-    # Identity
-    # =========================================================
-    "MODE":        "karl",
-    "GALAXY":      Galaxy,
-    "HALO_TYPE":   "nonsingular_isothermal", #  a few options "nonsingular_isothermal" and "NFW"
-    "HALO_PARAMETERIZATION": "v0_rc", # two options: "v0_rc" or "vcirc_rs" which are cored and nfw respectively 
-    
-    # =========================================================
+    "LOCAL_DEBUG": LOCAL_DEBUG,
+    "FIXED_THETA": FIXED_THETA,
+
+    # Halo and search space
+    "HALO_TYPE": "nonsingular_isothermal",
+    "HALO_PARAMETERIZATION": "v0_rc",
+    "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"],
+    "INITIAL_THETA": INITIAL_THETA,
+    "THETA_BOUNDS": [
+        (0.0, 200.0),           # v0 [km/s] — dark-halo velocity scale
+        (1.0, 5000.0),          # r_c [pc] — dark-halo core radius
+        (0.0, 5.0e6),           # MBH [Msun] — central black-hole mass
+        (0.2, 20.0),            # M/L — stellar mass-to-light ratio
+    ],
+
     # Galaxy geometry
-    # =========================================================
-    "RA0_DEG":          260.0517,
-    "DEC0_DEG":         57.9153,
-    "DISTANCE_PC":      76000.0,
-    "PA_DEG":           90.0,
-    "AXIS_RATIO_Q":     0.70,
-    "R_HALF_LIGHT_PC":  221.0,
-    "R_MAX_STARS_PC":   1500.0,
-    "VLOS_COL":        "vlos",
-    "V_SYS_KMS":       -291.68214888089926, 
-    
-    # =========================================================
-    # Stellar tracer/light model
-    # =========================================================
+    "RA0_DEG": 260.0517,
+    "DEC0_DEG": 57.9153,
+    "DISTANCE_PC": 76000.0,
+    "PA_DEG": 90.0,
+    "AXIS_RATIO_Q": 0.69,
+    "R_HALF_LIGHT_PC": 221.0,
+    "R_MAX_STARS_PC": 1500.0,
+    "INCLINATION_DEG": 78.0,
+    "V_SYS_KMS": -291.68214888089926,
+
+    # Intrinsic tracer constraint.
+    # Keep the current force/tracer grids fixed while changing only the LOSVD representation.
+    "TRACER_CONSTRAINT_MODE": "density_3d",
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
-        "grid_csv": str(PROFILE_ROOT / "draco_oden_kirchen2001_axisymmetric_light_grid_full.csv"),
+        "grid_csv": str(PROFILE_ROOT / "Draco_stellar_force_grid.csv"),
+        "tracer_grid_csv": str(PROFILE_ROOT / "Draco_tracer_density_3d.csv"),
         "Ltot": 2.7e5,
-        "geometry": "axisymmetric_density_grid", # only other option is "spherical_enclosed_light_grid" axi is for flat
+        "geometry": "axisymmetric_density_grid",
         "q_axis_ratio": 0.69,
         "R_cyl_col": "R_cyl_pc",
         "z_col": "z_pc",
@@ -81,180 +59,66 @@ CONFIG = {
         "force_nphi": 32,
         "source": "Odenkirchen2001",
     },
-    # =========================================================
-    # Data harvesting and quality
-    # =========================================================
-    "INCLINATION_DEG":  78.0,
-    "RADIUS_DEG":   0.6,
-    "RUWE_MAX":     1.4,
-    "PAR_SNR_MIN":  5.0,
-    
-    # =========================================================
-    # Column authority
-    # =========================================================
-    "STAR_R_COL":      "r_pc",
-    "STAR_V_COL":      "vlos",
-    "STAR_VERR_COL":   "vlos_err",
-    "RA_COL":          "ra",
-    "DEC_COL":         "dec",
-    
-    # =========================================================
-    # Draco-style observed products
-    # =========================================================
-    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "draco_oden_kirchen2001_surface_brightness_profile.csv"),
-    "KINEMATIC_BINS_CSV":     str(PROFILE_ROOT / "draco_walker2023_kinematic_bins_20.csv"),
-    
-    # =========================================================
-    # OSPM numerical setup
-    # =========================================================
-    "NORBIT": NORBIT,
 
-    "OBSERVABLES": {
-        "NVBIN": 21,
-        "MIN_STARS_PER_BIN": 20,
-        "LAMBDA_LIGHT": 0.3,
-        "NTHETA_LAUNCH": 9,
+    # Draco data contract
+    "STAR_R_COL": "r_pc",
+    "STAR_V_COL": "vlos",
+    "STAR_VERR_COL": "vlos_err",
+    "RA_COL": "ra",
+    "DEC_COL": "dec",
+    "VLOS_COL": "vlos",
+    # Observed products
+    "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Draco_surface_brightness.csv"),
+    "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Draco_losvd_bins.csv"),
+    "DATA_CSV": str(PROFILE_ROOT / "Draco_stars.csv"),
+    # Consolidated Karl-style observational representation.
+    "LOSVD_TARGET_MODE": "karl_resolved_stars",
+    "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
+    # Karl resolved-star LOSVD construction.
+    "KARL_RESOLVED_KDE_GRID": 17,
+    "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
+    "KARL_RESOLVED_VMIN_KMS": -41.317862205564666,
+    "KARL_RESOLVED_VMAX_KMS": 40.712143487870975,
+    "KARL_RESOLVED_BOOTSTRAPS": 300,
+    "KARL_RESOLVED_ENVELOPE_FLOOR": 0.003,
 
-        # Live Karl weight/scoring path.
-        "WEIGHT_MODE": "entropy",
-        "WEIGHT_SOLVER": "expanded_cm",
-        "LOSVD_SCORE_MODE": "standard",
-        "KARL_ALPHAT": 1.0,
-        "KARL_MAXITER": 60,
-        "ENTROPY_FLOOR": 1e-12,
-
-        # Halo flattening used by the halo force path.
-        # Stellar flattening stays in STELLAR_MODEL["q_axis_ratio"].
-        "HALO_Q_AXIS_RATIO": 1.0,
+    # Galaxy-specific inputs for OSPM/Data_Prep/build_karl_observables.py.
+    # Existing Draco kinematic bins are the radial grid and aperture authority.
+    # Resolved-star LOS velocities use no seeing convolution.
+    # The finite 21-bin model grid derives its outer bin centers from Draco's
+    # actual systemic-centered stellar velocity range; no arbitrary padding is added.
+    "KARL_OBSERVABLES": {
+        "output_csv": str(KARL_OBSERVABLES_CSV),
+        "surface_brightness_radius_col": "R_pc",
+        "surface_brightness_sigma_col": "Sigma",
+        "star_velocity_frame": "subtract_systemic",
+        "radial_grid_mode": "kinematic_bins",
+        "aperture_source": "kinematic_bins",
+        "radial_subsample_ratio": 4,
+        "nvdat": 20,
+        "nvlib": 5,
+        "seeing_arcsec": 0.0,
+        "nvel": 21,
+        "velocity_grid_mode": "data_range",
+        "losvd_center_mode": "systemic",
+        "losvd_shape": "gaussian",
     },
-    
-    # =========================================================
-    # Parameter space
-    # =========================================================
-    "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"],
-    "INITIAL_THETA": [100, 1800.0, 9e5, 1.0],
-    "THETA_BOUNDS": [
-        (0.0, 200.0),       # v0, km/s or v_circ for nfw
-        (100.0, 1000000.0),  # r_c, pc or r_s for nfw
-        (0.0, 4e6),         # MBH, Msun
-        (0.2, 20.0)],       # ML
-    
-    # =========================================================
-    # Penalties
-    # =========================================================
+
+    # Draco needs the longer weight solve.
+    "OBSERVABLES": {"KARL_MAXITER": 4000},
+    # Draco numerical domain
+    "MIN_DISTANCE": 1e-6,
+    "MAX_DISTANCE": 5e3,
+    "POTENTIAL_EXTENT": 10.0,
+    # Draco search behavior
+    "MBH_LOG_FLOOR": 1.0e3,
+    "MBH_ZERO_FRACTION": 0.10,
+    # Draco-specific runtime overrides
+    "CHUNK_SIZE": 40,
+    "CSV_FLUSH_INTERVAL": 10,
+    "EVAL_TIMEOUT_S": 1200.0,
     "PEN_SPHERE_STRENGTH": 200,
-    "PEN_SPHERE_POWER":    2.0,
-    "PEN_SLOPE_STRENGTH":  5000,
-    
-    # =========================================================
-    # Physical domain
-    # =========================================================
-    "MIN_DISTANCE":             1e-6,
-    "MAX_DISTANCE":             5e3,
-    "R_GRID_POINTS":            256,
-    "POTENTIAL_EXTENT":         10.0,
-    "BH_MIN_RADIUS_MULTIPLIER": 2.0,
-
-    # =========================================================
-    # Deck semantics
-    # =========================================================
-    "REQUIRE_COLUMNS": [ "v0", "r_c", "MBH", "ML", "chi2", "reward", "status", "proposal_id", "refine_passes", "chi2_losvd", "chi2_light", 
-        "chi2_total", "chi2_inner", "chi2_outer", "N_inner", "N_outer", "N_nonzero_weights", "effective_N_orbits", "max_weight_fraction", "halo_type",
-        # Runtime contract diagnostics:
-        "weight_mode", "weight_solver_mode", "losvd_score_mode", "alphat", "halo_q_axis_ratio", "karl_halo_params_active",
-    ],
-
-    "ALLOWED_STATUSES": [
-        "todo", "seed", "pass", "orbit_fail", "numeric_fail", "unknown_fail", "timeout", "forbidden", "pass_full", "pass_bh_only", "pass_halo_only",
-        "pass_bh_up", "pass_bh_down", "pass_halo_up", "pass_halo_down", "pass_ml_up", "pass_ml_down", "orbit_fail_full", "orbit_fail_bh_only", "orbit_fail_halo_only",
-        "numeric_fail_full", "numeric_fail_bh_only", "numeric_fail_halo_only", "timeout_full", "timeout_bh_only", "timeout_halo_only", "timeout_bh_up", "timeout_bh_down",
-        "timeout_halo_up", "timeout_halo_down", "timeout_ml_up", "timeout_ml_down", "unknown_fail_full", "unknown_fail_bh_only", "unknown_fail_halo_only", "unknown_fail_bh_up", "unknown_fail_bh_down",
-        "unknown_fail_halo_up", "unknown_fail_halo_down", "unknown_fail_ml_up", "unknown_fail_ml_down", "numeric_fail_bh_up", "numeric_fail_bh_down", "numeric_fail_halo_up", "numeric_fail_halo_down",
-        "numeric_fail_ml_up", "numeric_fail_ml_down", "orbit_fail_bh_up", "orbit_fail_bh_down", "orbit_fail_halo_up", "orbit_fail_halo_down", "orbit_fail_ml_up", "orbit_fail_ml_down",
-    ],
-    "FILL_DEFAULT_STATUS": "todo",
-    
-    # =========================================================
-    # Sampling and control
-    # =========================================================
-    "BATCH_SIZE":          BATCH_SIZE,
-    "MIN_BATCH_SIZE":      MIN_BATCH_SIZE,
-    "MAX_BATCH_SIZE":      MAX_BATCH_SIZE,
-    "CHUNK_SIZE":          CHUNK_SIZE,
-    "_PRINT_EVERY":        10,
-    "_print_counter":      0,
-    
-    # =========================================================
-    # AI / learning
-    # =========================================================
-    "AI_START_AFTER":        300, # normally closer to 500 for initial seeding but reduced to 100 for local debug
-    "MIN_TRAIN_POINTS":      300,
-    "TRAIN_WINDOW":          500,
-    "AI_NOISE_INIT":         0.30,
-    "AI_NOISE_MIN":          0.02,
-    "AI_NOISE_TAU":          5000,
-    "AI_MIN_DISTINCT_PASS":  800,
-    "RESET_INTERVAL":        10000,
-    "AI_DEBUG_EVERY":        200,
-    "AI_SNAPSHOT_EVERY":     2000,
-    "FLAT_WINDOW":           200,
-    "FLAT_THRESHOLD":        1e-6,
-    "FLAT_PATIENCE":         10,
-    "AI_RESET_ON_FLAT":      True,
-    
-    # =========================================================
-    # Termination
-    # =========================================================
-    "MAX_RUNS":              MAX_RUNS,
-    "STOP_NO_IMPROVEMENT":   2000,
-    "IMPROVEMENT_EPSILON":   1e-6,
-    "LOG_INTERVAL":          LOG_INTERVAL,
-    "PROF_EVERY":            PROF_EVERY,
-    "EVAL_TIMEOUT_S":        EVAL_TIMEOUT_S,
-    
-    # =========================================================
-    # Physical constants
-    # =========================================================
-    "G":    6.67430e-11,
-    "Msun": 1.98847e30,
-    
-    # =========================================================
-    # Paths
-    # =========================================================
-    **build_data_paths(PROFILE_ROOT),
-    "DATA_CSV": str(PROFILE_ROOT / "draco_walker2023.csv"),
-    "COMPARISON_TAG": "nonsingular_isothermal_full_light",
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_nonsingular_isothermal_full_light.csv"),
+    "EVAL_VARIANTS": ["full"],
+    # Run identity
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-v0-production.csv"),
 }
-
-print("[CONFIG] CSV_PATH =", CONFIG["CSV_PATH"])
-print("[CONFIG] LOCAL_DEBUG =", LOCAL_DEBUG)
-print("[CONFIG] NORBIT =", CONFIG["NORBIT"])
-print("[CONFIG] MAX_RUNS =", CONFIG["MAX_RUNS"])
-print("[CONFIG] BATCH_SIZE =", CONFIG["BATCH_SIZE"])
-print("[CONFIG] CHUNK_SIZE =", CONFIG["CHUNK_SIZE"])
-print("[CONFIG] HALO_PARAMETERIZATION =", CONFIG["HALO_PARAMETERIZATION"])
-print("[CONFIG] PARAMETER_NAMES =", CONFIG["PARAMETER_NAMES"])
-print("[CONFIG] THETA_BOUNDS =", CONFIG["THETA_BOUNDS"])
-print("[CONFIG] STELLAR_GEOMETRY =", CONFIG["STELLAR_MODEL"]["geometry"])
-print("[CONFIG] NTHETA_LAUNCH =", CONFIG["OBSERVABLES"]["NTHETA_LAUNCH"])
-print("[CONFIG] WEIGHT_MODE =", CONFIG["OBSERVABLES"]["WEIGHT_MODE"])
-print("[CONFIG] WEIGHT_SOLVER =", CONFIG["OBSERVABLES"]["WEIGHT_SOLVER"])
-print("[CONFIG] LOSVD_SCORE_MODE =", CONFIG["OBSERVABLES"]["LOSVD_SCORE_MODE"])
-
-
-"""
-16JUL2026 Draco full_light reset
-
-MODE              = karl
-stellar model     = karl_light_grid
-light inputs      = full Odenkirchen profile
-kinematic inputs  = Walker binned
-comparison tag    = full_light
-
-The previous Draco runs used the matched-bin light products, so they are not directly
-comparable to this setup. This run switches both the stellar light grid and the
-surface-brightness constraints to the full Odenkirchen profile while keeping the
-Walker kinematic bins. The daemon run settings now match Segue 1. The remaining
-configuration differences are intended to be galaxy-specific.
-"""
