@@ -1,12 +1,9 @@
 """
 # ========================================================================================================================
-
 Build one galaxy-agnostic Karl-style observables CSV from an OSPM galaxy config.
-
 The script contains the reusable Karl algorithms only. Galaxy-specific values
 (distance, projected axis ratio, radial domain, seeing, aperture definitions,
 velocity grid, source paths, and LOSVD settings) live in the galaxy config.
-
 Required existing inputs are read from CONFIG:
     DATA_CSV
     SURFACE_BRIGHTNESS_CSV
@@ -17,33 +14,27 @@ Required existing inputs are read from CONFIG:
     STAR_VERR_COL
     V_SYS_KMS
     KARL_OBSERVABLES
-
 KARL_OBSERVABLES chooses the reusable construction strategy. Supported radial
 grid modes are:
     karl_log        - Karl's logarithmic projected grid, used for historical
                       reconstructions such as Segue 1.
     kinematic_bins  - use the existing KINEMATIC_BINS_CSV radial edges directly.
-
 Supported aperture sources are:
     explicit        - use KARL_OBSERVABLES['apertures'].
     kinematic_bins  - one aperture per existing kinematic radial bin.
-
 Supported velocity-grid modes are:
     fixed_centers   - configured model_vmin_kms/model_vmax_kms are the outer
                       velocity-bin centers.
     data_range      - derive those outer centers from the finite systemic-
                       centered stellar velocities in DATA_CSV.
-
 Seeing is explicit. seeing_arcsec=0 means identity/no seeing; positive values
 use the Karl getsum-style Gaussian transfer.
-
 The generated CSV contains long-format rows with row_type:
     metadata
     spatial_cell
     seeing_transfer
     aperture
     losvd_bin
-
 No historical ab.dat, galaxy.params, SB.new, SBsc2.dat, Hermite file, or
 velbin file is required. Their useful information is generated directly from
 the current galaxy data and the per-galaxy config.
@@ -620,12 +611,10 @@ class KarlRan1Gasdev:
                 if j <= self.NTAB:
                     self.iv[j - 1] = self.idum
             self.iy = self.iv[0]
-
         k = self.idum // self.IQ
         self.idum = self.IA * (self.idum - k * self.IQ) - self.IR * k
         if self.idum < 0:
             self.idum += self.IM
-
         j = 1 + self.iy // self.NDIV
         self.iy = self.iv[j - 1]
         self.iv[j - 1] = self.idum
@@ -650,24 +639,20 @@ class KarlRan1Gasdev:
 def _karl_medmad(values: np.ndarray) -> tuple[float, float]:
     x = np.sort(np.asarray(values, dtype=np.float64))
     n = len(x)
-
     if n < 1:
         return -666.0, -2.0
     if n == 1:
         return float(x[0]), -1.0
-
     n2 = n // 2
     if n % 2 == 0:
         xmed = 0.5 * (x[n2 - 1] + x[n2])
     else:
         xmed = float(x[n2])
-
     deviations = np.sort(np.abs(x - xmed))
     if n % 2 == 0:
         xmad = 0.5 * (deviations[n2 - 1] + deviations[n2])
     else:
         xmad = float(deviations[n2])
-
     return float(xmed), float(xmad)
 
 def _karl_biwgt(values: np.ndarray) -> tuple[float, float]:
@@ -782,10 +767,8 @@ def _rebin_to_model(vfine: np.ndarray, central: np.ndarray, lower: np.ndarray, u
     suma = float(np.sum(central))
     if not (math.isfinite(suma) and suma > 0.0):
         raise RuntimeError("Karl LOSVD normalization is non-positive")
-
     ad = central * (aperture_light / suma)
     adfer = np.maximum(upper - central, (upper - lower) / 2.0) * (aperture_light / suma)
-
     ndata = len(vfine)
     v1 = np.empty(ndata, dtype=np.float64)
     v2 = np.empty(ndata, dtype=np.float64)
@@ -796,19 +779,16 @@ def _rebin_to_model(vfine: np.ndarray, central: np.ndarray, lower: np.ndarray, u
     for k in range(1, ndata - 1):
         v1[k] = vfine[k] - (vfine[k] - vfine[k - 1]) / 2.0
         v2[k] = vfine[k] + (vfine[k + 1] - vfine[k]) / 2.0
-
     nvbin = len(velocity_edges) - 1
     target = np.zeros(nvbin, dtype=np.float64)
     sigma = np.full(nvbin, INVALID_SIGMA_SENTINEL, dtype=np.float64)
     supported = np.zeros(nvbin, dtype=bool)
-
     for j in range(nvbin):
         vlo = float(velocity_edges[j])
         vhi = float(velocity_edges[j + 1])
         vcenter = 0.5 * (vlo + vhi)
         if vcenter < v1[0] or vcenter > v2[-1]:
             continue
-
         sum_target = 0.0
         sum_sigma = 0.0
         for k in range(ndata):
@@ -823,7 +803,6 @@ def _rebin_to_model(vfine: np.ndarray, central: np.ndarray, lower: np.ndarray, u
         target[j] = sum_target
         sigma[j] = sum_sigma
         supported[j] = True
-
     return target, sigma, supported
 
 def _aperture_specs(raw: list, nrlib: int, nvlib: int) -> list[dict]:
@@ -866,7 +845,6 @@ def _read_stars(cfg: dict, ko: dict) -> dict[str, np.ndarray]:
         vrel = v.copy()
     else:
         raise ValueError("KARL_OBSERVABLES['star_velocity_frame'] must be 'subtract_systemic' or 'already_relative'")
-
     return {
         "r_pc": r,
         "vrel_kms": vrel,
@@ -981,14 +959,8 @@ def build_karl_observables(config_path: Path, output_override: Path | None = Non
             raise ValueError("radial_subsample_ratio must be positive")
         radial_edges_pc = np.asarray(kinematic_edges_pc, dtype=np.float64)
         radial_edges_arcsec = np.asarray(_pc_to_arcsec(radial_edges_pc, distance_pc), dtype=np.float64)
-        spec = KarlGridSpec(
-            nrdat=nrlib * radial_subsample_ratio,
-            nvdat=nvdat,
-            nrlib=nrlib,
-            nvlib=nvlib,
-            radial_rmin_arcsec=float(radial_edges_arcsec[0]),
-            radial_rmax_arcsec=float(radial_edges_arcsec[-1]),
-        )
+        spec = KarlGridSpec( nrdat=nrlib * radial_subsample_ratio, nvdat=nvdat, nrlib=nrlib, nvlib=nvlib,
+            radial_rmin_arcsec=float(radial_edges_arcsec[0]), radial_rmax_arcsec=float(radial_edges_arcsec[-1]) )
         grid = DirectProjectedGrid(spec, radial_edges_arcsec)
         radial_edges_internal = grid.radial_edges_internal()
     else:
@@ -1021,22 +993,17 @@ def build_karl_observables(config_path: Path, output_override: Path | None = Non
     else:
         raise ValueError("KARL_OBSERVABLES['velocity_grid_mode'] must be 'fixed_centers' or 'data_range'")
     velocity_centers, velocity_edges = _velocity_grid(nvel, vmin_center_kms, vmax_center_kms)
-
     seeing_arcsec = float(_require(ko, "seeing_arcsec"))
     if not (math.isfinite(seeing_arcsec) and seeing_arcsec >= 0.0):
         raise ValueError("seeing_arcsec must be finite and nonnegative")
     seeing_mode = "none" if seeing_arcsec == 0.0 else "gaussian_karl"
-
     psf_samples = int(ko.get("psf_samples", DEFAULT_PSF_SAMPLES))
     light_quadrature = int(ko.get("light_quadrature", DEFAULT_LIGHT_QUADRATURE))
     transvd_samples = int(ko.get("transvd_samples", DEFAULT_TRANSVD_SAMPLES))
-
     angular_edges = grid.angular_edges()
-
     raw_light = _integrate_light_grid(profile, radial_edges_pc, angular_edges, q, light_quadrature)
     sumb, sumbn = _build_seeing_transfer(grid, seeing_arcsec, psf_samples)
     seen_light = _convolve_spatial(raw_light, sumb, sumbn)
-
     aperture_light = []
     aperture_star_count = []
     aperture_velocities = []
@@ -1048,12 +1015,7 @@ def build_karl_observables(config_path: Path, output_override: Path | None = Non
     aperture_sigma_err = []
     aperture_half_width = []
     for ap in apertures:
-        light = float(np.sum(
-            seen_light[
-                ap["ir_start"] - 1:ap["ir_end"],
-                ap["iv_start"] - 1:ap["iv_end"],
-            ]
-        ))
+        light = float(np.sum(seen_light[ ap["ir_start"] - 1:ap["ir_end"], ap["iv_start"] - 1:ap["iv_end"]]))
         velocities, velocity_errors = _stars_in_aperture(stars, ap, radial_edges_pc, spec.nvlib)
         if len(velocities) < 2:
             raise ValueError(f"Aperture {ap['name']!r} contains fewer than two valid LOSVD stars")
@@ -1075,12 +1037,8 @@ def build_karl_observables(config_path: Path, output_override: Path | None = Non
     supported_counts = []
     mkherm_rng = KarlRan1Gasdev(idum=-1)
     for ia, velocities in enumerate(aperture_velocities):
-        vfine, central, lower, upper = _mkherm_gaussian_target(
-            aperture_sigma[ia], aperture_sigma_err[ia], transvd_samples, mkherm_rng
-        )
-        target, sigma, supported = _rebin_to_model(
-            vfine, central, lower, upper, velocity_edges, aperture_light[ia]
-        )
+        vfine, central, lower, upper = _mkherm_gaussian_target(aperture_sigma[ia], aperture_sigma_err[ia], transvd_samples, mkherm_rng)
+        target, sigma, supported = _rebin_to_model(vfine, central, lower, upper, velocity_edges, aperture_light[ia])
         target_rows.append((target, sigma, supported))
         supported_counts.append(int(np.count_nonzero(supported)))
 

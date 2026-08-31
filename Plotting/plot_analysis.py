@@ -16,7 +16,7 @@ plt.style.use("dark_background")
 # Resolve repository and galaxy
 # --------------------------------------------------
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 WHICH_GALAXY = REPO_ROOT / "which_galaxy"
 
 if WHICH_GALAXY.exists():

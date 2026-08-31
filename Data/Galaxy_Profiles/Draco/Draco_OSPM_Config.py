@@ -3,17 +3,12 @@
 # Shared solver, orbit-library, AI, deck, and runtime defaults come from OSPM/load_config.py.
 
 from pathlib import Path
-
 LOCAL_DEBUG = False
-
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
-
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
-
 INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
-
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
 CONFIG = {
@@ -37,7 +32,7 @@ CONFIG = {
     "DEC0_DEG": 57.9153,
     "DISTANCE_PC": 76000.0,
     "PA_DEG": 90.0,
-    "AXIS_RATIO_Q": 0.70,
+    "AXIS_RATIO_Q": 0.69,
     "R_HALF_LIGHT_PC": 221.0,
     "R_MAX_STARS_PC": 1500.0,
     "INCLINATION_DEG": 78.0,
@@ -72,15 +67,20 @@ CONFIG = {
     "RA_COL": "ra",
     "DEC_COL": "dec",
     "VLOS_COL": "vlos",
-
     # Observed products
     "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Draco_surface_brightness.csv"),
     "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Draco_losvd_bins.csv"),
     "DATA_CSV": str(PROFILE_ROOT / "Draco_stars.csv"),
-
     # Consolidated Karl-style observational representation.
-    "LOSVD_TARGET_MODE": "karl_mode0_observables",
+    "LOSVD_TARGET_MODE": "karl_resolved_stars",
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
+    # Karl resolved-star LOSVD construction.
+    "KARL_RESOLVED_KDE_GRID": 17,
+    "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
+    "KARL_RESOLVED_VMIN_KMS": -41.317862205564666,
+    "KARL_RESOLVED_VMAX_KMS": 40.712143487870975,
+    "KARL_RESOLVED_BOOTSTRAPS": 300,
+    "KARL_RESOLVED_ENVELOPE_FLOOR": 0.003,
 
     # Galaxy-specific inputs for OSPM/Data_Prep/build_karl_observables.py.
     # Existing Draco kinematic bins are the radial grid and aperture authority.
@@ -106,22 +106,19 @@ CONFIG = {
 
     # Draco needs the longer weight solve.
     "OBSERVABLES": {"KARL_MAXITER": 4000},
-
     # Draco numerical domain
     "MIN_DISTANCE": 1e-6,
     "MAX_DISTANCE": 5e3,
     "POTENTIAL_EXTENT": 10.0,
-
     # Draco search behavior
     "MBH_LOG_FLOOR": 1.0e3,
     "MBH_ZERO_FRACTION": 0.10,
-
     # Draco-specific runtime overrides
     "CHUNK_SIZE": 40,
     "CSV_FLUSH_INTERVAL": 10,
     "EVAL_TIMEOUT_S": 1200.0,
     "PEN_SPHERE_STRENGTH": 200,
-
+    "EVAL_VARIANTS": ["full"],
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-try5-density3d-karl-observables.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-v0-production.csv"),
 }
