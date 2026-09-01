@@ -4,7 +4,7 @@
 
 from pathlib import Path
 
-LOCAL_DEBUG = False
+LOCAL_DEBUG = True
 
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
@@ -41,7 +41,7 @@ CONFIG = {
     "R_MAX_STARS_PC": 120.0,
     "INCLINATION_DEG": 90.0,
     "V_SYS_KMS": 208.5667270167265,
-    "TRACER_CONSTRAINT_MODE": "density_3d",  # Keep the current tracer constraint fixed for the Karl mode-0 LOSVD test.
+    "TRACER_CONSTRAINT_MODE": "density_3d",
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
         "grid_csv": str(PROFILE_ROOT / "Segue1_stellar_force_grid.csv"),
@@ -60,6 +60,31 @@ CONFIG = {
         "force_nphi": 32,               # azimuthal sampling around each ring
         "source": "Niederste-Ostholt2009_Fig7_digitized",
     },
+    "DATA_PREP": {
+        "surface_brightness": {
+            "input_csv": str(PROFILE_ROOT / "archive" / "Segue1_NO09_digitized_raw_points.csv"),
+            "input_type": "fixed_annulus_counts",
+            "source": "Niederste-Ostholt_et_al_2009_Fig7_digitized",
+            "preferred_profile": "CMD_mask_number_counts",
+            "radius_type": "projected_circular_radius",
+            "background": 0.0,
+            "background_err": 0.0,
+            "center_col": "rin_deg",
+            "center_units": "deg",
+            "count_col": "count_digitized",
+            "annulus_width": 0.025,
+            "annulus_width_units": "deg",
+            "round_counts": True,
+            "count_error_model": "poisson",
+        },
+        "losvd_bins": {
+            "mode": "equal_count",
+            "n_bins": 4,
+        },
+        "abel_smoothing_target": 9.0,
+        "abel_outer_transition_sigma": 2.0,
+        "abel_outer_tail_points": 35,
+    },
     "STAR_R_COL": "r_pc",               # projected stellar radius [pc]
     "STAR_V_COL": "vlos",               # observed line-of-sight velocity [km/s]
     "STAR_VERR_COL": "vlos_err",        # velocity measurement uncertainty [km/s]
@@ -75,7 +100,7 @@ CONFIG = {
     # Historical Karl mode-0 observable construction, regenerated from the
     # current Segue 1 stars, surface-brightness profile, and the settings below.
     # The Data-side generator and runtime both use this single consolidated CSV.
-    "LOSVD_TARGET_MODE": "karl_mode0_observables",
+    "LOSVD_TARGET_MODE": "karl_resolved_stars",
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
 
     # Retained only for compatibility with the alternate karl_resolved_stars mode.
@@ -119,5 +144,5 @@ CONFIG = {
     "MBH_LOG_FLOOR": 1.0e3,
     "MBH_ZERO_FRACTION": 0.10,
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_stars.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "Segue1-try2-density3d-karl-mode0-observables.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1-v0-integration-test.csv"),
 }

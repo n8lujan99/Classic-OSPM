@@ -296,7 +296,7 @@ def validate_abel_integral_with_plummer():
     return float(np.median(relative_error)), float(np.max(relative_error))
 
 
-def build_draco_deprojection(R, Sigma, Sigma_err, n_grid=DEFAULT_N_GRID, smoothing_target=DEFAULT_SMOOTHING_TARGET, outer_tail_points=DEFAULT_OUTER_TAIL_POINTS, outer_transition_sigma=DEFAULT_OUTER_TRANSITION_SIGMA):
+def build_deprojection(R, Sigma, Sigma_err, n_grid=DEFAULT_N_GRID, smoothing_target=DEFAULT_SMOOTHING_TARGET, outer_tail_points=DEFAULT_OUTER_TAIL_POINTS, outer_transition_sigma=DEFAULT_OUTER_TRANSITION_SIGMA):
     spline, sigma_logSigma, smoothing_target = fit_weighted_log_spline(R, Sigma, Sigma_err, smoothing_target=smoothing_target)
     outer_slope, outer_slope_err = fit_outer_powerlaw_slope(R, Sigma, Sigma_err, n_tail=outer_tail_points)
     R_transition, transition_index, significance = choose_outer_transition_start(R, Sigma, Sigma_err, significance_threshold=outer_transition_sigma)
@@ -330,7 +330,7 @@ def build_draco_deprojection(R, Sigma, Sigma_err, n_grid=DEFAULT_N_GRID, smoothi
     }
 
 
-def save_outputs(result, R, Sigma, Sigma_err, outdir, unresolved_center):
+def save_outputs(result, R, Sigma, Sigma_err, outdir, unresolved_center, galaxy):
     outdir.mkdir(parents=True, exist_ok=True)
     resolved_profile = pd.DataFrame({
         "row_type": "resolved_abel",
@@ -348,10 +348,10 @@ def save_outputs(result, R, Sigma, Sigma_err, outdir, unresolved_center):
     for key, value in unresolved_center.items():
         center_row[key] = value
     profile = pd.concat([pd.DataFrame([center_row]), resolved_profile], ignore_index=True, sort=False)
-    profile_path = outdir / "Draco_abel_deprojection.csv"
+    profile_path = outdir / f"{galaxy}_abel_deprojection.csv"
     profile.to_csv(profile_path, index=False)
     fig, axes = plt.subplots(2, 1, figsize=(9, 9), sharex=True)
-    axes[0].errorbar(R, Sigma, yerr=Sigma_err, fmt="o", capsize=3, label="Odenkirchen et al. 2001")
+    axes[0].errorbar(R, Sigma, yerr=Sigma_err, fmt="o", capsize=3, label=f"{galaxy} observed profile")
     axes[0].plot(result["R_grid"], result["Sigma_grid"], linewidth=2.0, label="Adopted Abel input")
     axes[0].axvspan(result["R_transition"], result["R_last"], alpha=0.08, label=f"Outer transition: {result['R_transition']:.1f}-{result['R_last']:.1f} pc")
     axes[0].set_xscale("log"); axes[0].set_yscale("log"); axes[0].set_ylabel(r"$\Sigma(R)$ [stars pc$^{-2}$]")
@@ -360,9 +360,9 @@ def save_outputs(result, R, Sigma, Sigma_err, outdir, unresolved_center):
     axes[1].axvspan(result["R_transition"], result["R_last"], alpha=0.08)
     axes[1].set_xscale("log"); axes[1].set_yscale("log"); axes[1].set_xlabel("Radius [pc]")
     axes[1].set_ylabel(r"$\nu(r)$ [stars pc$^{-3}$]"); axes[1].grid(alpha=0.25)
-    fig.suptitle("Draco 2D to 3D Abel Deprojection")
+    fig.suptitle(f"{galaxy} 2D to 3D Abel Deprojection")
     fig.tight_layout()
-    deprojection_path = outdir / "Draco_abel_deprojection.png"
+    deprojection_path = outdir / f"{galaxy}_abel_deprojection.png"
     fig.savefig(deprojection_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     fig, axes = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
@@ -375,9 +375,9 @@ def save_outputs(result, R, Sigma, Sigma_err, outdir, unresolved_center):
     axes[1].axvspan(result["R_transition"], result["R_last"], alpha=0.08)
     axes[1].set_xscale("log"); axes[1].set_xlabel("Radius [pc]"); axes[1].set_ylabel(r"$d\ln\nu/d\ln r$")
     axes[1].grid(alpha=0.25)
-    fig.suptitle("Draco Abel Logarithmic Slopes")
+    fig.suptitle(f"{galaxy} Abel Logarithmic Slopes")
     fig.tight_layout()
-    derivative_path = outdir / "Draco_abel_spline_derivative.png"
+    derivative_path = outdir / f"{galaxy}_abel_spline_derivative.png"
     fig.savefig(derivative_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     Sigma_forward = forward_project_density(R, result["R_grid"], result["nu"], result["R_last"], result["Sigma_last"], result["outer_slope"])
@@ -390,9 +390,9 @@ def save_outputs(result, R, Sigma, Sigma_err, outdir, unresolved_center):
     axes[1].plot(R, closure_relative, "o-"); axes[1].axhline(0.0, linewidth=1.0)
     axes[1].set_xscale("log"); axes[1].set_xlabel("Projected radius R [pc]"); axes[1].set_ylabel("Relative closure error")
     axes[1].grid(alpha=0.25)
-    fig.suptitle("Draco Abel Forward-Projection Closure")
+    fig.suptitle(f"{galaxy} Abel Forward-Projection Closure")
     fig.tight_layout()
-    closure_path = outdir / "Draco_abel_forward_closure.png"
+    closure_path = outdir / f"{galaxy}_abel_forward_closure.png"
     fig.savefig(closure_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return {
@@ -402,7 +402,8 @@ def save_outputs(result, R, Sigma, Sigma_err, outdir, unresolved_center):
     }
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Draco non-parametric Abel deprojection.")
+    p = argparse.ArgumentParser(description="Galaxy non-parametric Abel deprojection.")
+    p.add_argument("--galaxy", default="Draco")
     p.add_argument("--surface-brightness", default="Data/Galaxy_Profiles/Draco/Draco_surface_brightness.csv")
     p.add_argument("--outdir", default="Data/Galaxy_Profiles/Draco/plots")
     p.add_argument("--radius-col", default="R_pc")
@@ -418,10 +419,10 @@ def main():
     args = build_parser().parse_args()
     R, Sigma, Sigma_err = load_surface_brightness(args.surface_brightness, radius_col=args.radius_col, sigma_col=args.sigma_col, sigma_err_col=args.sigma_err_col)
     median_plummer_error, max_plummer_error = validate_abel_integral_with_plummer()
-    result = build_draco_deprojection(R, Sigma, Sigma_err, n_grid=args.n_grid, smoothing_target=args.smoothing_target, outer_tail_points=args.outer_tail_points, outer_transition_sigma=args.outer_transition_sigma)
+    result = build_deprojection(R, Sigma, Sigma_err, n_grid=args.n_grid, smoothing_target=args.smoothing_target, outer_tail_points=args.outer_tail_points, outer_transition_sigma=args.outer_transition_sigma)
     first_annulus_outer_pc, first_annulus_raw_light, q_axis_ratio = load_unresolved_center_inputs(args.surface_brightness)
     unresolved_center = unresolved_center_light_budget(result["R_grid"], result["nu"], result["R_last"], result["Sigma_last"], result["outer_slope"], first_annulus_outer_pc, first_annulus_raw_light, q_axis_ratio)
-    outputs = save_outputs(result, R, Sigma, Sigma_err, Path(args.outdir), unresolved_center)
+    outputs = save_outputs(result, R, Sigma, Sigma_err, Path(args.outdir), unresolved_center, args.galaxy)
     print("ABEL DEPROJECTION")
     print("-----------------")
     print(f"observed radius range [pc]: {R[0]:.6f} -> {R[-1]:.6f}")

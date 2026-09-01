@@ -59,7 +59,31 @@ CONFIG = {
         "force_nphi": 32,
         "source": "Odenkirchen2001",
     },
-
+    "DATA_PREP": {
+        "surface_brightness": {
+            "input_csv": str(PROFILE_ROOT / "Draco_surface_brightness_source.csv"),
+            "input_type": "surface_density_annuli",
+            "source": "Odenkirchen_et_al_2001_Table_3",
+            "preferred_profile": "S2",
+            "radius_type": "elliptical_major_axis",
+            "background": 0.0760,
+            "background_err": 0.0014,
+            "radius_units": "arcmin",
+            "rin_col": "rin_arcmin",
+            "rout_col": "rout_arcmin",
+            "rmid_col": "rm_arcmin",
+            "sigma_col": "Sigma_table3_arcmin2",
+            "sigma_err_col": "Sigma_table3_err_arcmin2",
+        },
+        "losvd_bins": {
+            "mode": "min_count",
+            "min_stars": 20,
+            "drop_partial": False,
+        },
+        "abel_smoothing_target": 9.0,
+        "abel_outer_transition_sigma": 5.0,
+        "abel_outer_tail_points": 6,
+    },
     # Draco data contract
     "STAR_R_COL": "r_pc",
     "STAR_V_COL": "vlos",

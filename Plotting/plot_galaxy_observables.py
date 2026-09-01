@@ -152,7 +152,11 @@ def load_losvd_bins(path, stars):
     return bins, edges
 
 def assign_bins(r, edges):
+    r = np.asarray(r, float)
+    edges = np.asarray(edges, float)
     idx = np.searchsorted(edges, r, side="right") - 1
+    final_edge = np.isclose(r, edges[-1], rtol=1e-12, atol=1e-12)
+    idx[final_edge] = len(edges) - 2
     idx[(idx < 0) | (idx >= len(edges) - 1)] = -1
     return idx
 
