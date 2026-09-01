@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 ROLE: OSPM Data Prep / pre-staging.
 This script converts adopted galaxy observations into static OSPM input
@@ -88,6 +87,35 @@ def make_min_count_bins(r_pc, min_per_bin=20, drop_partial=False):
             "N_vlos": len(group),
         })
 
+    return edges, pd.DataFrame(rows)
+
+def make_equal_count_bins(r_pc, n_bins):
+    r = np.sort(np.asarray(r_pc, float))
+    r = r[np.isfinite(r)]
+    n_bins = int(n_bins)
+    if len(r) == 0:
+        raise ValueError("No finite radii for kinematic bins.")
+    if n_bins < 1:
+        raise ValueError("n_bins must be at least 1.")
+    if n_bins > len(r):
+        raise ValueError(f"n_bins={n_bins} exceeds the number of finite radii ({len(r)}).")
+    groups = [np.asarray(group, float) for group in np.array_split(r, n_bins)]
+    if any(len(group) == 0 for group in groups):
+        raise ValueError("Equal-count binning produced an empty radial bin.")
+    edges = np.empty(len(groups) + 1, dtype=float)
+    edges[0] = 0.0
+    for i in range(1, len(groups)):
+        edges[i] = 0.5 * (groups[i - 1][-1] + groups[i][0])
+    edges[-1] = np.nextafter(groups[-1][-1], np.inf)
+    rows = []
+    for i, group in enumerate(groups):
+        rows.append({
+            "bin_id": i,
+            "R_inner_pc": edges[i],
+            "R_outer_pc": edges[i + 1],
+            "R_mid_pc": 0.5 * (edges[i] + edges[i + 1]),
+            "N_vlos": len(group),
+        })
     return edges, pd.DataFrame(rows)
 
 def plot_ellipse(ax, radius_pc, q, **kwargs):
@@ -182,6 +210,43 @@ def validate_axisymmetric_grid(out, ltot):
     if not np.allclose(shell_from_cells, shell_expected, rtol=1e-12, atol=1e-12):
         raise ValueError("cell luminosities do not sum to their shell luminosities")
     return True
+
+def cmd_build_losvd_bins(args):
+    star_path = Path(args.stars)
+    out_path = Path(args.out)
+    stars = pd.read_csv(star_path)
+    required = {args.radius_col, args.velocity_col, args.velocity_error_col}
+    missing = required - set(stars.columns)
+    if missing:
+        raise KeyError(f"Star file missing LOSVD columns: {sorted(missing)}")
+    r = pd.to_numeric(stars[args.radius_col], errors="coerce").to_numpy(float)
+    v = pd.to_numeric(stars[args.velocity_col], errors="coerce").to_numpy(float)
+    verr = pd.to_numeric(stars[args.velocity_error_col], errors="coerce").to_numpy(float)
+    good = np.isfinite(r) & np.isfinite(v) & np.isfinite(verr) & (r >= 0.0) & (verr > 0.0)
+    r_use = r[good]
+    if len(r_use) == 0:
+        raise ValueError("No usable stars remain for LOSVD radial binning.")
+    mode = str(args.mode).strip().lower()
+    if mode == "min_count":
+        if args.min_stars is None:
+            raise ValueError("mode=min_count requires --min-stars")
+        _, bins = make_min_count_bins(r_use, min_per_bin=int(args.min_stars), drop_partial=bool(args.drop_partial_bins))
+    elif mode == "equal_count":
+        if args.n_bins is None:
+            raise ValueError("mode=equal_count requires --n-bins")
+        if args.drop_partial_bins:
+            raise ValueError("--drop-partial-bins is only valid with mode=min_count")
+        _, bins = make_equal_count_bins(r_use, n_bins=int(args.n_bins))
+    else:
+        raise ValueError("mode must be 'min_count' or 'equal_count'")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    bins.to_csv(out_path, index=False)
+    print(f"Saved bins: {out_path}")
+    print(f"Mode: {mode}")
+    print(f"N usable LOSVD stars: {len(r_use)}")
+    print(f"N kinematic bins: {len(bins)}")
+    print(f"N_vlos: {bins['N_vlos'].astype(int).tolist()}")
+    print(f"N_vlos sum: {int(bins['N_vlos'].sum())}")
 
 def cmd_plot_bins(args):
     sb_path = Path(args.surface_brightness)
@@ -942,6 +1007,18 @@ def cmd_build_gden_products(args):
 def build_parser():
     p = argparse.ArgumentParser(description="OSPM observable mapping utilities.")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    p_losvd = sub.add_parser("build-losvd-bins", help="Build radial LOSVD bins from the prepared stellar catalog.")
+    p_losvd.add_argument("--stars", required=True)
+    p_losvd.add_argument("--out", required=True)
+    p_losvd.add_argument("--radius-col", default="r_pc")
+    p_losvd.add_argument("--velocity-col", default="vlos")
+    p_losvd.add_argument("--velocity-error-col", default="vlos_err")
+    p_losvd.add_argument("--mode", required=True, choices=["min_count", "equal_count"])
+    p_losvd.add_argument("--min-stars", type=int, default=None)
+    p_losvd.add_argument("--n-bins", type=int, default=None)
+    p_losvd.add_argument("--drop-partial-bins", action="store_true")
+    p_losvd.set_defaults(func=cmd_build_losvd_bins)
 
     p_plot = sub.add_parser("plot-bins", help="Plot projected stars, kinematic bins, and surface-brightness bins.")
     p_plot.add_argument("--surface-brightness", required=True)

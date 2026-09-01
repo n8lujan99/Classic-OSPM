@@ -47,3 +47,5 @@ OSPM_V2.sublime-project
 OSPM_V2.sublime-workspace
 *png
 Fortran
+Data/Galaxy_Profiles/Segue1/plots/*
+*.png
