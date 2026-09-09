@@ -1263,14 +1263,20 @@ function _karl_rebin_transvd_to_model(vfine_kms::Vector{Float64}, central::Vecto
     return target, sigma
 end
 
+@inline function _karl_poisson_upper_sigma(n::Int)
+    n >= 0 || error("Karl Poisson count must be nonnegative")
+    return 1.0 + sqrt(f64(n) + 0.75)
+end
+
 function _observed_targets_karl_resolved(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8, kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, kde_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, kde_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR)
     kinematic_edges = resolve_karl_spatial_edges(kinematic_edges)
     light_edges_use = light_edges === nothing ? kinematic_edges : resolve_karl_light_edges(light_edges)
     velocity_edges = Float64.(velocity_edges)
+    any(diff(velocity_edges) .<= 0.0) && error("Karl resolved velocity_edges must be strictly increasing")
     Nspatial = length(kinematic_edges) - 1
     Nvbin = length(velocity_edges) - 1
     Nlosvd = Nspatial * Nvbin
-    velocities_by_spatial = [Float64[] for _ in 1:Nspatial]
+    counts_losvd = zeros(Int, Nspatial, Nvbin)
     counts_by_spatial = zeros(Float64, Nspatial)
 
     @inbounds for i in eachindex(valid_vlos)
@@ -1279,7 +1285,9 @@ function _observed_targets_karl_resolved(R_star_m::Vector{Float64}, valid_vlos::
         isfinite(v_star_mps[i]) || continue
         ib = _bin_index(kinematic_edges, R_star_m[i])
         ib == 0 && continue
-        push!(velocities_by_spatial[ib], v_star_mps[i] / 1.0e3)
+        jb = _bin_index(velocity_edges, v_star_mps[i])
+        jb == 0 && error("Karl resolved stellar velocity $(v_star_mps[i] / 1.0e3) km/s in radial aperture $ib lies outside configured LOSVD velocity support [$(velocity_edges[1] / 1.0e3), $(velocity_edges[end] / 1.0e3)] km/s")
+        counts_losvd[ib, jb] += 1
         counts_by_spatial[ib] += 1.0
     end
 
@@ -1291,25 +1299,33 @@ function _observed_targets_karl_resolved(R_star_m::Vector{Float64}, valid_vlos::
     losvd_sigma = fill(DEFAULT_KARL_INVALID_SIGMA_SENTINEL, Nlosvd)
 
     @inbounds for ib in 1:Nspatial
-        velocities = velocities_by_spatial[ib]
-        isempty(velocities) && continue
-        vkde, central, lower, upper = _karl_bootstrap_kde_envelope(velocities; grid_size=kde_grid, width_bins=kde_width_bins, vmin_kms=kde_vmin_kms, vmax_kms=kde_vmax_kms, bootstraps=bootstraps)
-        vfine, yfine, ylow, yhigh = _karl_transvd_profile(vkde, central, lower, upper; ntot=DEFAULT_KARL_RESOLVED_TRANSVD_SAMPLES, envelope_floor=envelope_floor)
-        target_bin, sigma_bin = _karl_rebin_transvd_to_model(vfine, yfine, ylow, yhigh, velocity_edges, max(losvd_light_target[ib], 0.0))
+        nbin = Int(round(counts_by_spatial[ib]))
+        nbin == 0 && continue
+        counted = sum(@view counts_losvd[ib, :])
+        counted == nbin || error("Karl resolved LOSVD count mismatch in radial aperture $ib: velocity bins contain $counted stars but radial aperture contains $nbin")
+        Li = max(losvd_light_target[ib], 0.0)
+
+        for jb in 1:Nvbin
+            row = (ib - 1) * Nvbin + jb
+            nij = counts_losvd[ib, jb]
+            losvd_target[row] = Li * nij / nbin
+            losvd_sigma[row] = max(Li * _karl_poisson_upper_sigma(nij) / nbin, sigma_floor)
+        end
+
         rows = ((ib - 1) * Nvbin + 1):(ib * Nvbin)
-        losvd_target[rows] .= target_bin
-        losvd_sigma[rows] .= sigma_bin
+        target_sum = sum(@view losvd_target[rows])
+        scale = max(abs(target_sum), abs(Li), 1.0)
+        abs(target_sum - Li) <= 1.0e-12 * scale || error("Karl resolved LOSVD target does not recover aperture light in radial aperture $ib")
     end
 
     println("[KARL RESOLVED LOSVD TARGET]",
         " Nspatial=", Nspatial,
         " Nvbin=", Nvbin,
-        " kde_grid=", kde_grid,
-        " kde_width_bins=", kde_width_bins,
-        " kde_vmin_kms=", kde_vmin_kms,
-        " kde_vmax_kms=", kde_vmax_kms,
-        " bootstraps=", bootstraps,
-        " envelope_floor=", envelope_floor,
+        " profile=hard_velocity_counts",
+        " uncertainty=gehrels_upper_1sigma",
+        " zero_count_sigma_counts=", _karl_poisson_upper_sigma(0),
+        " zero_velocity_bins=", count(==(0), counts_losvd),
+        " low_count_velocity_bins=", count(n -> 0 < n < 5, counts_losvd),
         " valid_losvd_bins=", count(!=(DEFAULT_KARL_INVALID_SIGMA_SENTINEL), losvd_sigma),
     )
 

@@ -3,9 +3,7 @@
 # Shared solver, orbit-library, AI, deck, and runtime defaults come from OSPM/load_config.py.
 
 from pathlib import Path
-
-LOCAL_DEBUG = True
-
+LOCAL_DEBUG = False
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
@@ -18,6 +16,14 @@ INITIAL_THETA = [13.320825619743976, 27.64513174995341, 370858.67274967243, 1.43
 #INITIAL_THETA = [13.320825619743976, 27.64513174995341, 1000000.0, 1.433594982833482]
 
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
+
+LOSVD_VMIN_KMS = -42.0
+LOSVD_VMAX_KMS = 47.0
+LOSVD_NVBIN = 21
+VELOCITY_EDGES_MPS = [
+    1.0e3 * (LOSVD_VMIN_KMS + i * (LOSVD_VMAX_KMS - LOSVD_VMIN_KMS) / LOSVD_NVBIN)
+    for i in range(LOSVD_NVBIN + 1)
+]
 
 CONFIG = {
     "LOCAL_DEBUG": LOCAL_DEBUG,
@@ -97,24 +103,29 @@ CONFIG = {
     "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Segue1_surface_brightness.csv"),
     "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Segue1_losvd_bins.csv"),
 
-    # Historical Karl mode-0 observable construction, regenerated from the
-    # current Segue 1 stars, surface-brightness profile, and the settings below.
-    # The Data-side generator and runtime both use this single consolidated CSV.
+    # Active resolved-star LOSVD representation.
     "LOSVD_TARGET_MODE": "karl_resolved_stars",
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
 
-    # Retained only for compatibility with the alternate karl_resolved_stars mode.
-    # These are ignored while LOSVD_TARGET_MODE == "karl_mode0_observables".
+    # Segue 1 resolved LOSVD velocity support.
+    # Use the systemic-centered, data-derived padded stellar-velocity range as
+    # exactly 21 explicit bins. Explicit m/s edges bypass the historical
+    # ±100 km/s auto-support expansion.
+    "NVBIN": LOSVD_NVBIN,
+    "VELOCITY_EDGES": VELOCITY_EDGES_MPS,
+
+    # Retained for compatibility; KDE/bootstrap settings are not used by the
+    # active hard-count + Poisson karl_resolved_stars target builder.
     "KARL_RESOLVED_KDE_GRID": 17,
     "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
-    "KARL_RESOLVED_VMIN_KMS": -25.0,
-    "KARL_RESOLVED_VMAX_KMS": 25.0,
+    "KARL_RESOLVED_VMIN_KMS": LOSVD_VMIN_KMS,
+    "KARL_RESOLVED_VMAX_KMS": LOSVD_VMAX_KMS,
     "KARL_RESOLVED_BOOTSTRAPS": 300,
     "KARL_RESOLVED_ENVELOPE_FLOOR": 0.003,
 
     # Galaxy-specific inputs for the generic Karl-observables generator.
-    # Karl algorithmic constants such as the ±4.5σ LOSVD extent, mkherm nsim=100,
-    # gmax/60 continuum perturbation, ran1/gasdev, and biwgt remain in the generic generator.
+    # This consolidated Gaussian CSV remains available as a legacy/diagnostic
+    # product; the active OSPM target is karl_resolved_stars above.
     "KARL_OBSERVABLES": {
         "output_csv": str(KARL_OBSERVABLES_CSV),
         "surface_brightness_radius_col": "R_pc",
@@ -126,9 +137,9 @@ CONFIG = {
         "radial_rmin_arcsec": 1.0,
         "radial_rmax_arcsec": 11386.65,
         "seeing_arcsec": 1.5,
-        "nvel": 13,
-        "model_vmin_kms": -15.0,
-        "model_vmax_kms": 15.0,
+        "nvel": LOSVD_NVBIN,
+        "model_vmin_kms": LOSVD_VMIN_KMS,
+        "model_vmax_kms": LOSVD_VMAX_KMS,
         "losvd_center_mode": "systemic",
         "losvd_shape": "gaussian",
         "apertures": [
@@ -144,5 +155,5 @@ CONFIG = {
     "MBH_LOG_FLOOR": 1.0e3,
     "MBH_ZERO_FRACTION": 0.10,
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_stars.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1-v0-integration-test.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1-v1-integration-test.csv"),
 }

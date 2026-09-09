@@ -11,6 +11,14 @@ KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
 INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
+LOSVD_VMIN_KMS = -41.317862205564666
+LOSVD_VMAX_KMS = 40.712143487870975
+LOSVD_NVBIN = 21
+VELOCITY_EDGES_MPS = [
+    1.0e3 * (LOSVD_VMIN_KMS + i * (LOSVD_VMAX_KMS - LOSVD_VMIN_KMS) / LOSVD_NVBIN)
+    for i in range(LOSVD_NVBIN + 1)
+]
+
 CONFIG = {
     "LOCAL_DEBUG": LOCAL_DEBUG,
     "FIXED_THETA": FIXED_THETA,
@@ -98,19 +106,23 @@ CONFIG = {
     # Consolidated Karl-style observational representation.
     "LOSVD_TARGET_MODE": "karl_resolved_stars",
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
+    # Draco-resolved LOSVD velocity support.
+    # Use the data-derived padded stellar-velocity range as exactly 21 explicit bins.
+    # Explicit m/s edges bypass the historical ±100 km/s auto-support expansion.
+    "NVBIN": LOSVD_NVBIN,
+    "VELOCITY_EDGES": VELOCITY_EDGES_MPS,
     # Karl resolved-star LOSVD construction.
     "KARL_RESOLVED_KDE_GRID": 17,
     "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
-    "KARL_RESOLVED_VMIN_KMS": -41.317862205564666,
-    "KARL_RESOLVED_VMAX_KMS": 40.712143487870975,
+    "KARL_RESOLVED_VMIN_KMS": LOSVD_VMIN_KMS,
+    "KARL_RESOLVED_VMAX_KMS": LOSVD_VMAX_KMS,
     "KARL_RESOLVED_BOOTSTRAPS": 300,
     "KARL_RESOLVED_ENVELOPE_FLOOR": 0.003,
 
     # Galaxy-specific inputs for OSPM/Data_Prep/build_karl_observables.py.
     # Existing Draco kinematic bins are the radial grid and aperture authority.
     # Resolved-star LOS velocities use no seeing convolution.
-    # The finite 21-bin model grid derives its outer bin centers from Draco's
-    # actual systemic-centered stellar velocity range; no arbitrary padding is added.
+    # The finite 21-bin grid is tied to Draco's data-derived velocity support.
     "KARL_OBSERVABLES": {
         "output_csv": str(KARL_OBSERVABLES_CSV),
         "surface_brightness_radius_col": "R_pc",
@@ -122,7 +134,7 @@ CONFIG = {
         "nvdat": 20,
         "nvlib": 5,
         "seeing_arcsec": 0.0,
-        "nvel": 21,
+        "nvel": LOSVD_NVBIN,
         "velocity_grid_mode": "data_range",
         "losvd_center_mode": "systemic",
         "losvd_shape": "gaussian",
@@ -144,5 +156,5 @@ CONFIG = {
     "PEN_SPHERE_STRENGTH": 200,
     "EVAL_VARIANTS": ["full"],
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-v0-production.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-v1-production.csv"),
 }
