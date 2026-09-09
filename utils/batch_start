@@ -16,6 +16,12 @@ WHICH_GAL_FILE="$REPO_ROOT/which_galaxy"
 GALAXY_PROFILE_DIR="$REPO_ROOT/Data/Galaxy_Profiles"
 SLURM_SCRIPT="$REPO_ROOT/Data/slurm"
 
+# ---- Basic repo sanity check ----
+if [[ ! -d "$REPO_ROOT" ]]; then
+    echo "[FATAL] Could not determine repo root"
+    exit 1
+fi
+
 # ------------------------------------------------------------
 # Read selected galaxy
 # ------------------------------------------------------------
@@ -62,10 +68,11 @@ mkdir -p "$REPO_ROOT/logs"
 # Submit
 # ------------------------------------------------------------
 echo "[INFO] Submitting OSPM-V2 job"
-echo "[INFO] Repo root: $REPO_ROOT"
-echo "[INFO] Galaxy:    $GALAXY"
-echo "[INFO] Profiles:  $GALAXY_PROFILE_DIR"
-echo "[INFO] Slurm:     $SLURM_SCRIPT"
+echo "[INFO] Repo root:        $REPO_ROOT"
+echo "[INFO] Galaxy:           $GALAXY"
+echo "[INFO] Profiles:         $GALAXY_PROFILE_DIR"
+echo "[INFO] Slurm:            $SLURM_SCRIPT"
+echo "[INFO] Julia depot path: $JULIA_DEPOT_PATH"
 echo "[NOTE] Wait 1 min before submitting additional runs"
 
 sbatch \
