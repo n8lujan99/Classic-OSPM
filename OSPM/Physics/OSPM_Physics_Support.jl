@@ -51,7 +51,10 @@ const DEFAULT_DR_FLOOR_PC     = 0.0       # floor on dR (parsecs)
 const DEFAULT_MIN_STARS_PER_BIN = 20       # minimum stars per projected radial bin
 const DEFAULT_NVBIN             = 21       # requested LOSVD resolution; auto support may add bins at the same width
 const DEFAULT_LOSVD_MIN_HALF_WIDTH_KMS = 100.0
-const DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION = 0.01
+const DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION = 0.01       # legacy :current-mode hard-rejection threshold
+const DEFAULT_KARL_RESOLVED_SELECTION_WARN_FRACTION = 0.01  # diagnostic only for selected hard-count LOSVDs
+const DEFAULT_LOSVD_CONDITIONING = :vlos_cut
+const DEFAULT_LOSVD_FIT_STATISTIC = :multinomial
 const DEFAULT_KARL_RESOLVED_KDE_GRID = 17
 const DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS = 3.0
 const DEFAULT_KARL_RESOLVED_VMIN_KMS = -25.0
@@ -83,6 +86,19 @@ const DEFAULT_KARL_SPEAR_RCOND_WARN = 1.0e-12
 @inline _ssin(theta::Float64)=begin s=sin(theta); abs(s)>1e-12 ? s : safe_sign(s)*1e-12 end
 @inline function _sincos_safe(theta::Float64); s,cc=sincos(theta); abs(s)>1e-12 ? (s,cc) : (safe_sign(s)*1e-12,cc) end
 @inline clamp01(x::Float64)=x<0 ? 0.0 : (x>1 ? 1.0 : x)
+
+@inline function _normalize_losvd_conditioning(mode)
+    mode_sym = mode === nothing ? DEFAULT_LOSVD_CONDITIONING : Symbol(lowercase(String(mode)))
+    mode_sym in (:vlos_cut, :none) || error("Unknown losvd_conditioning=$(mode). Use vlos_cut or none")
+    return mode_sym
+end
+
+@inline function _normalize_losvd_fit_statistic(mode, target_mode::Symbol)
+    mode_sym = mode === nothing ? (target_mode === :karl_resolved_stars ? DEFAULT_LOSVD_FIT_STATISTIC : :legacy_chi2) : Symbol(lowercase(String(mode)))
+    mode_sym in (:multinomial, :legacy_chi2) || error("Unknown losvd_fit_statistic=$(mode). Use multinomial or legacy_chi2")
+    mode_sym === :multinomial && target_mode !== :karl_resolved_stars && error("losvd_fit_statistic=:multinomial requires losvd_target_mode=:karl_resolved_stars")
+    return mode_sym
+end
 
 struct HaloContext
     halo::Dict{Symbol,Any}
@@ -1268,7 +1284,7 @@ end
     return 1.0 + sqrt(f64(n) + 0.75)
 end
 
-function _observed_targets_karl_resolved(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8, kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, kde_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, kde_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR)
+function _observed_targets_karl_resolved(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8, kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, kde_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, kde_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, return_counts::Bool=false)
     kinematic_edges = resolve_karl_spatial_edges(kinematic_edges)
     light_edges_use = light_edges === nothing ? kinematic_edges : resolve_karl_light_edges(light_edges)
     velocity_edges = Float64.(velocity_edges)
@@ -1329,6 +1345,8 @@ function _observed_targets_karl_resolved(R_star_m::Vector{Float64}, valid_vlos::
         " valid_losvd_bins=", count(!=(DEFAULT_KARL_INVALID_SIGMA_SENTINEL), losvd_sigma),
     )
 
+    losvd_counts = Int[counts_losvd[ib, jb] for ib in 1:Nspatial for jb in 1:Nvbin]
+    return_counts && return losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial, losvd_counts
     return losvd_target, losvd_sigma, light_target, light_sigma, counts_by_spatial
 end
 
@@ -1539,10 +1557,10 @@ function light_sigma_from_surface_brightness(profile, spatial_edges_m::Vector{Fl
     return out_sigma
 end
 
-function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8, target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR)
+function observed_targets_karl(R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, kinematic_edges::Vector{Float64}, velocity_edges::Vector{Float64}; surface_brightness_profile=nothing, light_edges=nothing, sigma_floor::Float64=1e-8, target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, return_counts::Bool=false)
     mode = target_mode isa Symbol ? target_mode : Symbol(lowercase(String(target_mode)))
     if mode === :karl_resolved_stars
-        return _observed_targets_karl_resolved(R_star_m, valid_vlos, v_star_mps, kinematic_edges, velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=light_edges, sigma_floor=sigma_floor, kde_grid=karl_resolved_kde_grid, kde_width_bins=karl_resolved_kde_width_bins, kde_vmin_kms=karl_resolved_vmin_kms, kde_vmax_kms=karl_resolved_vmax_kms, bootstraps=karl_resolved_bootstraps, envelope_floor=karl_resolved_envelope_floor)
+        return _observed_targets_karl_resolved(R_star_m, valid_vlos, v_star_mps, kinematic_edges, velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=light_edges, sigma_floor=sigma_floor, kde_grid=karl_resolved_kde_grid, kde_width_bins=karl_resolved_kde_width_bins, kde_vmin_kms=karl_resolved_vmin_kms, kde_vmax_kms=karl_resolved_vmax_kms, bootstraps=karl_resolved_bootstraps, envelope_floor=karl_resolved_envelope_floor, return_counts=return_counts)
     elseif mode !== :current
         error("Unsupported LOSVD target_mode=$target_mode; expected :current or :karl_resolved_stars")
     end

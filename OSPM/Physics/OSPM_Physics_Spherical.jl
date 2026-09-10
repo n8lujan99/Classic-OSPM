@@ -49,9 +49,13 @@ function _observed_targets_for_mode(R_star_m::Vector{Float64}, valid_vlos::Abstr
         projected_light_target = light_target_from_surface_brightness(surface_brightness_profile, st.light_edges; normalize=true)
         projected_light_sigma = light_sigma_from_surface_brightness(surface_brightness_profile, st.light_edges; normalize=true, sigma_floor=1.0e-8)
         counts_by_spatial = Float64.(karl_observables.star_count)
-        return copy(targets.losvd_target), copy(targets.losvd_sigma), projected_light_target, projected_light_sigma, counts_by_spatial
+        return copy(targets.losvd_target), copy(targets.losvd_sigma), projected_light_target, projected_light_sigma, counts_by_spatial, nothing
     end
-    return observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=st.light_edges, target_mode=losvd_target_mode, karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
+    if losvd_target_mode === :karl_resolved_stars
+        return observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=st.light_edges, target_mode=losvd_target_mode, karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor, return_counts=true)
+    end
+    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = observed_targets_karl(R_star_m, valid_vlos, v_star_mps, verr_star_mps, st.spatial_edges, st.velocity_edges; surface_brightness_profile=surface_brightness_profile, light_edges=st.light_edges, target_mode=losvd_target_mode, karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
+    return losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial, nothing
 end
 
 function _resolve_tracer_constraint_targets(mode::Symbol, projected_target::Vector{Float64}, projected_sigma::Vector{Float64}, d3_constraints)
@@ -94,15 +98,13 @@ function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{
     iseven(length(w)) || error("Tracer diagnostic requires prograde/retrograde orbit pairs")
 
     model = A_constraint * w
+    sigma_diag = _tracer_sigma_diagnostics(model, target, sigma)
     Nbase = length(w) ÷ 2
-    sigma_residual = zeros(Float64, length(target))
     relative_residual = zeros(Float64, length(target))
     support_fraction = zeros(Float64, length(target))
     effective_support = zeros(Float64, length(target))
-    target_scale = max(1.0, maximum(abs.(target)))
-    zero_target_atol = 100.0 * eps(Float64) * target_scale
-    resolved_targets = abs.(target[abs.(target) .> zero_target_atol])
-    zero_target_reference = isempty(resolved_targets) ? 1.0 : minimum(resolved_targets)
+    zero_target_atol = sigma_diag.zero_target_atol
+    zero_target_reference = sigma_diag.zero_target_reference
 
     @inbounds for ib in eachindex(target)
         pair_contrib = zeros(Float64, Nbase)
@@ -127,25 +129,31 @@ function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{
             effective_support[ib] = 1.0 / sum(abs2, p)
         end
 
-        sigma_residual[ib] = (model[ib] - target[ib]) / max(abs(sigma[ib]), 1.0e-12)
         relative_denominator = abs(target[ib]) > zero_target_atol ? abs(target[ib]) : zero_target_reference
         relative_residual[ib] = abs(model[ib] - target[ib]) / relative_denominator
         support_fraction[ib] = n_support / Nbase
 
         if print_bins
             if d3_constraints === nothing
-                println("[TRACER BIN]", " i=", model_index, " bin=", ib, " R_inner_pc=", constraint_edges[ib] / pc, " R_outer_pc=", constraint_edges[ib + 1] / pc, " target=", target[ib], " model=", model[ib], " sigma_residual=", sigma_residual[ib], " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+                if sigma_diag.zero_target_floor[ib]
+                    println("[TRACER BIN]", " i=", model_index, " bin=", ib, " R_inner_pc=", constraint_edges[ib] / pc, " R_outer_pc=", constraint_edges[ib + 1] / pc, " target=", target[ib], " model=", model[ib], " sigma_residual=not_applicable", " zero_target_leakage_rel=", sigma_diag.zero_target_leakage_rel[ib], " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+                else
+                    println("[TRACER BIN]", " i=", model_index, " bin=", ib, " R_inner_pc=", constraint_edges[ib] / pc, " R_outer_pc=", constraint_edges[ib + 1] / pc, " target=", target[ib], " model=", model[ib], " sigma_residual=", sigma_diag.sigma_residual[ib], " zero_target_leakage_rel=not_applicable", " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+                end
             else
                 ir = d3_constraints.row_radial[ib]
                 iv = d3_constraints.row_angular[ib]
                 vinner = iv == 0 ? d3_constraints.angular_edges[1] : d3_constraints.angular_edges[iv]
                 vouter = iv == 0 ? d3_constraints.angular_edges[end] : d3_constraints.angular_edges[iv + 1]
-                println("[TRACER BIN]", " i=", model_index, " bin=", ib, " radial_bin=", ir, " angular_bin=", iv, " R_inner_pc=", d3_constraints.radial_edges_m[ir] / pc, " R_outer_pc=", d3_constraints.radial_edges_m[ir + 1] / pc, " vcoord_inner=", vinner, " vcoord_outer=", vouter, " target=", target[ib], " model=", model[ib], " sigma_residual=", sigma_residual[ib], " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+                if sigma_diag.zero_target_floor[ib]
+                    println("[TRACER BIN]", " i=", model_index, " bin=", ib, " radial_bin=", ir, " angular_bin=", iv, " R_inner_pc=", d3_constraints.radial_edges_m[ir] / pc, " R_outer_pc=", d3_constraints.radial_edges_m[ir + 1] / pc, " vcoord_inner=", vinner, " vcoord_outer=", vouter, " target=", target[ib], " model=", model[ib], " sigma_residual=not_applicable", " zero_target_leakage_rel=", sigma_diag.zero_target_leakage_rel[ib], " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+                else
+                    println("[TRACER BIN]", " i=", model_index, " bin=", ib, " radial_bin=", ir, " angular_bin=", iv, " R_inner_pc=", d3_constraints.radial_edges_m[ir] / pc, " R_outer_pc=", d3_constraints.radial_edges_m[ir + 1] / pc, " vcoord_inner=", vinner, " vcoord_outer=", vouter, " target=", target[ib], " model=", model[ib], " sigma_residual=", sigma_diag.sigma_residual[ib], " zero_target_leakage_rel=not_applicable", " support_fraction=", support_fraction[ib], " effective_N_base_orbits=", effective_support[ib])
+                end
             end
         end
     end
 
-    max_sigma_residual, worst_sigma_bin = findmax(abs.(sigma_residual))
     max_relative_residual, worst_relative_bin = findmax(relative_residual)
     min_support_fraction, weakest_support_bin = findmin(support_fraction)
     min_effective_support, weakest_effective_bin = findmin(effective_support)
@@ -155,8 +163,11 @@ function _print_tracer_bin_diagnostics(A_constraint::Matrix{Float64}, w::Vector{
         " bins=", length(target),
         " max_rel=", max_relative_residual,
         " worst_rel_bin=", worst_relative_bin,
-        " max_sigma=", max_sigma_residual,
-        " worst_sigma_bin=", worst_sigma_bin,
+        " max_sigma=", sigma_diag.max_sigma_residual,
+        " worst_sigma_bin=", sigma_diag.worst_sigma_bin,
+        " zero_target_floor_rows=", sigma_diag.zero_target_floor_rows,
+        " max_zero_target_leakage_rel=", sigma_diag.max_zero_target_leakage_rel,
+        " worst_zero_target_bin=", sigma_diag.worst_zero_target_bin,
         " min_support_fraction=", min_support_fraction,
         " weakest_support_bin=", weakest_support_bin,
         " min_effective_N=", min_effective_support,
@@ -823,18 +834,34 @@ function _init_orbit_work(
             for ib in 1:Nspatial
         ]
 
-        velocity_edges_use =
-            velocity_edges === nothing ?
-            build_velocity_edges_auto(
-                v_star_mps[vlos_idx],
-                verr_star_mps[vlos_idx];
-                Nvbin=Nvbin,
-            ) :
-            Float64.(velocity_edges)
+        if losvd_mode === :karl_resolved_stars
+            velocity_edges === nothing &&
+                error("Karl resolved LOSVD requires explicit velocity_edges defining the selected sample window")
+            velocity_edges_use = Float64.(velocity_edges)
+        else
+            velocity_edges_use =
+                velocity_edges === nothing ?
+                build_velocity_edges_auto(
+                    v_star_mps[vlos_idx],
+                    verr_star_mps[vlos_idx];
+                    Nvbin=Nvbin,
+                ) :
+                Float64.(velocity_edges)
+        end
     end
 
     Nlight_projected = length(light_edges) - 1
     Nvbin_eff = length(velocity_edges_use) - 1
+
+    if losvd_mode === :karl_resolved_stars
+        any(.!isfinite.(velocity_edges_use)) && error("Karl resolved LOSVD selection edges contain nonfinite values")
+        any(diff(velocity_edges_use) .<= 0.0) && error("Karl resolved LOSVD selection edges must be strictly increasing")
+        Nvbin_eff == Nvbin || error("Karl resolved LOSVD selection grid must contain exactly Nvbin=$Nvbin bins; got $Nvbin_eff")
+        @inbounds for i in vlos_idx
+            _bin_index(velocity_edges_use, v_star_mps[i]) != 0 ||
+                error("Karl resolved stellar velocity $(v_star_mps[i] / 1.0e3) km/s lies outside the selected sample window [$(velocity_edges_use[1] / 1.0e3), $(velocity_edges_use[end] / 1.0e3)) km/s")
+        end
+    end
 
     losvd_mode === :karl_mode0_observables &&
         Nvbin_eff != karl_observables.nvel &&
@@ -2746,14 +2773,14 @@ function _close_orbit_phase!(st::OrbitWorkState; next_phase::Int=2)
 end
 
 # Main A-matrix builder: maps orbital weights → Karl observables.
-function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, 
-    verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing, 
-    surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC, 
-    dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true, 
-    fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, 
-    shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing, 
-    Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, 
-    karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, 
+function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64},
+    verr_star_mps::Vector{Float64}, sini::Float64, rho_s::Float64, r_s::Float64, MBH::Float64, ML::Float64, halo_type::String; stellar_model=nothing,
+    surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", nsteps::Int=DEFAULT_NSTEPS, Lfrac::NTuple{5,Float64}=DEFAULT_LFRAC,
+    dt_frac_orbit::Float64=DEFAULT_DT_FRAC, max_attempts_factor::Int=DEFAULT_MAX_ATTEMPTS, diag::Bool=false, threaded::Bool=true,
+    fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP,
+    shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, t_deadline::UInt64=typemax(UInt64), velocity_edges=nothing, light_bin_edges=nothing, kinematic_bin_edges=nothing,
+    Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID,
+    karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS,
     karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, karl_observables_csv=nothing)
     Nstar = length(R_star_m)
     @assert length(has_vlos) == Nstar
@@ -2791,7 +2818,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     _close_orbit_phase!(st)
     filled = st.filled_atomic[]
     coverage = _assess_orbit_coverage(st; fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count)
-    
+
     if !coverage.accepted
         _print_orbit_failure_diagnostics(st, 0)
         println("[ORBIT COVERAGE WARNING] filled=", filled, " planned=", coverage.planned, " succeeded=", coverage.succeeded, " coverage_fraction=", coverage.coverage_fraction, " reasons=", isempty(coverage.rejection_reasons) ? "none" : join(coverage.rejection_reasons, " | "))
@@ -2803,7 +2830,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     wphase_use, phase_diag, _ = _build_compact_karl_wphase(st, coverage.successful_columns)
     A = vcat(A_losvd, A_light)
     if diag
-        losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = _observed_targets_for_mode(R_star_m, has_vlos, v_star_mps, verr_star_mps, st, surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
+        losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial, losvd_counts = _observed_targets_for_mode(R_star_m, has_vlos, v_star_mps, verr_star_mps, st, surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins, karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
         light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, projected_light_target, projected_light_sigma, st.d3_constraints)
         return (
             A,
@@ -2846,6 +2873,7 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
                 "light_target" => light_target,
                 "light_sigma" => light_sigma,
                 "counts_by_spatial" => counts_by_spatial,
+                "losvd_counts" => losvd_counts === nothing ? Int[] : losvd_counts,
                 "force_geometry" => String(st.force_geometry),
                 "tracer_constraint_mode" => String(tracer_constraint_mode_sym),
                 "losvd_target_mode" => String(losvd_target_mode_sym),
@@ -2879,19 +2907,23 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
 end
 
 # Batch evaluator: Karl-style binned LOSVD + selectable projected-light or 3-D tracer-density constraint.
-# This is the Heart of the whole Pipeline 
+# This is the Heart of the whole Pipeline
 # and is where all the parallelism is implemented
-function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, karl_observables_csv=nothing)
+function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, karl_observables_csv=nothing, losvd_conditioning=:vlos_cut, losvd_fit_statistic=nothing, delta_statistic_iter_tol::Float64=delta_chi2_iter_tol)
     nrow, nbatch = size(thetas)
     surface_brightness_profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     apfac > 0.0 || error("apfac must be positive")
     light_rel_tol > 0.0 || error("light_rel_tol must be positive")
     light_sigma_tol > 0.0 || error("light_sigma_tol must be positive")
     delta_chi2_iter_tol >= 0.0 || error("delta_chi2_iter_tol must be nonnegative")
+    delta_statistic_iter_tol >= 0.0 || error("delta_statistic_iter_tol must be nonnegative")
     threads_per_model > 0 || error("threads_per_model must be positive")
     losvd_target_mode_sym = _normalize_losvd_target_mode(losvd_target_mode)
+    losvd_conditioning_sym = _normalize_losvd_conditioning(losvd_conditioning)
+    losvd_fit_statistic_sym = _normalize_losvd_fit_statistic(losvd_fit_statistic, losvd_target_mode_sym)
     karl_observables = _resolve_karl_observables(losvd_target_mode_sym; observables_csv=karl_observables_csv)
     if losvd_target_mode_sym === :karl_resolved_stars
+        velocity_edges === nothing && error("Karl resolved LOSVD requires explicit velocity_edges defining the selected sample window")
         karl_resolved_kde_grid > 1 || error("karl_resolved_kde_grid must exceed one")
         isfinite(karl_resolved_kde_width_bins) && karl_resolved_kde_width_bins > 0.0 || error("karl_resolved_kde_width_bins must be finite and positive")
         isfinite(karl_resolved_vmin_kms) && isfinite(karl_resolved_vmax_kms) && karl_resolved_vmax_kms > karl_resolved_vmin_kms || error("Karl resolved LOSVD velocity bounds are invalid")
@@ -2914,7 +2946,9 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         " slurm_cpus=", get(ENV, "SLURM_CPUS_PER_TASK", "local"),
         " threads_per_model=", threads_per_model,
         " model_owner_limit_requested=", model_owner_limit,
-        " losvd_target_mode=", losvd_target_mode_sym)
+        " losvd_target_mode=", losvd_target_mode_sym,
+        " losvd_fit_statistic=", losvd_fit_statistic_sym,
+        " losvd_conditioning=", losvd_conditioning_sym)
     stellar_model_jl = normalize_stellar_model(stellar_model)
     surface_brightness_profile_jl = normalize_surface_brightness_profile(surface_brightness_profile)
     tracer_constraint_mode_sym = _normalize_tracer_constraint_mode(tracer_constraint_mode)
@@ -3078,9 +3112,14 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
             " converged=", _wdiag_value(wdiag, :solver_converged, false),
             " iterations=", _wdiag_value(wdiag, :iterations, 0),
             " chi2=", chi2_score,
+            " fit_statistic=", _wdiag_value(wdiag, :fit_statistic, :legacy_chi2),
+            " conditioning=", _wdiag_value(wdiag, :conditioning, :none),
             " delta_chi2=", _wdiag_value(wdiag, :delta_chi2_iteration, NaN),
             " light_rel=", _wdiag_value(wdiag, :max_light_relative_residual, NaN),
             " light_sigma=", _wdiag_value(wdiag, :max_light_sigma_residual, NaN),
+            " zero_target_floor_rows=", _wdiag_value(wdiag, :zero_target_floor_rows, 0),
+            " zero_target_leakage_rel=", _wdiag_value(wdiag, :max_zero_target_leakage_rel, 0.0),
+            " worst_zero_target_bin=", _wdiag_value(wdiag, :worst_zero_target_bin, 0),
             " N_nonzero=", N_nonzero_weights[i],
             " Neff=", effective_N_orbits[i],
             " max_weight=", max_weight_fraction[i])
@@ -3242,7 +3281,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
-                    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial = _observed_targets_for_mode(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws,
+                    losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial, losvd_counts = _observed_targets_for_mode(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws,
                     surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins,
                     karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
                     light_target, light_sigma = _resolve_tracer_constraint_targets(tracer_constraint_mode_sym, projected_light_target, projected_light_sigma, ws.d3_constraints)
@@ -3272,9 +3311,12 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     ok = false
                     wdiag = nothing
                     try
-                        w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin,
-                        alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i),
-                        entropy_floor=entropy_floor, apfac=apfac, return_diag=true)
+                        if losvd_fit_statistic_sym === :multinomial
+                            losvd_counts === nothing && error("multinomial LOSVD fit requires resolved-star integer counts")
+                            w, ok, wdiag = solve_weights_karl_multinomial(A_light_fit, A_losvd, A_kinematic, light_target_fit, light_sigma_fit, losvd_counts; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin, conditioning=losvd_conditioning_sym, alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_statistic_iter_tol=delta_statistic_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i), entropy_floor=entropy_floor, apfac=apfac, return_diag=true)
+                        else
+                            w, ok, wdiag = solve_weights_karl_expanded_cm(A_light_fit, A_losvd, light_target_fit, light_sigma_fit, losvd_target, losvd_sigma; Nspatial=ws.Nspatial, Nvbin=ws.Nvbin, alphat=alphat, light_rel_tol=light_rel_tol, light_sigma_tol=light_sigma_tol, delta_chi2_iter_tol=delta_chi2_iter_tol, wphase=wphase_use, maxiter=maxiter, seed=UInt(i), entropy_floor=entropy_floor, apfac=apfac, return_diag=true)
+                        end
                     finally
                         Threads.atomic_add!(scheduler_counters.weight_models, -1)
                     end
@@ -3292,8 +3334,9 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     print_window_bins = get(ENV, "OSPM_DIAG_LOSVD_WINDOW", "0") == "1"
                     losvd_window_diag = _print_losvd_window_diagnostics(A_losvd, A_kinematic, w, ws.losvd_aperture_ranges, ws.velocity_edges, ws.Nvbin; model_index=i, print_bins=print_window_bins)
 
-                    losvd_score_state = karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, ws.Nspatial, ws.Nvbin)
-                    cl = losvd_score_state.chi_total
+                    losvd_score_state = losvd_fit_statistic_sym === :multinomial ? karl_multinomial_losvd_state(A_losvd, A_kinematic, w, losvd_counts, ws.Nspatial, ws.Nvbin; conditioning=losvd_conditioning_sym) : karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, ws.Nspatial, ws.Nvbin)
+                    cl = losvd_fit_statistic_sym === :multinomial ? losvd_score_state.deviance_total : losvd_score_state.chi_total
+                    score_by_spatial = losvd_fit_statistic_sym === :multinomial ? losvd_score_state.deviance_by_spatial : losvd_score_state.chi_by_spatial
                     chi2_losvd[i] = cl
 
                     R_inner_m = R_inner_pc * pc
@@ -3306,10 +3349,10 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         rmid = 0.5 * (ws.losvd_aperture_ranges[ib][1] + ws.losvd_aperture_ranges[ib][2])
 
                         if rmid < R_inner_m
-                            inner_chi += losvd_score_state.chi_by_spatial[ib]
+                            inner_chi += score_by_spatial[ib]
                             ninner += Int(round(counts_by_spatial[ib]))
                         else
-                            outer_chi += losvd_score_state.chi_by_spatial[ib]
+                            outer_chi += score_by_spatial[ib]
                             nouter += Int(round(counts_by_spatial[ib]))
                         end
                     end
@@ -3358,7 +3401,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     continue
                 end
                 _print_karl_diagnostics!(i, tid, wdiag, cl)
-                if losvd_target_mode_sym !== :karl_mode0_observables && losvd_window_diag !== nothing && losvd_window_diag.max_outside_fraction > DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION
+                if losvd_target_mode_sym === :karl_resolved_stars && losvd_window_diag !== nothing
+                    if losvd_window_diag.max_outside_fraction > DEFAULT_KARL_RESOLVED_SELECTION_WARN_FRACTION
+                        println("[LOSVD SELECTION NOTICE] i=", i, " worst_bin=", losvd_window_diag.worst_bin, " max_aperture_outside_fraction=", losvd_window_diag.max_outside_fraction, " warning_fraction=", DEFAULT_KARL_RESOLVED_SELECTION_WARN_FRACTION, " action=diagnostic_only", " chi2_losvd=", cl)
+                    end
+                elseif losvd_target_mode_sym !== :karl_mode0_observables && losvd_window_diag !== nothing && losvd_window_diag.max_outside_fraction > DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION
                     solver_failure_reason[i] = "losvd_window_exceeded"
                     solver_converged[i] = false
                     println("[LOSVD WINDOW REJECT] i=", i, " worst_bin=", losvd_window_diag.worst_bin, " max_aperture_outside_fraction=", losvd_window_diag.max_outside_fraction, " allowed_max=", DEFAULT_LOSVD_MAX_OUTSIDE_FRACTION, " chi2_losvd=", cl)

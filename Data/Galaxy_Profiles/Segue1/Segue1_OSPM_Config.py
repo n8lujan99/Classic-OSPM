@@ -28,6 +28,7 @@ VELOCITY_EDGES_MPS = [
 CONFIG = {
     "LOCAL_DEBUG": LOCAL_DEBUG,
     "FIXED_THETA": FIXED_THETA,
+
     "HALO_TYPE": "nonsingular_isothermal",
     "HALO_PARAMETERIZATION": "v0_rc",
     "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"],
@@ -38,6 +39,7 @@ CONFIG = {
         (0.0, 4e6),                     # MBH [Msun] — central black-hole mass
         (0.2, 5.0),                     # M/L — stellar mass-to-light ratio
     ],
+
     "RA0_DEG": 151.7667,
     "DEC0_DEG": 16.0819,
     "DISTANCE_PC": 23000.0,
@@ -47,6 +49,7 @@ CONFIG = {
     "R_MAX_STARS_PC": 120.0,
     "INCLINATION_DEG": 90.0,
     "V_SYS_KMS": 208.5667270167265,
+
     "TRACER_CONSTRAINT_MODE": "density_3d",
     "STELLAR_MODEL": {
         "type": "karl_light_grid",
@@ -66,6 +69,7 @@ CONFIG = {
         "force_nphi": 32,               # azimuthal sampling around each ring
         "source": "Niederste-Ostholt2009_Fig7_digitized",
     },
+
     "DATA_PREP": {
         "surface_brightness": {
             "input_csv": str(PROFILE_ROOT / "archive" / "Segue1_NO09_digitized_raw_points.csv"),
@@ -91,6 +95,7 @@ CONFIG = {
         "abel_outer_transition_sigma": 2.0,
         "abel_outer_tail_points": 35,
     },
+
     "STAR_R_COL": "r_pc",               # projected stellar radius [pc]
     "STAR_V_COL": "vlos",               # observed line-of-sight velocity [km/s]
     "STAR_VERR_COL": "vlos_err",        # velocity measurement uncertainty [km/s]
@@ -100,22 +105,26 @@ CONFIG = {
     "RADIUS_DEG": 0.6,
     "RUWE_MAX": 1.4,
     "PAR_SNR_MIN": 5.0,
+
     "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Segue1_surface_brightness.csv"),
     "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Segue1_losvd_bins.csv"),
 
     # Active resolved-star LOSVD representation.
     "LOSVD_TARGET_MODE": "karl_resolved_stars",
+    "LOSVD_FIT_STATISTIC": "multinomial",
+    "LOSVD_CONDITIONING": "vlos_cut",
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
+    "KARL_DELTA_STATISTIC_ITER_TOL": 0.3,
 
-    # Segue 1 resolved LOSVD velocity support.
-    # Use the systemic-centered, data-derived padded stellar-velocity range as
-    # exactly 21 explicit bins. Explicit m/s edges bypass the historical
-    # ±100 km/s auto-support expansion.
+    # Temporary Segue 1 resolved-star velocity window for Patch 2 integration testing.
+    # Retain the existing 21-bin [-42,+47] km/s window so this test changes only
+    # the statistical treatment. This is NOT yet adopted as the scientifically
+    # verified Segue 1 membership-selection boundary.
     "NVBIN": LOSVD_NVBIN,
     "VELOCITY_EDGES": VELOCITY_EDGES_MPS,
 
     # Retained for compatibility; KDE/bootstrap settings are not used by the
-    # active hard-count + Poisson karl_resolved_stars target builder.
+    # active hard-count multinomial karl_resolved_stars likelihood.
     "KARL_RESOLVED_KDE_GRID": 17,
     "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
     "KARL_RESOLVED_VMIN_KMS": LOSVD_VMIN_KMS,
@@ -155,5 +164,7 @@ CONFIG = {
     "MBH_LOG_FLOOR": 1.0e3,
     "MBH_ZERO_FRACTION": 0.10,
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_stars.csv"),
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1-v1-integration-test.csv"),
+
+    # Keep Patch 2 integration output isolated from all legacy chi-square decks.
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1_patch2_multinomial_integration_test.csv"),
 }

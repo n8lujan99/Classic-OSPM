@@ -7,12 +7,22 @@ LOCAL_DEBUG = False
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
+
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
+
 INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
-LOSVD_VMIN_KMS = -41.317862205564666
-LOSVD_VMAX_KMS = 40.712143487870975
+V_SYS_KMS = -291.68214888089926
+
+# Hard heliocentric velocity selection applied when constructing the Draco sample.
+LOSVD_SELECTION_VMIN_HELIO_KMS = -330.0
+LOSVD_SELECTION_VMAX_HELIO_KMS = -250.0
+
+# OSPM LOSVD velocities are systemic-centered, so transform the actual
+# observational selection boundaries into the model velocity frame.
+LOSVD_VMIN_KMS = LOSVD_SELECTION_VMIN_HELIO_KMS - V_SYS_KMS
+LOSVD_VMAX_KMS = LOSVD_SELECTION_VMAX_HELIO_KMS - V_SYS_KMS
 LOSVD_NVBIN = 21
 VELOCITY_EDGES_MPS = [
     1.0e3 * (LOSVD_VMIN_KMS + i * (LOSVD_VMAX_KMS - LOSVD_VMIN_KMS) / LOSVD_NVBIN)
@@ -44,7 +54,7 @@ CONFIG = {
     "R_HALF_LIGHT_PC": 221.0,
     "R_MAX_STARS_PC": 1500.0,
     "INCLINATION_DEG": 78.0,
-    "V_SYS_KMS": -291.68214888089926,
+    "V_SYS_KMS": V_SYS_KMS,
 
     # Intrinsic tracer constraint.
     # Keep the current force/tracer grids fixed while changing only the LOSVD representation.
@@ -67,6 +77,7 @@ CONFIG = {
         "force_nphi": 32,
         "source": "Odenkirchen2001",
     },
+
     "DATA_PREP": {
         "surface_brightness": {
             "input_csv": str(PROFILE_ROOT / "Draco_surface_brightness_source.csv"),
@@ -92,6 +103,7 @@ CONFIG = {
         "abel_outer_transition_sigma": 5.0,
         "abel_outer_tail_points": 6,
     },
+
     # Draco data contract
     "STAR_R_COL": "r_pc",
     "STAR_V_COL": "vlos",
@@ -99,19 +111,33 @@ CONFIG = {
     "RA_COL": "ra",
     "DEC_COL": "dec",
     "VLOS_COL": "vlos",
+
     # Observed products
     "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Draco_surface_brightness.csv"),
     "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Draco_losvd_bins.csv"),
     "DATA_CSV": str(PROFILE_ROOT / "Draco_stars.csv"),
-    # Consolidated Karl-style observational representation.
+
+    # Active resolved-star LOSVD representation.
+    #
+    # Patch 2 retains Karl-style radial x velocity LOSVD bins, but interprets
+    # the observed hard counts with a multinomial likelihood. The Draco stellar
+    # sample was constructed with an explicit heliocentric velocity cut of
+    # [-330,-250] km/s, so the model likelihood is conditioned on passing that
+    # selection rather than treating probability outside the cut as observed zero counts.
     "LOSVD_TARGET_MODE": "karl_resolved_stars",
+    "LOSVD_FIT_STATISTIC": "multinomial",
+    "LOSVD_CONDITIONING": "vlos_cut",
+    "KARL_DELTA_STATISTIC_ITER_TOL": 0.3,
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
-    # Draco-resolved LOSVD velocity support.
-    # Use the data-derived padded stellar-velocity range as exactly 21 explicit bins.
-    # Explicit m/s edges bypass the historical ±100 km/s auto-support expansion.
+
+    # The 21 Karl velocity bins span the actual sample-selection interval after
+    # transforming the original heliocentric [-330,-250] km/s cut into the
+    # systemic-centered velocity frame used internally by OSPM.
     "NVBIN": LOSVD_NVBIN,
     "VELOCITY_EDGES": VELOCITY_EDGES_MPS,
-    # Karl resolved-star LOSVD construction.
+
+    # Retained for compatibility/legacy diagnostics. KDE/bootstrap smoothing
+    # is not used by the active hard-count multinomial resolved-star likelihood.
     "KARL_RESOLVED_KDE_GRID": 17,
     "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
     "KARL_RESOLVED_VMIN_KMS": LOSVD_VMIN_KMS,
@@ -122,7 +148,8 @@ CONFIG = {
     # Galaxy-specific inputs for OSPM/Data_Prep/build_karl_observables.py.
     # Existing Draco kinematic bins are the radial grid and aperture authority.
     # Resolved-star LOS velocities use no seeing convolution.
-    # The finite 21-bin grid is tied to Draco's data-derived velocity support.
+    # The active Patch 2 velocity grid spans Draco's known selection interval.
+    # The consolidated Gaussian CSV remains a legacy/diagnostic product.
     "KARL_OBSERVABLES": {
         "output_csv": str(KARL_OBSERVABLES_CSV),
         "surface_brightness_radius_col": "R_pc",
@@ -142,19 +169,23 @@ CONFIG = {
 
     # Draco needs the longer weight solve.
     "OBSERVABLES": {"KARL_MAXITER": 4000},
+
     # Draco numerical domain
     "MIN_DISTANCE": 1e-6,
     "MAX_DISTANCE": 5e3,
     "POTENTIAL_EXTENT": 10.0,
+
     # Draco search behavior
     "MBH_LOG_FLOOR": 1.0e3,
     "MBH_ZERO_FRACTION": 0.10,
+
     # Draco-specific runtime overrides
     "CHUNK_SIZE": 40,
     "CSV_FLUSH_INTERVAL": 10,
     "EVAL_TIMEOUT_S": 1200.0,
     "PEN_SPHERE_STRENGTH": 200,
     "EVAL_VARIANTS": ["full"],
+
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco-v1-production.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_patch2_multinomial_integration_test.csv"),
 }

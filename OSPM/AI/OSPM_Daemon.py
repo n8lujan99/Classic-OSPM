@@ -1,4 +1,4 @@
-# OSPM_Daemon.py — STAYS IN PYTHON FOREVER.  Parallelism lives in Julia, not here.
+#OSPM_Daemon.py — STAYS IN PYTHON FOREVER.  Parallelism lives in Julia, not here.
 """
 # ========================================================================================================================
 # WHAT THIS DOES
@@ -53,7 +53,7 @@ import os, time, traceback, json
 import numpy as np, pandas as pd
 import torch, torch.nn as nn
 from collections import deque
-from OSPM.Physics.OSPM_Physics import (canonicalize_theta_matrix, nfw_vcirc_rs_to_rho_s, normalize_halo_parameterization,)
+from OSPM.Physics.OSPM_Physics import (canonicalize_theta_matrix, nfw_vcirc_rs_to_rho_s, normalize_halo_parameterization, _validate_karl_resolved_selection_edges, _normalize_losvd_conditioning, _normalize_losvd_fit_statistic,)
 torch.backends.cudnn.benchmark = False
 try: from sklearn.preprocessing import StandardScaler
 except Exception: StandardScaler = None
@@ -62,6 +62,7 @@ PHASE_VOLUME_DIAG_COLUMNS = ["phase_volume_valid", "phase_volume_convention", "p
     "phase_volume_valid_base_orbits", "phase_volume_invalid_recorded_orbits", "phase_volume_nested_groups", "phase_volume_duplicate_area_clusters", "phase_volume_duplicate_area_orbits",
     "raw_phase_volume_min", "raw_phase_volume_max", "raw_phase_volume_dynamic_range", "normalized_phase_volume_min", "normalized_phase_volume_max", "wphase_min", "wphase_max",
     "wphase_dynamic_range", "wphase_pair_max_relative_mismatch"]
+LOSVD_SCORE_DIAG_COLUMNS = ["losvd_fit_statistic", "losvd_conditioning"]
 
 # ========================================================================================================================
 # ========================================================================================================================
@@ -146,14 +147,41 @@ def finite_family_rows(df, family):
     chi2 = pd.to_numeric(df["chi2"], errors="coerce")
     return df[status.str.endswith(suffix) & np.isfinite(chi2) & (chi2 > 1e-12)]
 
-def batch_result_status(code, chi2):
+def _score_is_valid(score, losvd_fit_statistic):
+    score = float(score)
+    if not np.isfinite(score):
+        return False
+    fit = str(losvd_fit_statistic).strip().lower()
+    return score >= 0.0 if fit == "multinomial" else score > 1e-12
+
+def batch_result_status(code, chi2, losvd_fit_statistic="legacy_chi2"):
     code = int(code)
     chi2 = float(chi2)
-    finite_chi2 = np.isfinite(chi2) and chi2 > 1e-12
+    finite_chi2 = _score_is_valid(chi2, losvd_fit_statistic)
     if code == 0:
         return ("pass" if finite_chi2 else "numeric_fail"), (chi2 if finite_chi2 else np.inf)
     status = {1: "orbit_fail", 2: "solver_failed", 3: "physics_exception", 4: "timeout"}.get(code, "unknown_fail")
     return status, (chi2 if finite_chi2 else np.inf)
+
+def _validate_deck_score_contract(df, losvd_fit_statistic, losvd_conditioning):
+    if len(df) == 0 or "status" not in df.columns or "chi2" not in df.columns:
+        return
+    status = df["status"].astype(str)
+    score = pd.to_numeric(df["chi2"], errors="coerce")
+    scored_full = status.str.endswith("_full") & np.isfinite(score)
+    if not np.any(scored_full):
+        return
+    fit = str(losvd_fit_statistic).strip().lower()
+    conditioning = str(losvd_conditioning).strip().lower()
+    existing_fit = df.loc[scored_full, "losvd_fit_statistic"].dropna().astype(str).str.strip().str.lower() if "losvd_fit_statistic" in df.columns else pd.Series(dtype=str)
+    existing_conditioning = df.loc[scored_full, "losvd_conditioning"].dropna().astype(str).str.strip().str.lower() if "losvd_conditioning" in df.columns else pd.Series(dtype=str)
+    if fit == "multinomial":
+        if len(existing_fit) != int(np.count_nonzero(scored_full)) or len(existing_conditioning) != int(np.count_nonzero(scored_full)):
+            raise RuntimeError("Existing deck contains scored full-model rows without Patch 2 statistic metadata. Start a new CSV_PATH before running the multinomial production likelihood; old chi2 values must not be mixed with multinomial deviance.")
+        if not existing_fit.eq(fit).all() or not existing_conditioning.eq(conditioning).all():
+            raise RuntimeError(f"Existing deck score contract does not match this run: requested fit_statistic={fit} conditioning={conditioning}")
+    elif len(existing_fit) and not existing_fit.eq(fit).all():
+        raise RuntimeError(f"Existing deck score contract does not match this run: requested fit_statistic={fit}")
 
 def _fixed_theta_from_config(config):
     fixed = config.get("FIXED_THETA", None)
@@ -395,7 +423,7 @@ class Deck:
         required_columns = list(config["REQUIRE_COLUMNS"])
         self.config = config
         self.path = config["CSV_PATH"]
-        self.cols = list(dict.fromkeys(required_columns + PHASE_VOLUME_DIAG_COLUMNS))
+        self.cols = list(dict.fromkeys(required_columns + PHASE_VOLUME_DIAG_COLUMNS + LOSVD_SCORE_DIAG_COLUMNS))
         self.params, self.flush = config["PARAMETER_NAMES"], int(config.get("CSV_FLUSH_INTERVAL", 10))
         self._dirty = 0; self._buf = []; self._pbuf = []; self._sbuf = []
         self._load()
@@ -404,6 +432,9 @@ class Deck:
         if d: os.makedirs(d, exist_ok=True)
         if os.path.exists(self.path):
             df = pd.read_csv(self.path)
+            for column in LOSVD_SCORE_DIAG_COLUMNS:
+                if column not in df.columns:
+                    df[column] = np.nan
         else:
             row = {k: np.nan for k in self.cols}
             for i, k in enumerate(self.params): row[k] = self.config["INITIAL_THETA"][i]
@@ -519,7 +550,7 @@ class ConvergenceDetector:
         return converged
 
 # ========================================================================================================================
-# 
+#
 # ========================================================================================================================
 
 class Runner:
@@ -866,6 +897,9 @@ def run_daemon(config, physics_engine):
     losvd_target_mode = str(opt("LOSVD_TARGET_MODE", "losvd_target_mode", default="current")).strip().lower()
     if losvd_target_mode not in ("current", "karl_resolved_stars", "karl_mode0_observables"):
         raise ValueError("LOSVD_TARGET_MODE must be 'current', 'karl_resolved_stars', or 'karl_mode0_observables'")
+    losvd_conditioning = _normalize_losvd_conditioning(opt("LOSVD_CONDITIONING", "losvd_conditioning", default=None))
+    losvd_fit_statistic = _normalize_losvd_fit_statistic(opt("LOSVD_FIT_STATISTIC", "losvd_fit_statistic", default=None), losvd_target_mode)
+    _validate_deck_score_contract(deck.df, losvd_fit_statistic, losvd_conditioning)
     karl_resolved_kde_grid = int(opt("KARL_RESOLVED_KDE_GRID", "karl_resolved_kde_grid", default=17))
     karl_resolved_kde_width_bins = float(opt("KARL_RESOLVED_KDE_WIDTH_BINS", "karl_resolved_kde_width_bins", default=3.0))
     karl_resolved_vmin_kms = float(opt("KARL_RESOLVED_VMIN_KMS", "karl_resolved_vmin_kms", default=-25.0))
@@ -898,6 +932,7 @@ def run_daemon(config, physics_engine):
     light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
     light_sigma_tol = float(opt("KARL_LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
     delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
+    delta_statistic_iter_tol = float(opt("KARL_DELTA_STATISTIC_ITER_TOL", "delta_statistic_iter_tol", default=delta_chi2_iter_tol))
     maxiter = int(opt("KARL_MAXITER", "maxiter", default=config.get("MAXITER", 60)))
     entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=config.get("ENTROPY_FLOOR", 1e-30)))
     halo_q_axis_ratio = float(opt("HALO_Q_AXIS_RATIO", "halo_q_axis_ratio", default=config.get("HALO_Q_AXIS_RATIO", 1.0)))
@@ -914,7 +949,7 @@ def run_daemon(config, physics_engine):
     model_owner_limit = int(opt("MODEL_OWNER_LIMIT", default=0))
     threads_per_model = int(opt("THREADS_PER_MODEL", "threads_per_model", default=8))
 
-    
+
     if base_halo_type == "karl_halo":
         raise RuntimeError(
             "HALO_TYPE='karl_halo' is disabled: its density functions use parsec-valued "
@@ -938,6 +973,12 @@ def run_daemon(config, physics_engine):
     verr_star_mps = np.asarray(verr_star_mps, float).ravel()
     if not (R_star_m.size == valid_vlos.size == v_star_mps.size == verr_star_mps.size):
         raise RuntimeError("wrapped physics arrays must match lengths: " f"R={R_star_m.size}, valid={valid_vlos.size}, v={v_star_mps.size}, verr={verr_star_mps.size}")
+    selection_vmin_kms = float("nan")
+    selection_vmax_kms = float("nan")
+    if losvd_target_mode == "karl_resolved_stars":
+        velocity_edges = _validate_karl_resolved_selection_edges(velocity_edges, nvbin, v_star_mps, valid_vlos)
+        selection_vmin_kms = float(velocity_edges[0] / 1.0e3)
+        selection_vmax_kms = float(velocity_edges[-1] / 1.0e3)
     kinematic_bin_edges = getattr(physics_engine, "__kinematic_bin_edges_pc__", None)
     if kinematic_bin_edges is None:
         kinematic_bin_edges = engine_cfg.get("kinematic_bin_edges_pc", None)
@@ -995,15 +1036,15 @@ def run_daemon(config, physics_engine):
     print(
         f"[RUN] Norbit={Norbit} base_orbits={Norbit // 2} Nstar_vlos={nstar_vlos} Ntheta_launch={ntheta_launch} "
         f"tracer_mode={tracer_constraint_mode} alphat={alphat} apfac={apfac} light_rel_tol={light_rel_tol} "
-        f"delta_chi2_tol={delta_chi2_iter_tol}",
+        f"fit_statistic={losvd_fit_statistic} conditioning={losvd_conditioning} delta_statistic_tol={delta_statistic_iter_tol}",
         flush=True,
     )
     if losvd_target_mode == "karl_resolved_stars":
         print(
             f"[OBSERVABLES] mode={losvd_target_mode} apertures={n_kin} Nvbin={nvbin} tracer_bins={n_light} "
             f"R_tracer_max_pc={r_light_max_pc:.6g} R_aperture_max_pc={r_kin_max_pc:.6g} "
-            f"kde_grid={karl_resolved_kde_grid} kde_width_bins={karl_resolved_kde_width_bins} "
-            f"vmin_kms={karl_resolved_vmin_kms} vmax_kms={karl_resolved_vmax_kms}",
+            f"selection=explicit_velocity_edges selection_vmin_kms={selection_vmin_kms:.12g} selection_vmax_kms={selection_vmax_kms:.12g} "
+            f"outside_selection_gate=diagnostic_only",
             flush=True,
         )
     elif losvd_target_mode == "karl_mode0_observables":
@@ -1104,14 +1145,15 @@ def run_daemon(config, physics_engine):
 
     def _record(theta, pid, label, status, chi2, diag=None):
         nonlocal best, eval_count, full_count
-        finite_chi2 = np.isfinite(chi2) and chi2 > 1e-12
+        finite_chi2 = _score_is_valid(chi2, losvd_fit_statistic)
         if status == "pass" and not finite_chi2:
             status = "numeric_fail"
         if not finite_chi2:
             chi2 = np.inf
-        if diag is not None:
-            diag = dict(diag)
-            diag["chi2_losvd"] = chi2
+        diag = {} if diag is None else dict(diag)
+        diag["chi2_losvd"] = chi2
+        diag["losvd_fit_statistic"] = losvd_fit_statistic
+        diag["losvd_conditioning"] = losvd_conditioning
 
         reward = fixer.reward(status, chi2)
         final_status = f"{status}_{label}"
@@ -1185,6 +1227,8 @@ def run_daemon(config, physics_engine):
                     Main.seval("_halo_type_jl = " + json.dumps(str(halo_type_chunk)))
                     Main.seval("_tracer_constraint_mode_jl = " + json.dumps(tracer_constraint_mode))
                     Main.seval("_losvd_target_mode_jl = " + json.dumps(losvd_target_mode))
+                    Main.seval("_losvd_conditioning_jl = " + json.dumps(losvd_conditioning))
+                    Main.seval("_losvd_fit_statistic_jl = " + json.dumps(losvd_fit_statistic))
                     Main.seval(f"_karl_resolved_kde_grid_jl = {int(karl_resolved_kde_grid)}")
                     Main.seval(f"_karl_resolved_kde_width_bins_jl = {float(karl_resolved_kde_width_bins)!r}")
                     Main.seval(f"_karl_resolved_vmin_kms_jl = {float(karl_resolved_vmin_kms)!r}")
@@ -1197,6 +1241,7 @@ def run_daemon(config, physics_engine):
                     Main.seval(f"_light_rel_tol_jl = {float(light_rel_tol)!r}")
                     Main.seval(f"_light_sigma_tol_jl = {float(light_sigma_tol)!r}")
                     Main.seval(f"_delta_chi2_iter_tol_jl = {float(delta_chi2_iter_tol)!r}")
+                    Main.seval(f"_delta_statistic_iter_tol_jl = {float(delta_statistic_iter_tol)!r}")
                     Main.seval(f"_entropy_floor_jl = {float(entropy_floor)!r}")
                     Main.seval(f"_maxiter_jl = {int(maxiter)}")
                     Main.seval(f"_timeout_s_jl = {float(config.get('EVAL_TIMEOUT_S', 120.0))!r}")
@@ -1229,6 +1274,8 @@ stellar_model=_stellar_model_jl,
 surface_brightness_profile=_sb_profile_jl,
 tracer_constraint_mode=_tracer_constraint_mode_jl,
 losvd_target_mode=_losvd_target_mode_jl,
+losvd_conditioning=_losvd_conditioning_jl,
+losvd_fit_statistic=_losvd_fit_statistic_jl,
 karl_resolved_kde_grid=_karl_resolved_kde_grid_jl,
 karl_resolved_kde_width_bins=_karl_resolved_kde_width_bins_jl,
 karl_resolved_vmin_kms=_karl_resolved_vmin_kms_jl,
@@ -1241,6 +1288,7 @@ apfac=_apfac_jl,
 light_rel_tol=_light_rel_tol_jl,
 light_sigma_tol=_light_sigma_tol_jl,
 delta_chi2_iter_tol=_delta_chi2_iter_tol_jl,
+delta_statistic_iter_tol=_delta_statistic_iter_tol_jl,
 entropy_floor=_entropy_floor_jl,
 maxiter=_maxiter_jl,
 timeout_s=_timeout_s_jl,
@@ -1328,7 +1376,7 @@ kinematic_bin_edges=_kin_bins_jl
                     for j, (theta, pid, label, halo_type_variant) in enumerate(chunk_props):
                         code = int(status_code_vec[j])
                         raw_chi2 = float(chi2_vec[j])
-                        finite_chi2 = np.isfinite(raw_chi2) and raw_chi2 > 1e-12
+                        finite_chi2 = _score_is_valid(raw_chi2, losvd_fit_statistic)
                         if code == 0:
                             status = "pass" if finite_chi2 else "numeric_fail"
                         else:
