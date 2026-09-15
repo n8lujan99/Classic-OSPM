@@ -535,10 +535,27 @@ function solve_weights_karl_multinomial(A_light::Matrix{Float64}, A_losvd::Matri
     A_losvd_sq = A_losvd .* A_losvd
     denominator_matrix_sq = denominator_matrix .* denominator_matrix
     outside_matrix_sq = conditioning_sym === :none ? outside_matrix .* outside_matrix : nothing
+
     enforce_normalization = !_expanded_light_implies_normalization(A_light, light_target)
     Cm = build_karl_light_constraint_Cm(A_light; enforce_normalization=enforce_normalization)
     target = build_karl_light_constraint_target(light_target; enforce_normalization=enforce_normalization)
+
+    zero_support_rows = Int[]
+    @inbounds for row in eachindex(losvd_counts)
+        if losvd_counts[row] > 0 && !any(>(0.0), @view(A_losvd[row, :]))
+            push!(zero_support_rows, row)
+        end
+    end
+
+    if !isempty(zero_support_rows)
+        zero_support_apertures = [div(row - 1, Nvbin) + 1 for row in zero_support_rows]
+        zero_support_velocity_bins = [mod(row - 1, Nvbin) + 1 for row in zero_support_rows]
+        zero_support_counts = losvd_counts[zero_support_rows]
+        @warn "Observed LOSVD bins have zero orbit-library support" rows=zero_support_rows apertures=zero_support_apertures velocity_bins=zero_support_velocity_bins observed_counts=zero_support_counts
+    end
+
     initial_state = karl_multinomial_losvd_state(A_losvd, A_kinematic, w, losvd_counts, Nspatial, Nvbin; conditioning=conditioning_sym)
+
     previous_statistic = initial_state.deviance_total
     delta_statistic_iteration = Inf
     max_light_relative_residual_value = max_light_relative_residual(A_light, w, light_target)
@@ -757,11 +774,13 @@ function solve_weights_karl_expanded_cm(A_light::Matrix{Float64}, A_losvd::Matri
     wp = _prepare_wphase(wphase, Norbit; require_paired=true, pair_rtol=1.0e-12)
     wphase_diag = karl_wphase_diagnostics(wp; paired=true)
     w = fill(1.0 / Norbit, Norbit)
+
     enforce_normalization = !_expanded_light_implies_normalization(A_light, light_target)
     Cm = build_expanded_Cm_with_losvd_slack(A_light, A_losvd; enforce_normalization=enforce_normalization)
     target_base = build_expanded_target(light_target, losvd_target; enforce_normalization=enforce_normalization)
     w_all = build_expanded_weights_initial(w, A_losvd, losvd_target)
     initial_losvd = karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, Nspatial, Nvbin)
+
     previous_chi2_losvd = initial_losvd.chi_total
     delta_chi2_iteration = Inf
     delta_chi2_iteration_step_normalized = Inf
@@ -1194,7 +1213,7 @@ function karl_spear_update_expanded(w_all::Vector{Float64}, Norbit::Int, Cm::Mat
     linearized_constraint_error_l2 = norm(Cm * (wnew .- w_all) .- apfac .* base_delY)
     post_step_constraint_l2 = norm(target .- Cm * wnew)
 
-    println("[KARL FILTER] requested_step=", apfac, " applied_step=", apfac, " filtered_orbits=", n_filtered_to_floor, " filter_tiny=", DEFAULT_KARL_FILTER_TINY, " raw_min_orbit_weight=", initial_min_trial_weight, " min_updated_orbit_weight=", min_updated_orbit_weight, " rcond_est=", rcond_est)
+    #println("[KARL FILTER] requested_step=", apfac, " applied_step=", apfac, " filtered_orbits=", n_filtered_to_floor, " filter_tiny=", DEFAULT_KARL_FILTER_TINY, " raw_min_orbit_weight=", initial_min_trial_weight, " min_updated_orbit_weight=", min_updated_orbit_weight, " rcond_est=", rcond_est)
 
     return (
         w=Vector{Float64}(wnew), dw=Vector{Float64}(dw), lambda=Vector{Float64}(lambda), Am=Matrix{Float64}(Am), rhs=Vector{Float64}(rhs),

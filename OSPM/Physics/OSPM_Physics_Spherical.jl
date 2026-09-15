@@ -314,6 +314,44 @@ mutable struct OrbitWorkState
     worker_gate::ReentrantLock
 end
 
+mutable struct SharedWorkerPool
+    total::Int
+    leased::Threads.Atomic{Int}
+    priority_waiters::Threads.Atomic{Int}
+end
+
+function SharedWorkerPool(total::Int)
+    total > 0 || error("SharedWorkerPool total must be positive")
+    return SharedWorkerPool(total, Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
+end
+
+@inline function _try_acquire_worker!(pool::SharedWorkerPool; priority::Bool=false)
+    while true
+        leased = pool.leased[]
+        reserved = priority ? 0 : min(pool.priority_waiters[], pool.total)
+        leased >= pool.total - reserved && return false
+        Threads.atomic_cas!(pool.leased, leased, leased + 1) == leased && return true
+    end
+end
+
+function _acquire_worker!(pool::SharedWorkerPool; priority::Bool=false)
+    priority && Threads.atomic_add!(pool.priority_waiters, 1)
+    try
+        while !_try_acquire_worker!(pool; priority=priority)
+            yield()
+        end
+    finally
+        priority && Threads.atomic_add!(pool.priority_waiters, -1)
+    end
+    return nothing
+end
+
+@inline function _release_worker!(pool::SharedWorkerPool)
+    previous = Threads.atomic_add!(pool.leased, -1)
+    previous > 0 || error("Shared worker pool lease underflow")
+    return nothing
+end
+
 @inline function _orbit_grid_indices(base_index::Int, Nshells::Int, nlfrac::Int, nthird::Int)
     base_index > 0 || error("base_index must be positive")
     Nshells > 0 || error("Nshells must be positive")
@@ -352,7 +390,7 @@ end
     return shell_id + Nshells * ((lfrac_id - 1) + regular_lfrac * (third_id - 1))
 end
 
-function _build_family_launch_grid(Nbase_orbit::Int, shells::Vector{Float64}, Lfrac, third_launches::Vector{Float64}, pot, frc, force_geometry::Symbol)
+function _build_family_launch_grid(Nbase_orbit::Int, shells::Vector{Float64}, Lfrac, third_launches::Vector{Float64}, pot, frc, force_geometry::Symbol; worker_limit::Int=Threads.nthreads(), worker_pool=nothing)
     Nshells = length(shells)
     nlfrac = length(Lfrac)
     nthird = length(third_launches)
@@ -529,22 +567,41 @@ function _build_family_launch_grid(Nbase_orbit::Int, shells::Vector{Float64}, Lf
         return nothing
     end
 
-    if Threads.nthreads() > 1 && Nshells > 1
+    worker_limit = max(1, min(worker_limit, Threads.nthreads()))
+    if worker_limit > 1 && Nshells > 1
         next_shell = Threads.Atomic{Int}(1)
-        nworkers = min(Threads.nthreads(), Nshells)
+        nworkers = min(worker_limit, Nshells)
 
         @sync for _ in 1:nworkers
             Threads.@spawn begin
-                while true
-                    shell_id = Threads.atomic_add!(next_shell, 1)
-                    shell_id > Nshells && break
-                    build_shell!(shell_id)
+                worker_lease_held = false
+                if worker_pool !== nothing
+                    _acquire_worker!(worker_pool)
+                    worker_lease_held = true
+                end
+                try
+                    while true
+                        shell_id = Threads.atomic_add!(next_shell, 1)
+                        shell_id > Nshells && break
+                        build_shell!(shell_id)
+                    end
+                finally
+                    worker_lease_held && _release_worker!(worker_pool)
                 end
             end
         end
     else
-        @inbounds for shell_id in 1:Nshells
-            build_shell!(shell_id)
+        worker_lease_held = false
+        if worker_pool !== nothing
+            _acquire_worker!(worker_pool)
+            worker_lease_held = true
+        end
+        try
+            @inbounds for shell_id in 1:Nshells
+                build_shell!(shell_id)
+            end
+        finally
+            worker_lease_held && _release_worker!(worker_pool)
         end
     end
 
@@ -758,6 +815,8 @@ function _init_orbit_work(
     karl_observables=nothing,
     precomputed_d3_constraints=nothing,
     parallel_init::Bool=true,
+    worker_limit::Int=Threads.nthreads(),
+    worker_pool=nothing,
 )
     iseven(Norbit) || error(
         "Karl prograde/retrograde orbit pairing requires even Norbit because " *
@@ -765,6 +824,8 @@ function _init_orbit_work(
     )
 
     max_attempts_factor > 0 || error("max_attempts_factor must be positive")
+    worker_limit > 0 || error("worker_limit must be positive")
+    worker_limit = min(worker_limit, Threads.nthreads())
 
     Nbase_orbit = Norbit ÷ 2
     Nstar = length(R_star_m)
@@ -916,13 +977,20 @@ function _init_orbit_work(
     if tracer_mode === :density_3d &&
        precomputed_d3_constraints === nothing &&
        parallel_init &&
-       Threads.nthreads() > 1
+       worker_limit > 1
 
-        d3_task = Threads.@spawn load_karl_d3_tracer_constraints(
-            stellar_model_state,
-            d3_radial_edges,
-            d3_angular_edges,
-        )
+        d3_task = Threads.@spawn begin
+            worker_lease_held = false
+            if worker_pool !== nothing
+                _acquire_worker!(worker_pool)
+                worker_lease_held = true
+            end
+            try
+                load_karl_d3_tracer_constraints(stellar_model_state, d3_radial_edges, d3_angular_edges)
+            finally
+                worker_lease_held && _release_worker!(worker_pool)
+            end
+        end
     end
 
     third_launches =
@@ -997,13 +1065,14 @@ function _init_orbit_work(
     # Launch family-grid construction as a separate Julia task.
     #
     # This lets it overlap D3 tracer loading. After _build_family_launch_grid
-    # itself is threaded across shell_id, this task will fan out across the
-    # available Julia worker pool.
+    # itself is threaded across shell_id, this task will fan out only across
+    # the worker budget assigned to this model.
     # ------------------------------------------------------------------------------------------------
 
     family_task = nothing
+    family_worker_limit = d3_task === nothing ? worker_limit : max(1, worker_limit - 1)
 
-    if parallel_init && Threads.nthreads() > 1
+    if parallel_init && family_worker_limit > 1
         family_task = Threads.@spawn _build_family_launch_grid(
             Nbase_orbit,
             shells,
@@ -1011,7 +1080,9 @@ function _init_orbit_work(
             third_launches,
             ctx.pot,
             ctx.frc,
-            force_geometry,
+            force_geometry;
+            worker_limit=family_worker_limit,
+            worker_pool=worker_pool,
         )
     end
 
@@ -1092,7 +1163,9 @@ function _init_orbit_work(
             third_launches,
             ctx.pot,
             ctx.frc,
-            force_geometry,
+            force_geometry;
+            worker_limit=family_worker_limit,
+            worker_pool=worker_pool,
         )
 
     launch_order = _balanced_launch_order(
@@ -2292,7 +2365,9 @@ function _build_compact_karl_wphase(st::OrbitWorkState, successful_columns::Vect
 end
 
 # This is the main worker function that runs in a thread to compute orbits and fill the A-matrix.
-function _orbit_worker!(st::OrbitWorkState)
+function _orbit_worker!(st::OrbitWorkState; max_claims::Int=typemax(Int))
+    max_claims > 0 || error("max_claims must be positive")
+    claims_processed = 0
 
     col_losvd_pro = zeros(Float64, st.Nlosvd)
     col_losvd_ret = zeros(Float64, st.Nlosvd)
@@ -2374,11 +2449,13 @@ function _orbit_worker!(st::OrbitWorkState)
     end
 
     while true
+        claims_processed >= max_claims && break
         time_ns() > st.t_deadline && break
         st.phase[] != 1 && break
         slot_seq = Threads.atomic_add!(st.next_orbit, 1)
         slot_seq > length(st.launch_order) && break
         c_claim = st.launch_order[slot_seq]
+        claims_processed += 1
         st.failure_stage[c_claim] = :claimed
         shell_id, lfrac_id, third_id = _orbit_grid_indices(c_claim, st.Nshells, length(st.Lfrac), length(st.third_launches))
         rapo = f64(st.shells[shell_id])
@@ -2713,7 +2790,7 @@ function _orbit_worker!(st::OrbitWorkState)
     return nothing
 end
 
-function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, helper::Bool=false)
+function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, helper::Bool=false, max_claims::Int=typemax(Int))
     admitted = false
     lock(st.worker_gate)
     try
@@ -2734,7 +2811,7 @@ function _run_orbit_worker!(st::OrbitWorkState; scheduler_counters=nothing, help
         while st.phase[] == 1 && time_ns() <= st.t_deadline && st.next_orbit[] <= length(st.launch_order)
             next_before = st.next_orbit[]
             try
-                _orbit_worker!(st)
+                _orbit_worker!(st; max_claims=max_claims)
                 did_work = true
                 break
             catch e
@@ -2803,17 +2880,31 @@ function build_A_matrix_hybrid(Norbit::Int, R_star_m::Vector{Float64}, has_vlos:
     if !(isfinite(Rmin) && isfinite(Rmax) && Rmax > Rmin)
         return zeros(Float64, 0, Norbit)
     end
+    nworkers = threaded ? Threads.nthreads() : 1
+    worker_pool = SharedWorkerPool(nworkers)
     st = _init_orbit_work(Norbit, R_star_m, has_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=nsteps, Lfrac=Lfrac, dt_frac_orbit=dt_frac_orbit, max_attempts_factor=max_attempts_factor,
         t_deadline=t_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch,
-        fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables)
+        fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables, worker_limit=nworkers, worker_pool=worker_pool)
     Threads.atomic_xchg!(st.phase, 1)
-    nworkers = threaded ? Threads.nthreads() : 1
     if threaded && nworkers > 1
-        Threads.@threads for t in 1:nworkers
-            _run_orbit_worker!(st)
+        worker_tasks = [Threads.@spawn begin
+            _acquire_worker!(worker_pool)
+            try
+                _run_orbit_worker!(st)
+            finally
+                _release_worker!(worker_pool)
+            end
+        end for _ in 1:nworkers]
+        for task in worker_tasks
+            wait(task)
         end
     else
-        _run_orbit_worker!(st)
+        _acquire_worker!(worker_pool)
+        try
+            _run_orbit_worker!(st)
+        finally
+            _release_worker!(worker_pool)
+        end
     end
     _close_orbit_phase!(st)
     filled = st.filled_atomic[]
@@ -2909,7 +3000,8 @@ end
 # Batch evaluator: Karl-style binned LOSVD + selectable projected-light or 3-D tracer-density constraint.
 # This is the Heart of the whole Pipeline
 # and is where all the parallelism is implemented
-function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, threads_per_model::Int=2, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, karl_observables_csv=nothing, losvd_conditioning=:vlos_cut, losvd_fit_statistic=nothing, delta_statistic_iter_tol::Float64=delta_chi2_iter_tol)
+
+function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{Float64}, valid_vlos::AbstractVector{Bool}, v_star_mps::Vector{Float64}, verr_star_mps::Vector{Float64}, sini::Float64, Norbit::Int, halo_type::String; stellar_model=nothing, surface_brightness_profile=nothing, tracer_constraint_mode="projected_light", alphat::Float64=DEFAULT_KARL_ALPHAT, apfac::Float64=DEFAULT_KARL_APFAC, light_rel_tol::Float64=DEFAULT_KARL_LIGHT_REL_TOL, light_sigma_tol::Float64=2.0, delta_chi2_iter_tol::Float64=DEFAULT_KARL_DELTA_CHI2_ITER_TOL, entropy_floor::Float64=DEFAULT_KARL_ENTROPY_FLOOR, maxiter::Int=DEFAULT_KARL_MAXITER, timeout_s::Float64=120.0, fill_pct::Float64=DEFAULT_ORBIT_FILL_PCT, regional_floor::Float64=DEFAULT_ORBIT_REGIONAL_FLOOR, max_regional_gap::Float64=DEFAULT_ORBIT_MAX_REGIONAL_GAP, shell_band_count::Int=DEFAULT_ORBIT_SHELL_BANDS, coverage_check_every::Int=DEFAULT_ORBIT_COVERAGE_CHECK_EVERY, warn_fill_pct::Float64=DEFAULT_ORBIT_WARN_FILL_PCT, warn_success_pct::Float64=DEFAULT_ORBIT_WARN_SUCCESS_PCT, warn_regional_floor::Float64=DEFAULT_ORBIT_WARN_REGIONAL_FLOOR, warn_max_regional_gap::Float64=DEFAULT_ORBIT_WARN_MAX_REGIONAL_GAP, model_owner_limit::Int=0, initial_model_owners::Int=0, threads_per_model::Int=2, total_workers::Int=0, reserve_workers::Int=0, admission_worker_limit::Int=0, dynamic_admission::Bool=false, whole_model_admission::Bool=true, finishing_priority::Bool=true, R_inner_pc::Float64=30.0, velocity_edges=nothing, kinematic_bin_edges=nothing, light_bin_edges=nothing, Nvbin::Int=21, Ntheta_launch::Int=5, halo_q_axis_ratio::Float64=1.0, karl_halo_params=nothing, losvd_target_mode=:current, karl_resolved_kde_grid::Int=DEFAULT_KARL_RESOLVED_KDE_GRID, karl_resolved_kde_width_bins::Float64=DEFAULT_KARL_RESOLVED_KDE_WIDTH_BINS, karl_resolved_vmin_kms::Float64=DEFAULT_KARL_RESOLVED_VMIN_KMS, karl_resolved_vmax_kms::Float64=DEFAULT_KARL_RESOLVED_VMAX_KMS, karl_resolved_bootstraps::Int=DEFAULT_KARL_RESOLVED_BOOTSTRAPS, karl_resolved_envelope_floor::Float64=DEFAULT_KARL_RESOLVED_ENVELOPE_FLOOR, karl_observables_csv=nothing, losvd_conditioning=:vlos_cut, losvd_fit_statistic=nothing, delta_statistic_iter_tol::Float64=delta_chi2_iter_tol)
     nrow, nbatch = size(thetas)
     surface_brightness_profile === nothing && error("surface_brightness_profile is required for Karl-style OSPM; no star-count fallback is allowed")
     apfac > 0.0 || error("apfac must be positive")
@@ -2917,7 +3009,13 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     light_sigma_tol > 0.0 || error("light_sigma_tol must be positive")
     delta_chi2_iter_tol >= 0.0 || error("delta_chi2_iter_tol must be nonnegative")
     delta_statistic_iter_tol >= 0.0 || error("delta_statistic_iter_tol must be nonnegative")
+    model_owner_limit >= 0 || error("model_owner_limit must be nonnegative")
+    initial_model_owners >= 0 || error("initial_model_owners must be nonnegative")
     threads_per_model > 0 || error("threads_per_model must be positive")
+    total_workers >= 0 || error("total_workers must be nonnegative")
+    reserve_workers >= 0 || error("reserve_workers must be nonnegative")
+    admission_worker_limit >= 0 || error("admission_worker_limit must be nonnegative")
+    dynamic_admission && !whole_model_admission && error("Dynamic Smart Run requires whole_model_admission=true")
     losvd_target_mode_sym = _normalize_losvd_target_mode(losvd_target_mode)
     losvd_conditioning_sym = _normalize_losvd_conditioning(losvd_conditioning)
     losvd_fit_statistic_sym = _normalize_losvd_fit_statistic(losvd_fit_statistic, losvd_target_mode_sym)
@@ -2930,22 +3028,43 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         karl_resolved_bootstraps > 1 || error("karl_resolved_bootstraps must exceed one")
         isfinite(karl_resolved_envelope_floor) && karl_resolved_envelope_floor >= 0.0 || error("karl_resolved_envelope_floor must be finite and nonnegative")
     end
-    BLAS.set_num_threads(nbatch == 1 ? Threads.nthreads() : 1) # set to highest for a single model test change for multi-model runs
+    nthreads = Threads.nthreads()
+    total_worker_pool = total_workers > 0 ? total_workers : nthreads
+    total_worker_pool <= nthreads || error("total_workers=$total_worker_pool exceeds Threads.nthreads()=$nthreads")
+    workers_per_model = min(threads_per_model, total_worker_pool)
+    reserve_worker_count = dynamic_admission ? (reserve_workers > 0 ? reserve_workers : min(workers_per_model, max(0, total_worker_pool - workers_per_model))) : min(reserve_workers, max(0, total_worker_pool - 1))
+    reserve_worker_count < total_worker_pool || error("reserve_workers must leave at least one runnable worker")
+    admission_limit = dynamic_admission ? (admission_worker_limit > 0 ? admission_worker_limit : total_worker_pool - reserve_worker_count) : total_worker_pool
+    admission_limit > 0 || error("admission_worker_limit must be positive after Smart Run normalization")
+    admission_limit <= total_worker_pool - reserve_worker_count || error("admission_worker_limit=$admission_limit exceeds total_workers-reserve_workers=$(total_worker_pool - reserve_worker_count)")
+    admission_limit >= min(workers_per_model, total_worker_pool) || error("admission_worker_limit=$admission_limit cannot admit one whole model with workers_per_model=$workers_per_model")
+    max_parallel_models = max(1, fld(total_worker_pool, workers_per_model))
+    hard_model_limit = model_owner_limit > 0 ? min(model_owner_limit, nbatch) : nbatch
+    initial_owner_target = initial_model_owners > 0 ? min(initial_model_owners, hard_model_limit) : min(hard_model_limit, max_parallel_models)
+    initial_owner_target = max(1, initial_owner_target)
+    BLAS.set_num_threads(dynamic_admission || nbatch > 1 ? 1 : min(total_worker_pool, workers_per_model))
     allocated_threads = tryparse(Int, get(ENV, "SLURM_CPUS_PER_TASK", ""))
     if allocated_threads !== nothing &&
-    Threads.nthreads() != allocated_threads
-        error("Julia thread mismatch: " * "Threads.nthreads()=$(Threads.nthreads()) " * "but SLURM_CPUS_PER_TASK=$allocated_threads")
+    nthreads != allocated_threads
+        error("Julia thread mismatch: " * "Threads.nthreads()=$nthreads " * "but SLURM_CPUS_PER_TASK=$allocated_threads")
     end
 
     println(
         "[RUNTIME CONTRACT]",
         " host=", gethostname(),
         " julia_version=", VERSION,
-        " julia_threads=", Threads.nthreads(),
+        " julia_threads=", nthreads,
         " blas_threads=", BLAS.get_num_threads(),
         " slurm_cpus=", get(ENV, "SLURM_CPUS_PER_TASK", "local"),
-        " threads_per_model=", threads_per_model,
+        " threads_per_model=", workers_per_model,
         " model_owner_limit_requested=", model_owner_limit,
+        " initial_model_owners=", initial_owner_target,
+        " total_workers=", total_worker_pool,
+        " reserve_workers=", reserve_worker_count,
+        " admission_worker_limit=", admission_limit,
+        " dynamic_admission=", dynamic_admission,
+        " whole_model_admission=", whole_model_admission,
+        " finishing_priority=", finishing_priority,
         " losvd_target_mode=", losvd_target_mode_sym,
         " losvd_fit_statistic=", losvd_fit_statistic_sym,
         " losvd_conditioning=", losvd_conditioning_sym)
@@ -2955,6 +3074,12 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     prewarm_stellar_force_cache(stellar_model_jl)
     light_edges_force = light_bin_edges === nothing ? resolve_karl_spatial_edges(kinematic_bin_edges) : resolve_karl_light_edges(light_bin_edges)
     required_force_rmax_m = 1.5 * light_edges_force[end]
+    batch_d3_constraints = nothing
+    if tracer_constraint_mode_sym === :density_3d
+        batch_d3_radial_edges = losvd_target_mode_sym === :karl_mode0_observables ? copy(karl_observables.radial_edges_m) : copy(light_edges_force)
+        batch_d3_angular_edges = losvd_target_mode_sym === :karl_mode0_observables ? copy(karl_observables.angular_edges) : collect(range(0.0, 1.0; length=6))
+        batch_d3_constraints = load_karl_d3_tracer_constraints(stellar_model_jl, batch_d3_radial_edges, batch_d3_angular_edges)
+    end
     status = fill(4, nbatch)
     chi2_losvd = fill(Inf, nbatch)
     chi2_inner = fill(Inf, nbatch)
@@ -3011,16 +3136,13 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     work_states = Vector{Union{Nothing, OrbitWorkState}}(undef, nbatch)
     fill!(work_states, nothing)
     work_states_lock = ReentrantLock()
+    model_worker_leases = [Threads.Atomic{Int}(0) for _ in 1:nbatch]
+    worker_pool = SharedWorkerPool(total_worker_pool)
     next_theta = Threads.Atomic{Int}(1)
-    nthreads = Threads.nthreads()
+    admission_lock = ReentrantLock()
+    scheduler_counters = (initial_claims=Threads.Atomic{Int}(0), dynamic_claims=Threads.Atomic{Int}(0), initializing_models=Threads.Atomic{Int}(0), orbit_models=Threads.Atomic{Int}(0), orbit_workers=Threads.Atomic{Int}(0), helper_workers=Threads.Atomic{Int}(0), finishing_waiters=Threads.Atomic{Int}(0), finishing_models=Threads.Atomic{Int}(0), weight_models=Threads.Atomic{Int}(0), active_model_owners=Threads.Atomic{Int}(0), completed_models=Threads.Atomic{Int}(0), stop_monitor=Threads.Atomic{Int}(0))
 
-    workers_per_model = min(threads_per_model, nthreads)
-    max_parallel_models = max(1, fld(nthreads, workers_per_model))
-    owner_limit = model_owner_limit > 0 ? min(model_owner_limit, nbatch, max_parallel_models) : min(nbatch, max_parallel_models)
-
-    scheduler_counters = (orbit_models=Threads.Atomic{Int}(0), orbit_workers=Threads.Atomic{Int}(0), helper_workers=Threads.Atomic{Int}(0), weight_models=Threads.Atomic{Int}(0), active_model_owners=Threads.Atomic{Int}(0), completed_models=Threads.Atomic{Int}(0), stop_monitor=Threads.Atomic{Int}(0))
-    scheduler_started_ns = time_ns()
-    println("[SCHED] julia_threads=", nthreads, " workers_per_model=", workers_per_model, " max_parallel_models=", max_parallel_models, " active_model_limit=", owner_limit)
+    println("[SCHED] julia_threads=", nthreads, " total_workers=", total_worker_pool, " workers_per_model=", workers_per_model, " max_parallel_models=", max_parallel_models, " initial_model_owners=", initial_owner_target, " reserve_workers=", reserve_worker_count, " admission_worker_limit=", admission_limit, " hard_model_limit=", hard_model_limit, " dynamic_admission=", dynamic_admission)
     if get(ENV, "OSPM_DIAG_JULIA_HANDOFF", "0") == "1"
         if losvd_target_mode_sym === :karl_resolved_stars
             println("[JULIA OBSERVABLES] mode=", losvd_target_mode_sym, " Nvbin=", Nvbin, " kde_grid=", karl_resolved_kde_grid, " kde_width_bins=", karl_resolved_kde_width_bins, " vmin_kms=", karl_resolved_vmin_kms, " vmax_kms=", karl_resolved_vmax_kms)
@@ -3031,17 +3153,6 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         end
     end
 
-    function _print_scheduler_diagnostics!()
-        get(ENV, "OSPM_DIAG_SCHEDULER", "0") == "1" || return nothing
-        claimed = clamp(next_theta[] - 1, 0, nbatch)
-        completed = scheduler_counters.completed_models[]
-        orbit_models = scheduler_counters.orbit_models[]
-        weight_models = scheduler_counters.weight_models[]
-        other_models = max(0, claimed - completed - orbit_models - weight_models)
-        elapsed_s = (time_ns() - scheduler_started_ns) / 1e9
-        println("[SCHED DIAG] elapsed_s=", round(elapsed_s; digits=1), " claimed=", claimed, " queued=", nbatch - claimed, " completed=", completed, " orbit_models=", orbit_models, " orbit_workers=", scheduler_counters.orbit_workers[], " helper_workers=", scheduler_counters.helper_workers[], " weight_models=", weight_models, " active_model_owners=", scheduler_counters.active_model_owners[], " workers_per_model=", workers_per_model, " max_parallel_models=", max_parallel_models, " active_model_limit=", owner_limit, " other_models=", other_models, " julia_threads=", nthreads)
-        return nothing
-    end
     function _store_weight_diagnostics!(i::Int, w_best::Vector{Float64})
         wsum = sum(w_best)
         wmin = isempty(w_best) ? NaN : minimum(w_best)
@@ -3133,25 +3244,123 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         println("[KARL SOLVER FAIL] i=", i, " tid=", tid, " failure_reason=", _wdiag_value(wdiag, :failure_reason, :missing_diagnostics), " delta_chi2_iteration=", _wdiag_value(wdiag, :delta_chi2_iteration, NaN), " max_light_relative_residual=", _wdiag_value(wdiag, :max_light_relative_residual, NaN), " max_light_sigma_residual=", _wdiag_value(wdiag, :max_light_sigma_residual, NaN), " light_constraint_ok=", _wdiag_value(wdiag, :light_constraint_ok, false), " solver_converged=", _wdiag_value(wdiag, :solver_converged, false), " iterations=", _wdiag_value(wdiag, :iterations, 0), " rcond_est=", _wdiag_value(wdiag, :rcond_est, NaN), " max_abs_dw=", _wdiag_value(wdiag, :max_abs_dw, NaN), " stepfac=", _wdiag_value(wdiag, :stepfac, NaN), " chi_slack=", _wdiag_value(wdiag, :chi_slack, NaN))
         return nothing
     end
+    function _unleased_orbit_demand()
+        demand = 0
+        lock(work_states_lock)
+        try
+            @inbounds for i in 1:nbatch
+                ws = work_states[i]
+                ws === nothing && continue
+                ws.phase[] == 1 || continue
+                remaining = max(0, length(ws.launch_order) - (ws.next_orbit[] - 1))
+                remaining == 0 && continue
+                lease_count = model_worker_leases[i][]
+                desired = min(workers_per_model, remaining)
+                demand += max(0, desired - lease_count)
+            end
+        finally
+            unlock(work_states_lock)
+        end
+        return demand
+    end
+
     function _try_claim_theta!()
         next_theta[] > nbatch && return 0
-        while true
+        lock(admission_lock)
+        try
+            next_theta[] > nbatch && return 0
             active = scheduler_counters.active_model_owners[]
-            active >= owner_limit && return 0
-            Threads.atomic_cas!(scheduler_counters.active_model_owners, active, active + 1) == active || continue
+            active >= hard_model_limit && return 0
+            claimed = clamp(next_theta[] - 1, 0, nbatch)
+            dynamic_claim = false
+            admission_load = NaN
+            runnable_demand = NaN
+            if claimed < initial_owner_target
+                Threads.atomic_add!(scheduler_counters.initial_claims, 1)
+            elseif dynamic_admission
+                scheduler_counters.initializing_models[] > 0 && return 0
+                finishing_priority && scheduler_counters.finishing_waiters[] > 0 && return 0
+                admission_load = worker_pool.leased[]
+                runnable_demand = admission_load + _unleased_orbit_demand() + scheduler_counters.finishing_waiters[]
+                active >= initial_owner_target && runnable_demand >= admission_limit && return 0
+                Threads.atomic_add!(scheduler_counters.dynamic_claims, 1)
+                dynamic_claim = true
+            else
+                active >= initial_owner_target && return 0
+            end
+            Threads.atomic_add!(scheduler_counters.active_model_owners, 1)
+            Threads.atomic_add!(scheduler_counters.initializing_models, 1)
             i = Threads.atomic_add!(next_theta, 1)
             if i > nbatch
+                Threads.atomic_add!(scheduler_counters.initializing_models, -1)
                 Threads.atomic_add!(scheduler_counters.active_model_owners, -1)
                 return 0
             end
+            if dynamic_claim
+                println("[SCHED ADMIT] i=", i, " leased_workers_before_claim=", admission_load, " runnable_demand_before_claim=", runnable_demand, " workers_per_model=", workers_per_model, " admission_worker_limit=", admission_limit, " reserve_workers=", reserve_worker_count, " active_models_after_claim=", scheduler_counters.active_model_owners[])
+            end
             return i
+        finally
+            unlock(admission_lock)
         end
     end
+
+    function _dispatch_orbit_workers!()
+        free_capacity = total_worker_pool - worker_pool.leased[]
+        if finishing_priority && free_capacity > 0
+            free_capacity -= min(free_capacity, scheduler_counters.finishing_waiters[])
+        end
+        free_capacity <= 0 && return 0
+        dispatched = 0
+        while free_capacity > 0
+            candidates = NamedTuple[]
+            lock(work_states_lock)
+            try
+                @inbounds for i in 1:nbatch
+                    ws = work_states[i]
+                    ws === nothing && continue
+                    ws.phase[] == 1 || continue
+                    ws.next_orbit[] <= length(ws.launch_order) || continue
+                    lease_count = model_worker_leases[i][]
+                    lease_count < workers_per_model || continue
+                    remaining = max(0, length(ws.launch_order) - (ws.next_orbit[] - 1))
+                    push!(candidates, (i=i, ws=ws, lease_count=lease_count, remaining=remaining))
+                end
+            finally
+                unlock(work_states_lock)
+            end
+            isempty(candidates) && break
+            sort!(candidates; by=item -> (item.lease_count == 0 ? 0 : 1, finishing_priority ? item.remaining : item.i, item.i))
+            candidate = first(candidates)
+            i = candidate.i
+            ws = candidate.ws
+            helper = candidate.lease_count > 0
+            _try_acquire_worker!(worker_pool) || break
+            Threads.atomic_add!(model_worker_leases[i], 1)
+            let model_index=i, work_state=ws, helper_worker=helper
+                Threads.@spawn begin
+                    try
+                        _run_orbit_worker!(work_state; scheduler_counters=scheduler_counters, helper=helper_worker, max_claims=4)
+                    finally
+                        Threads.atomic_add!(model_worker_leases[model_index], -1)
+                        _release_worker!(worker_pool)
+                    end
+                end
+            end
+            dispatched += 1
+            free_capacity -= 1
+        end
+        return dispatched
+    end
+
     function _batch_worker!(tid::Int)
         while true
             i = _try_claim_theta!()
             if i > 0
-                orbit_owner_slot_held = true
+                model_owner_slot_held = true
+                initializing_phase_counted = true
+                finishing_phase_counted = false
+                finishing_worker_lease_held = false
                 theta_deadline = time_ns() + UInt64(round(timeout_s * 1e9))
                 try
                     rho_s = Float64(thetas[1, i])
@@ -3171,7 +3380,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         continue
                     end
                     ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, required_rmax_m=required_force_rmax_m, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
-                    ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables)
+                    ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables, precomputed_d3_constraints=batch_d3_constraints, worker_limit=workers_per_model, worker_pool=worker_pool)
                     lock(work_states_lock)
                     try
                         work_states[i] = ws
@@ -3183,22 +3392,36 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         println("[MODEL GRID] tracer_bins=", ws.Nlight, " apertures=", ws.Nspatial, " Nvbin=", ws.Nvbin, " shells=", ws.Nshells, " constraints=", ws.Nlight + ws.Nspatial * ws.Nvbin, " R_tracer_max_pc=", (ws.d3_constraints === nothing ? ws.light_edges[end] : ws.d3_constraints.radial_edges_m[end]) / pc, " R_aperture_max_pc=", maximum(last.(ws.losvd_aperture_ranges)) / pc, " R_shell_max_pc=", ws.shells[end] / pc)
                     end
 
+                    if initializing_phase_counted
+                        lock(admission_lock)
+                        try
+                            Threads.atomic_add!(scheduler_counters.initializing_models, -1)
+                            initializing_phase_counted = false
+                        finally
+                            unlock(admission_lock)
+                        end
+                    end
                     Threads.atomic_add!(scheduler_counters.orbit_models, 1)
                     try
                         Threads.atomic_xchg!(ws.phase, 1)
-
-                        @sync for _ in 1:workers_per_model
-                            Threads.@spawn _run_orbit_worker!(ws; scheduler_counters=scheduler_counters)
+                        while ws.phase[] == 1 && time_ns() <= theta_deadline
+                            all_claimed = ws.next_orbit[] > length(ws.launch_order)
+                            all_claimed && model_worker_leases[i][] == 0 && break
+                            sleep(0.001)
                         end
-
                         _close_orbit_phase!(ws)
                     finally
                         Threads.atomic_add!(scheduler_counters.orbit_models, -1)
-                        if orbit_owner_slot_held
-                            Threads.atomic_add!(scheduler_counters.active_model_owners, -1)
-                            orbit_owner_slot_held = false
-                        end
                     end
+                    Threads.atomic_add!(scheduler_counters.finishing_waiters, 1)
+                    try
+                        _acquire_worker!(worker_pool; priority=finishing_priority)
+                        finishing_worker_lease_held = true
+                    finally
+                        Threads.atomic_add!(scheduler_counters.finishing_waiters, -1)
+                    end
+                    Threads.atomic_add!(scheduler_counters.finishing_models, 1)
+                    finishing_phase_counted = true
 
                     coverage = _assess_orbit_coverage(ws; fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count)
                     coverage_deadline_hit[i] = time_ns() > theta_deadline
@@ -3337,6 +3560,14 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     losvd_score_state = losvd_fit_statistic_sym === :multinomial ? karl_multinomial_losvd_state(A_losvd, A_kinematic, w, losvd_counts, ws.Nspatial, ws.Nvbin; conditioning=losvd_conditioning_sym) : karl_losvd_fracnew_state(A_losvd, w, losvd_target, losvd_sigma, ws.Nspatial, ws.Nvbin)
                     cl = losvd_fit_statistic_sym === :multinomial ? losvd_score_state.deviance_total : losvd_score_state.chi_total
                     score_by_spatial = losvd_fit_statistic_sym === :multinomial ? losvd_score_state.deviance_by_spatial : losvd_score_state.chi_by_spatial
+                    if get(ENV, "OSPM_DIAG_APERTURE_SCORE", "0") == "1"
+                        @inbounds for ib in 1:ws.Nspatial
+                            rlo_pc = ws.losvd_aperture_ranges[ib][1] / pc
+                            rhi_pc = ws.losvd_aperture_ranges[ib][2] / pc
+                            rmid_pc = 0.5 * (rlo_pc + rhi_pc)
+                            println("[LOSVD APERTURE SCORE] model=", i, " aperture=", ib, " Rlo_pc=", rlo_pc, " Rhi_pc=", rhi_pc, " Rmid_pc=", rmid_pc, " Nstars=", Int(round(counts_by_spatial[ib])), " score=", score_by_spatial[ib])
+                        end
+                    end
                     chi2_losvd[i] = cl
 
                     R_inner_m = R_inner_pc * pc
@@ -3425,7 +3656,20 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     end
                     @warn "evaluate_batch_theta Karl exception on i=$i" exception=(e, catch_backtrace()) halo_type=halo_type
                 finally
-                    orbit_owner_slot_held && Threads.atomic_add!(scheduler_counters.active_model_owners, -1)
+                    if initializing_phase_counted
+                        lock(admission_lock)
+                        try
+                            Threads.atomic_add!(scheduler_counters.initializing_models, -1)
+                        finally
+                            unlock(admission_lock)
+                        end
+                    end
+                    finishing_phase_counted && Threads.atomic_add!(scheduler_counters.finishing_models, -1)
+                    if finishing_worker_lease_held
+                        _release_worker!(worker_pool)
+                        finishing_worker_lease_held = false
+                    end
+                    model_owner_slot_held && Threads.atomic_add!(scheduler_counters.active_model_owners, -1)
                     Threads.atomic_add!(scheduler_counters.completed_models, 1)
                 end
                 continue
@@ -3436,26 +3680,23 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
         end
     end
 
-    monitor_task = Threads.@spawn begin
-        last_report_ns = scheduler_started_ns
+    dispatcher_task = Threads.@spawn begin
         while scheduler_counters.stop_monitor[] == 0
-            sleep(1.0)
-            now_ns = time_ns()
-            if now_ns - last_report_ns >= UInt64(10_000_000_000)
-                _print_scheduler_diagnostics!()
-                last_report_ns = now_ns
-            end
+            _dispatch_orbit_workers!()
+            sleep(0.001)
         end
     end
+
+    owner_task_count = min(nbatch, hard_model_limit)
+    owner_tasks = [Threads.@spawn _batch_worker!(t) for t in 1:owner_task_count]
     try
-        Threads.@threads :static for t in 1:nthreads
-            _batch_worker!(t)
+        for task in owner_tasks
+            wait(task)
         end
     finally
         Threads.atomic_xchg!(scheduler_counters.stop_monitor, 1)
-        wait(monitor_task)
+        wait(dispatcher_task)
     end
-    _print_scheduler_diagnostics!()
     return (status, chi2_losvd, chi2_inner, chi2_outer, delta_chi2_iteration, max_light_relative_residual, max_light_sigma_residual, light_constraint_ok, solver_converged, solver_iterations,
     solver_failure_reason, N_inner, N_outer, N_nonzero_weights, effective_N_orbits, max_weight_fraction, coverage_status, coverage_issue_region, coverage_issue_axis,
     coverage_issue_shell_bands, coverage_reasons, coverage_fraction, coverage_attempted_fraction, coverage_success_fraction, coverage_shell_min, coverage_lfrac_min,
@@ -3464,6 +3705,5 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     phase_volume_invalid_recorded_orbits, phase_volume_nested_groups, phase_volume_duplicate_area_clusters, phase_volume_duplicate_area_orbits, raw_phase_volume_min,
     raw_phase_volume_max, raw_phase_volume_dynamic_range, normalized_phase_volume_min, normalized_phase_volume_max, wphase_min, wphase_max, wphase_dynamic_range, wphase_pair_max_relative_mismatch)
 end
-
 
 end # module

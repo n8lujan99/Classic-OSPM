@@ -82,8 +82,8 @@ def _build_general_defaults(local_debug):
         "MODE": "karl",
         "LOCAL_DEBUG": local_debug,
         "N_WORKERS": detect_workers(),
-        "SMART_RUN_MIN_CPUS_PER_MODEL": 5,
-        "SMART_RUN_MAX_CPUS_PER_MODEL": 20,
+        "SMART_RUN_MIN_CPUS_PER_MODEL": 10,
+        "SMART_RUN_MAX_CPUS_PER_MODEL": 10,
         "NORBIT": norbit,
 
         # Standard data-column contract
@@ -110,8 +110,8 @@ def _build_general_defaults(local_debug):
             # Shared worker-pool policy. MODEL_OWNER_LIMIT=0 leaves the active
             # model count under Smart Run control. THREADS_PER_MODEL is the
             # maximum useful parallel width of one model, not a permanent CPU reservation.
-            "MODEL_OWNER_LIMIT": 0,
-            "THREADS_PER_MODEL": 6,
+            "MODEL_OWNER_LIMIT": 3,
+            "THREADS_PER_MODEL": 10,
             "KARL_ALPHAT": 1.0,
             "KARL_LIGHT_REL_TOL": 0.01,
             "KARL_LIGHT_SIGMA_TOL": 2.0,

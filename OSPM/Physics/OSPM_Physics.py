@@ -6,6 +6,7 @@
 import os
 import sys
 import numpy as np
+from OSPM.AI.OSPM_Smart_Run import detect_available_cpus, plan_shared_pool, plan_smart_run
 # --- PythonCall / JuliaCall must see these BEFORE importing juliacall ---
 os.environ["PYTHON"] = sys.executable
 # repo root owns Project.toml / Manifest.toml
@@ -28,34 +29,33 @@ c = 2.99792458e8
 
 _NFW_VCIRC_DENOM = 4.0 * np.pi * G * (np.log(2.0) - 0.5)
 
-def _available_cpu_count():
-    for name in ( "SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "PBS_NCPUS", "NSLOTS",):
-        raw = os.environ.get(name)
-        if raw is None:
-            continue
-        try:
-            value = int(str(raw).split("(", 1)[0])
-        except ValueError:
-            continue
-        if value > 0:
-            return value
-    try:
-        affinity_count = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        affinity_count = 0
-    if affinity_count > 0:
-        return affinity_count
-    return max(1, int(os.cpu_count() or 1))
+def _runtime_shared_pool_plan(*, preferred_threads_per_model, min_cpus_per_model=5, max_cpus_per_model=20, requested_model_owner_limit=0, julia_threads=None):
+    requested_model_owner_limit = int(requested_model_owner_limit)
+    if requested_model_owner_limit < 0:
+        raise ValueError("MODEL_OWNER_LIMIT must be >= 0; use 0 for automatic Smart Run scheduling")
+    snapshot = detect_available_cpus(julia_threads=julia_threads)
+    allocation = plan_smart_run(
+        snapshot,
+        preferred_cpus_per_model=int(preferred_threads_per_model),
+        min_cpus_per_model=int(min_cpus_per_model),
+        max_cpus_per_model=int(max_cpus_per_model),
+        max_model_owners=requested_model_owner_limit if requested_model_owner_limit > 0 else None,
+    )
+    return plan_shared_pool(allocation), snapshot
 
-def _jl_init(*, threads_per_model=8):
+def _jl_init(*, assigned_cpus=None, threads_per_model=8, shared_pool=False):
     global _JL_READY, _Main
+    if assigned_cpus is None:
+        assigned_cpus = detect_available_cpus().available_cpus
+    assigned_cpus = int(assigned_cpus)
     threads_per_model = int(threads_per_model)
+    if assigned_cpus <= 0:
+        raise ValueError("assigned_cpus must be positive")
     if threads_per_model <= 0:
         raise ValueError("threads_per_model must be positive")
-    assigned_cpus = _available_cpu_count()
-    blas_threads = min(threads_per_model, assigned_cpus)
+    blas_threads = 1 if shared_pool else min(threads_per_model, assigned_cpus)
     if _JL_READY:
-        _Main.seval( f"LinearAlgebra.BLAS.set_num_threads({blas_threads})" )
+        _Main.seval(f"LinearAlgebra.BLAS.set_num_threads({blas_threads})")
         return
     if not USE_JULIA:
         raise RuntimeError("OSPM_USE_JULIA is not enabled")
@@ -69,14 +69,14 @@ def _jl_init(*, threads_per_model=8):
     os.environ["MKL_NUM_THREADS"] = str(blas_threads)
     from juliacall import Main as _Main
     _Main.seval("using LinearAlgebra")
-    _Main.seval( f"LinearAlgebra.BLAS.set_num_threads({blas_threads})")
+    _Main.seval(f"LinearAlgebra.BLAS.set_num_threads({blas_threads})")
     here = os.path.dirname(os.path.abspath(__file__))
     jl_path = os.path.join(here, "OSPM_Physics_Spherical.jl")
     if not os.path.exists(jl_path):
         raise FileNotFoundError(f"Julia backend file not found: {jl_path}")
     # Ask Julia whether the binding exists. PythonCall's hasattr() can return a
     # stale false result immediately after Base.include creates a new binding.
-    module_defined = bool( _Main.seval("isdefined(Main, :OSPMPhysicsSpherical)"))
+    module_defined = bool(_Main.seval("isdefined(Main, :OSPMPhysicsSpherical)"))
     if not module_defined:
         # Safer HPC bridge include:
         # pass the path as a plain Julia string inside seval instead of
@@ -114,7 +114,7 @@ def _jl_init(*, threads_per_model=8):
         f" assigned_cpus={assigned_cpus}"
         f" julia_threads={julia_threads}"
         f" blas_threads={active_blas_threads}"
-        f" threads_per_model_target={threads_per_model}"
+        " shared_pool_parallelism=true"
     )
     _JL_READY = True
 
@@ -502,6 +502,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
         - halo options
         - expanded-CM convergence options
         - orbit coverage and timeout options
+        - Smart Run shared-worker-pool scheduling options
     """
     if not USE_JULIA:
         raise RuntimeError("Karl batch mode requires Julia")
@@ -584,10 +585,14 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     orbit_warn_success_pct = float(opt("ORBIT_WARN_SUCCESS_PCT", "orbit_warn_success_pct", default=0.99))
     orbit_warn_regional_floor = float(opt("ORBIT_WARN_REGIONAL_FLOOR", "orbit_warn_regional_floor", default=0.80))
     orbit_warn_max_regional_gap = float(opt("ORBIT_WARN_MAX_REGIONAL_GAP", "orbit_warn_max_regional_gap", default=0.15))
-    model_owner_limit = int(opt("MODEL_OWNER_LIMIT", "model_owner_limit", default=0))
-    threads_per_model = int(opt("THREADS_PER_MODEL", "CPUS_PER_MODEL", "threads_per_model", default=8))
-    if threads_per_model <= 0:
+    requested_model_owner_limit = int(opt("MODEL_OWNER_LIMIT", "model_owner_limit", default=0))
+    preferred_threads_per_model = int(opt("THREADS_PER_MODEL", "CPUS_PER_MODEL", "threads_per_model", default=8))
+    smart_run_min_cpus = int(opt("SMART_RUN_MIN_CPUS_PER_MODEL", default=5))
+    smart_run_max_cpus = int(opt("SMART_RUN_MAX_CPUS_PER_MODEL", default=20))
+    if preferred_threads_per_model <= 0:
         raise ValueError("THREADS_PER_MODEL must be positive")
+    if requested_model_owner_limit < 0:
+        raise ValueError("MODEL_OWNER_LIMIT must be >= 0; use 0 for automatic Smart Run scheduling")
     R, v, ve = _get_obs_arrays(obs)
     valid = _get_valid_vlos(obs, R, v, ve)
     if losvd_target_mode == "karl_resolved_stars":
@@ -598,7 +603,38 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     if Norbit % 2 != 0:
         raise RuntimeError("Karl paired-orbit mode requires an even Norbit; "f"got Norbit={Norbit}" )
 
-    _jl_init(threads_per_model=threads_per_model)
+    pre_pool, _ = _runtime_shared_pool_plan(
+        preferred_threads_per_model=preferred_threads_per_model,
+        min_cpus_per_model=smart_run_min_cpus,
+        max_cpus_per_model=smart_run_max_cpus,
+        requested_model_owner_limit=requested_model_owner_limit,
+    )
+    _jl_init(assigned_cpus=pre_pool.total_workers, threads_per_model=pre_pool.workers_per_model, shared_pool=True)
+    julia_threads = int(_Main.seval("Threads.nthreads()"))
+    shared_pool, resource_snapshot = _runtime_shared_pool_plan(
+        preferred_threads_per_model=preferred_threads_per_model,
+        min_cpus_per_model=smart_run_min_cpus,
+        max_cpus_per_model=smart_run_max_cpus,
+        requested_model_owner_limit=requested_model_owner_limit,
+        julia_threads=julia_threads,
+    )
+    threads_per_model = shared_pool.workers_per_model
+    initial_model_owners = shared_pool.initial_model_owners
+    total_workers = shared_pool.total_workers
+    reserve_workers = shared_pool.reserve_workers
+    admission_worker_limit = shared_pool.admission_worker_limit
+    print(
+        "[SMART RUN BRIDGE]"
+        f" source={resource_snapshot.source}"
+        f" total_workers={total_workers}"
+        f" threads_per_model={threads_per_model}"
+        f" initial_model_owners={initial_model_owners}"
+        f" reserve_workers={reserve_workers}"
+        f" admission_worker_limit={admission_worker_limit}"
+        f" dynamic_admission={shared_pool.dynamic_admission}"
+        f" whole_model_admission={shared_pool.whole_model_admission}"
+        f" finishing_priority={shared_pool.finishing_priority}"
+    )
     halo_parameterization = _halo_parameterization_from_config(cfg)
     theta_arr = canonicalize_theta_matrix( thetas, halo_type=halo_type, halo_parameterization=halo_parameterization, bounds=cfg.get("THETA_BOUNDS"))
     def jl_matrix_f64(value, name):
@@ -717,8 +753,15 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
     _Main.seval(f"_ospm_orbit_warn_success_pct = {orbit_warn_success_pct!r}")
     _Main.seval(f"_ospm_orbit_warn_regional_floor = {orbit_warn_regional_floor!r}")
     _Main.seval(f"_ospm_orbit_warn_max_regional_gap = {orbit_warn_max_regional_gap!r}")
-    _Main.seval(f"_ospm_model_owner_limit = {model_owner_limit}")
+    _Main.seval(f"_ospm_model_owner_limit = {requested_model_owner_limit}")
+    _Main.seval(f"_ospm_initial_model_owners = {initial_model_owners}")
     _Main.seval(f"_ospm_threads_per_model = {threads_per_model}")
+    _Main.seval(f"_ospm_total_workers = {total_workers}")
+    _Main.seval(f"_ospm_reserve_workers = {reserve_workers}")
+    _Main.seval(f"_ospm_admission_worker_limit = {admission_worker_limit}")
+    _Main.seval(f"_ospm_dynamic_admission = {'true' if shared_pool.dynamic_admission else 'false'}")
+    _Main.seval(f"_ospm_whole_model_admission = {'true' if shared_pool.whole_model_admission else 'false'}")
+    _Main.seval(f"_ospm_finishing_priority = {'true' if shared_pool.finishing_priority else 'false'}")
 
     out = _Main.seval("""OSPMPhysicsSpherical.evaluate_batch_theta(_ospm_theta, _ospm_R, _ospm_valid, _ospm_v, _ospm_ve, _ospm_sini, _ospm_Norbit, _ospm_halo_type;
             stellar_model=_ospm_stellar_model, surface_brightness_profile=_ospm_sb_profile, tracer_constraint_mode=_ospm_tracer_constraint_mode,
@@ -729,7 +772,9 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
             entropy_floor=_ospm_entropy_floor, maxiter=_ospm_maxiter, timeout_s=_ospm_timeout_s, fill_pct=_ospm_orbit_fill_pct, regional_floor=_ospm_orbit_regional_floor,
             max_regional_gap=_ospm_orbit_max_regional_gap, shell_band_count=_ospm_orbit_shell_bands, coverage_check_every=_ospm_orbit_coverage_check_every,
             warn_fill_pct=_ospm_orbit_warn_fill_pct, warn_success_pct=_ospm_orbit_warn_success_pct, warn_regional_floor=_ospm_orbit_warn_regional_floor,
-            warn_max_regional_gap=_ospm_orbit_warn_max_regional_gap, model_owner_limit=_ospm_model_owner_limit, threads_per_model=_ospm_threads_per_model,
+            warn_max_regional_gap=_ospm_orbit_warn_max_regional_gap, model_owner_limit=_ospm_model_owner_limit, initial_model_owners=_ospm_initial_model_owners,
+            threads_per_model=_ospm_threads_per_model, total_workers=_ospm_total_workers, reserve_workers=_ospm_reserve_workers, admission_worker_limit=_ospm_admission_worker_limit,
+            dynamic_admission=_ospm_dynamic_admission, whole_model_admission=_ospm_whole_model_admission, finishing_priority=_ospm_finishing_priority,
             R_inner_pc=_ospm_R_inner_pc, velocity_edges=_ospm_velocity_edges, light_bin_edges=_ospm_light_edges, kinematic_bin_edges=_ospm_kinematic_edges,
             Nvbin=_ospm_Nvbin, Ntheta_launch=_ospm_Ntheta_launch, halo_q_axis_ratio=_ospm_halo_q_axis_ratio, karl_halo_params=_ospm_karl_halo_params)""")
     

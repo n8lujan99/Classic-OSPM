@@ -1,5 +1,5 @@
 #OSPM_Daemon.py — STAYS IN PYTHON FOREVER.  Parallelism lives in Julia, not here.
-"""
+
 # ========================================================================================================================
 # WHAT THIS DOES
 # Drives an RL-guided search over dark-matter halo parameters θ.  The first
@@ -47,13 +47,13 @@
 #
 # run_daemon(config,engine)  config,engine → None                — outer loop: propose→eval→record→train
 # ========================================================================================================================
-"""
 
 import os, time, traceback, json
 import numpy as np, pandas as pd
 import torch, torch.nn as nn
 from collections import deque
 from OSPM.Physics.OSPM_Physics import (canonicalize_theta_matrix, nfw_vcirc_rs_to_rho_s, normalize_halo_parameterization, _validate_karl_resolved_selection_edges, _normalize_losvd_conditioning, _normalize_losvd_fit_statistic,)
+from OSPM.AI.OSPM_Smart_Run import detect_available_cpus, plan_shared_pool, plan_smart_run
 torch.backends.cudnn.benchmark = False
 try: from sklearn.preprocessing import StandardScaler
 except Exception: StandardScaler = None
@@ -946,8 +946,10 @@ def run_daemon(config, physics_engine):
     orbit_warn_success_pct = float(opt("ORBIT_WARN_SUCCESS_PCT", default=0.99))
     orbit_warn_regional_floor = float(opt("ORBIT_WARN_REGIONAL_FLOOR", default=0.80))
     orbit_warn_max_regional_gap = float(opt("ORBIT_WARN_MAX_REGIONAL_GAP", default=0.15))
-    model_owner_limit = int(opt("MODEL_OWNER_LIMIT", default=0))
-    threads_per_model = int(opt("THREADS_PER_MODEL", "threads_per_model", default=8))
+    requested_model_owner_limit = int(opt("MODEL_OWNER_LIMIT", default=0))
+    preferred_threads_per_model = int(opt("THREADS_PER_MODEL", "threads_per_model", default=8))
+    smart_run_min_cpus = int(opt("SMART_RUN_MIN_CPUS_PER_MODEL", default=5))
+    smart_run_max_cpus = int(opt("SMART_RUN_MAX_CPUS_PER_MODEL", default=20))
 
 
     if base_halo_type == "karl_halo":
@@ -1068,11 +1070,34 @@ def run_daemon(config, physics_engine):
         flush=True,
     )
 
-    _jnt = os.environ.get("JULIA_NUM_THREADS", "1")
-    _nthreads = (os.cpu_count() or 1) if _jnt == "auto" else int(_jnt)
-    owner_capacity = model_owner_limit if model_owner_limit > 0 else max(1, _nthreads // max(threads_per_model, 1))
+    julia_threads = int(Main.seval("Threads.nthreads()"))
+    resource_snapshot = detect_available_cpus(julia_threads=julia_threads)
+    smart_plan = plan_smart_run(
+        resource_snapshot,
+        preferred_cpus_per_model=preferred_threads_per_model,
+        min_cpus_per_model=smart_run_min_cpus,
+        max_cpus_per_model=smart_run_max_cpus,
+        max_model_owners=requested_model_owner_limit if requested_model_owner_limit > 0 else None,
+    )
+    shared_pool = plan_shared_pool(smart_plan)
+    threads_per_model = shared_pool.workers_per_model
+    initial_model_owners = shared_pool.initial_model_owners
+    total_workers = shared_pool.total_workers
+    reserve_workers = shared_pool.reserve_workers
+    admission_worker_limit = shared_pool.admission_worker_limit
+    print(
+        f"[SMART RUN] source={resource_snapshot.source} available_cpus={resource_snapshot.available_cpus} "
+        f"scheduler_cpus={resource_snapshot.scheduler_cpus} affinity_cpus={resource_snapshot.affinity_cpus} "
+        f"julia_threads={julia_threads} preferred_threads_per_model={preferred_threads_per_model} "
+        f"threads_per_model={threads_per_model} initial_model_owners={initial_model_owners} "
+        f"total_workers={total_workers} reserve_workers={reserve_workers} admission_worker_limit={admission_worker_limit} "
+        f"dynamic_admission={shared_pool.dynamic_admission} whole_model_admission={shared_pool.whole_model_admission} "
+        f"finishing_priority={shared_pool.finishing_priority} range={smart_run_min_cpus}-{smart_run_max_cpus}",
+        flush=True,
+    )
     feedback_cfg = int(config.get("FEEDBACK_BATCH_SIZE", 0))
-    feedback_batch = owner_capacity if feedback_cfg <= 0 else min(feedback_cfg, runner.batch)
+    auto_feedback_batch = min(runner.batch, max(initial_model_owners + 1, 2 * initial_model_owners))
+    feedback_batch = auto_feedback_batch if feedback_cfg <= 0 else min(feedback_cfg, runner.batch)
     feedback_batch = max(1, min(feedback_batch, runner.batch))
     CHUNK = max(1, int(config.get("CHUNK_SIZE", feedback_batch)))
     max_evals = int(config.get("MAX_EVALS", 0))
@@ -1080,7 +1105,7 @@ def run_daemon(config, physics_engine):
     alt_density_radius = float(config.get("ALT_DENSITY_RADIUS", 0.05))
     alt_sensitivity_delta = float(config.get("ALT_SENSITIVITY_DELTA_CHI2", 100.0))
 
-    print(f"[SEARCH CADENCE] configured_batch={runner.batch} feedback_batch={feedback_batch} owner_capacity={owner_capacity} chunk={CHUNK}", flush=True)
+    print(f"[SEARCH CADENCE] configured_batch={runner.batch} feedback_batch={feedback_batch} initial_model_owners={initial_model_owners} queued_backfill={max(0, feedback_batch - initial_model_owners)} chunk={CHUNK}", flush=True)
     print(f"[SCIENCE BRANCH] full_delta<={alt_trigger_delta:g} density_radius={alt_density_radius:g} sensitivity_delta<={alt_sensitivity_delta:g}", flush=True)
 
     def _variant(theta, label):
@@ -1258,8 +1283,15 @@ def run_daemon(config, physics_engine):
                     Main.seval(f"_orbit_warn_success_pct_jl = {float(orbit_warn_success_pct)!r}")
                     Main.seval(f"_orbit_warn_regional_floor_jl = {float(orbit_warn_regional_floor)!r}")
                     Main.seval(f"_orbit_warn_max_regional_gap_jl = {float(orbit_warn_max_regional_gap)!r}")
-                    Main.seval(f"_model_owner_limit_jl = {int(model_owner_limit)}")
+                    Main.seval(f"_model_owner_limit_jl = {int(requested_model_owner_limit)}")
+                    Main.seval(f"_initial_model_owners_jl = {int(initial_model_owners)}")
                     Main.seval(f"_threads_per_model_jl = {int(threads_per_model)}")
+                    Main.seval(f"_total_workers_jl = {int(total_workers)}")
+                    Main.seval(f"_reserve_workers_jl = {int(reserve_workers)}")
+                    Main.seval(f"_admission_worker_limit_jl = {int(admission_worker_limit)}")
+                    Main.seval(f"_dynamic_admission_jl = {_julia_literal(shared_pool.dynamic_admission, 'dynamic_admission')}")
+                    Main.seval(f"_whole_model_admission_jl = {_julia_literal(shared_pool.whole_model_admission, 'whole_model_admission')}")
+                    Main.seval(f"_finishing_priority_jl = {_julia_literal(shared_pool.finishing_priority, 'finishing_priority')}")
                     batch_result = Main.seval("""
 OSPMPhysicsSpherical.evaluate_batch_theta(
 _theta_mat_jl,
@@ -1305,7 +1337,14 @@ warn_success_pct=_orbit_warn_success_pct_jl,
 warn_regional_floor=_orbit_warn_regional_floor_jl,
 warn_max_regional_gap=_orbit_warn_max_regional_gap_jl,
 model_owner_limit=_model_owner_limit_jl,
+initial_model_owners=_initial_model_owners_jl,
 threads_per_model=_threads_per_model_jl,
+total_workers=_total_workers_jl,
+reserve_workers=_reserve_workers_jl,
+admission_worker_limit=_admission_worker_limit_jl,
+dynamic_admission=_dynamic_admission_jl,
+whole_model_admission=_whole_model_admission_jl,
+finishing_priority=_finishing_priority_jl,
 halo_q_axis_ratio=_halo_q_axis_ratio_jl,
 karl_halo_params=_karl_halo_params_jl,
 velocity_edges=_velocity_edges_jl,

@@ -192,5 +192,6 @@ CONFIG = {
     "EVAL_VARIANTS": ["full"],
 
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "v0testing.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_patch2_multinomial_integration_test.csv"),
+    
 }
