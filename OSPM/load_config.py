@@ -1,9 +1,10 @@
-# This holds the configuration defaults and the logic to load the galaxy-specific configuration. 
+# ========================================================================================================================
+# This holds the configuration defaults and the logic to load the galaxy-specific configuration.
 # It also defines the shared contract for the deck results and validation of the configuration.
-# The individual galaxy configs contain only the galaxy-specific parameters and overrides, 
+# The individual galaxy configs contain only the galaxy-specific parameters and overrides,
 # and are loaded dynamically based on the galaxy name.
 # !WARNING!: Changing this file will affect all galaxies, so be careful with edits here.
-
+# ========================================================================================================================
 from pathlib import Path
 from importlib import import_module
 import copy
@@ -53,10 +54,10 @@ DECK_RESULT_COLUMNS = [ "chi2", "reward", "status", "proposal_id",
     # Karl phase-volume diagnostics
     "phase_volume_valid", "phase_volume_convention", "phase_volume_normalization", "phase_volume_launches_recorded", "phase_volume_sos_recorded",
     "phase_volume_valid_base_orbits", "phase_volume_invalid_recorded_orbits", "phase_volume_nested_groups", "phase_volume_duplicate_area_clusters",
-    "phase_volume_duplicate_area_orbits", "raw_phase_volume_min", "raw_phase_volume_max", "raw_phase_volume_dynamic_range", "normalized_phase_volume_min", 
+    "phase_volume_duplicate_area_orbits", "raw_phase_volume_min", "raw_phase_volume_max", "raw_phase_volume_dynamic_range", "normalized_phase_volume_min",
     "normalized_phase_volume_max", "wphase_min", "wphase_max", "wphase_dynamic_range", "wphase_pair_max_relative_mismatch"]
 
-ALLOWED_STATUSES = [ "todo", "seed", "pass", "orbit_fail", "numeric_fail", "unknown_fail", "timeout", "forbidden", "pass_full", "pass_bh_only", "pass_halo_only", "pass_bh_up", 
+ALLOWED_STATUSES = [ "todo", "seed", "pass", "orbit_fail", "numeric_fail", "unknown_fail", "timeout", "forbidden", "pass_full", "pass_bh_only", "pass_halo_only", "pass_bh_up",
     "pass_bh_down", "pass_halo_up", "pass_halo_down", "pass_ml_up", "pass_ml_down", "orbit_fail_full", "orbit_fail_bh_only", "orbit_fail_halo_only", "orbit_fail_bh_up", "orbit_fail_bh_down", "orbit_fail_halo_up", "orbit_fail_halo_down", "orbit_fail_ml_up", "orbit_fail_ml_down",
     "numeric_fail_full", "numeric_fail_bh_only", "numeric_fail_halo_only", "numeric_fail_bh_up", "numeric_fail_bh_down", "numeric_fail_halo_up", "numeric_fail_halo_down", "numeric_fail_ml_up", "numeric_fail_ml_down",
     "timeout_full", "timeout_bh_only", "timeout_halo_only", "timeout_bh_up", "timeout_bh_down", "timeout_halo_up", "timeout_halo_down", "timeout_ml_up", "timeout_ml_down",
@@ -81,6 +82,8 @@ def _build_general_defaults(local_debug):
         "MODE": "karl",
         "LOCAL_DEBUG": local_debug,
         "N_WORKERS": detect_workers(),
+        "SMART_RUN_MIN_CPUS_PER_MODEL": 5,
+        "SMART_RUN_MAX_CPUS_PER_MODEL": 20,
         "NORBIT": norbit,
 
         # Standard data-column contract
@@ -104,15 +107,18 @@ def _build_general_defaults(local_debug):
             "ORBIT_WARN_SUCCESS_PCT": 0.99,
             "ORBIT_WARN_REGIONAL_FLOOR": 0.80,
             "ORBIT_WARN_MAX_REGIONAL_GAP": 0.15,
+            # Shared worker-pool policy. MODEL_OWNER_LIMIT=0 leaves the active
+            # model count under Smart Run control. THREADS_PER_MODEL is the
+            # maximum useful parallel width of one model, not a permanent CPU reservation.
             "MODEL_OWNER_LIMIT": 0,
-            "THREADS_PER_MODEL": 20,
+            "THREADS_PER_MODEL": 6,
             "KARL_ALPHAT": 1.0,
             "KARL_LIGHT_REL_TOL": 0.01,
             "KARL_LIGHT_SIGMA_TOL": 2.0,
             "KARL_DELTA_CHI2_ITER_TOL": 0.3,
-            
+
             "KARL_MAXITER": 1500,           #iters are cheap, so we can afford to be generous
-            
+
             "ENTROPY_FLOOR": 1e-30,
             "HALO_Q_AXIS_RATIO": 1.0,
         },
@@ -247,6 +253,22 @@ def _validate_parameter_contract(cfg):
                 raise ValueError( f"FIXED_THETA[{index}]={value} is outside " f"THETA_BOUNDS[{index}]={bounds[index]}")
     cfg["REQUIRE_COLUMNS"] = _build_required_columns(names)
 
+def _validate_runtime_contract(cfg):
+    observables = cfg["OBSERVABLES"]
+    threads_per_model = int(observables["THREADS_PER_MODEL"])
+    model_owner_limit = int(observables["MODEL_OWNER_LIMIT"])
+    smart_min = int(cfg["SMART_RUN_MIN_CPUS_PER_MODEL"])
+    smart_max = int(cfg["SMART_RUN_MAX_CPUS_PER_MODEL"])
+
+    if smart_min <= 0:
+        raise ValueError("SMART_RUN_MIN_CPUS_PER_MODEL must be positive")
+    if smart_max < smart_min:
+        raise ValueError("SMART_RUN_MAX_CPUS_PER_MODEL must be >= SMART_RUN_MIN_CPUS_PER_MODEL")
+    if threads_per_model <= 0:
+        raise ValueError("THREADS_PER_MODEL must be positive")
+    if model_owner_limit < 0:
+        raise ValueError("MODEL_OWNER_LIMIT must be >= 0; use 0 for automatic Smart Run scheduling")
+
 # --------------------------------------------------
 # Config loader
 # --------------------------------------------------
@@ -271,6 +293,7 @@ def load_config():
         raise KeyError(f"CONFIG missing required keys: {missing}")
     _validate_halo_contract(cfg)
     _validate_parameter_contract(cfg)
+    _validate_runtime_contract(cfg)
     if cfg["NORBIT"] % 2 != 0:
         raise ValueError("Karl paired-orbit path requires even NORBIT; " f"got {cfg['NORBIT']}")
     print("[CONFIG LOAD] GALAXY =", cfg["GALAXY"])

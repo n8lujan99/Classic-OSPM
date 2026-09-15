@@ -1,6 +1,8 @@
+# ========================================================================================================================
 # OSPM_Config_Center — Draco
 # Galaxy-specific configuration only.
 # Shared solver, orbit-library, AI, deck, and runtime defaults come from OSPM/load_config.py.
+# ========================================================================================================================
 
 from pathlib import Path
 LOCAL_DEBUG = False
@@ -10,7 +12,13 @@ if not PROFILE_ROOT.exists():
 
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
 
-INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
+# INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
+INITIAL_THETA = [26.855136, 158.805677, 2499.430397, 14.831407] # This one completes
+#INITIAL_THETA = [24, 158.805677, 2499.430397, 14.831407]
+#INITIAL_THETA = [25, 158.805677, 2499.430397, 14.831407]
+#INITIAL_THETA = [26, 158.805677, 2499.430397, 14.831407]
+#INITIAL_THETA = [23, 158.805677, 2499.430397, 14.831407] # This one does not due to v0 being less than 26
+
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
 V_SYS_KMS = -291.68214888089926
@@ -24,10 +32,7 @@ LOSVD_SELECTION_VMAX_HELIO_KMS = -250.0
 LOSVD_VMIN_KMS = LOSVD_SELECTION_VMIN_HELIO_KMS - V_SYS_KMS
 LOSVD_VMAX_KMS = LOSVD_SELECTION_VMAX_HELIO_KMS - V_SYS_KMS
 LOSVD_NVBIN = 21
-VELOCITY_EDGES_MPS = [
-    1.0e3 * (LOSVD_VMIN_KMS + i * (LOSVD_VMAX_KMS - LOSVD_VMIN_KMS) / LOSVD_NVBIN)
-    for i in range(LOSVD_NVBIN + 1)
-]
+VELOCITY_EDGES_MPS = [1.0e3 * (LOSVD_VMIN_KMS + i * (LOSVD_VMAX_KMS - LOSVD_VMIN_KMS) / LOSVD_NVBIN) for i in range(LOSVD_NVBIN + 1)]
 
 CONFIG = {
     "LOCAL_DEBUG": LOCAL_DEBUG,
@@ -40,7 +45,7 @@ CONFIG = {
     "INITIAL_THETA": INITIAL_THETA,
     "THETA_BOUNDS": [
         (0.0, 200.0),           # v0 [km/s] — dark-halo velocity scale
-        (1.0, 5000.0),          # r_c [pc] — dark-halo core radius
+        (100.0, 5000.0),          # r_c [pc] — dark-halo core radius
         (0.0, 5.0e6),           # MBH [Msun] — central black-hole mass
         (0.2, 20.0),            # M/L — stellar mass-to-light ratio
     ],
@@ -187,5 +192,5 @@ CONFIG = {
     "EVAL_VARIANTS": ["full"],
 
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_patch2_multinomial_integration_test.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "v0testing.csv"),
 }
