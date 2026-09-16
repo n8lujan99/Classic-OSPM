@@ -3141,6 +3141,19 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
     next_theta = Threads.Atomic{Int}(1)
     admission_lock = ReentrantLock()
     scheduler_counters = (initial_claims=Threads.Atomic{Int}(0), dynamic_claims=Threads.Atomic{Int}(0), initializing_models=Threads.Atomic{Int}(0), orbit_models=Threads.Atomic{Int}(0), orbit_workers=Threads.Atomic{Int}(0), helper_workers=Threads.Atomic{Int}(0), finishing_waiters=Threads.Atomic{Int}(0), finishing_models=Threads.Atomic{Int}(0), weight_models=Threads.Atomic{Int}(0), active_model_owners=Threads.Atomic{Int}(0), completed_models=Threads.Atomic{Int}(0), stop_monitor=Threads.Atomic{Int}(0))
+    julia_stage_timing = get(ENV, "OSPM_DIAG_JULIA_STAGE_TIMING", "0") == "1" || get(ENV, "OSPM_DIAG_PIPELINE_TIMING", "0") == "1"
+    orbit_failure_diag = julia_stage_timing || get(ENV, "OSPM_DIAG_ORBIT_FAILURES", "0") == "1"
+
+    function _julia_stage_begin(i::Int, stage::String, tid::Int)
+        t0_ns = time_ns()
+        julia_stage_timing && println("[JULIA STAGE TIMING] wall_s=", time(), " i=", i, " tid=", tid, " stage=", stage, " event=begin", " leased_workers=", worker_pool.leased[], " active_owners=", scheduler_counters.active_model_owners[], " orbit_workers=", scheduler_counters.orbit_workers[], " finishing_models=", scheduler_counters.finishing_models[], " weight_models=", scheduler_counters.weight_models[])
+        return t0_ns
+    end
+
+    function _julia_stage_end(i::Int, stage::String, tid::Int, t0_ns::UInt64)
+        julia_stage_timing && println("[JULIA STAGE TIMING] wall_s=", time(), " i=", i, " tid=", tid, " stage=", stage, " event=end", " elapsed_s=", (time_ns() - t0_ns) / 1.0e9, " leased_workers=", worker_pool.leased[], " active_owners=", scheduler_counters.active_model_owners[], " orbit_workers=", scheduler_counters.orbit_workers[], " finishing_models=", scheduler_counters.finishing_models[], " weight_models=", scheduler_counters.weight_models[])
+        return nothing
+    end
 
     println("[SCHED] julia_threads=", nthreads, " total_workers=", total_worker_pool, " workers_per_model=", workers_per_model, " max_parallel_models=", max_parallel_models, " initial_model_owners=", initial_owner_target, " reserve_workers=", reserve_worker_count, " admission_worker_limit=", admission_limit, " hard_model_limit=", hard_model_limit, " dynamic_admission=", dynamic_admission)
     if get(ENV, "OSPM_DIAG_JULIA_HANDOFF", "0") == "1"
@@ -3362,6 +3375,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                 finishing_phase_counted = false
                 finishing_worker_lease_held = false
                 theta_deadline = time_ns() + UInt64(round(timeout_s * 1e9))
+                model_t0 = _julia_stage_begin(i, "MODEL_TOTAL", tid)
                 try
                     rho_s = Float64(thetas[1, i])
                     r_s = Float64(thetas[2, i])
@@ -3379,8 +3393,10 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         solver_failure_reason[i] = "invalid_stellar_radius_range"
                         continue
                     end
+                    model_init_t0 = _julia_stage_begin(i, "MODEL_INIT", tid)
                     ctx = get_halo_context(rho_s, r_s, MBH, ML, halo_type; stellar_model=stellar_model_jl, required_rmax_m=required_force_rmax_m, halo_q_axis_ratio=halo_q_axis_ratio, karl_halo_params=karl_halo_params)
                     ws = _init_orbit_work(Norbit, R_star_m, valid_vlos, v_star_mps, verr_star_mps, sini, ctx; nsteps=DEFAULT_NSTEPS, Lfrac=DEFAULT_LFRAC, dt_frac_orbit=DEFAULT_DT_FRAC, max_attempts_factor=DEFAULT_MAX_ATTEMPTS, t_deadline=theta_deadline, velocity_edges=velocity_edges, light_bin_edges=light_bin_edges, kinematic_bin_edges=kinematic_bin_edges, Nvbin=Nvbin, Ntheta_launch=Ntheta_launch, fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count, coverage_check_every=coverage_check_every, tracer_constraint_mode=tracer_constraint_mode_sym, losvd_target_mode=losvd_target_mode_sym, karl_observables=karl_observables, precomputed_d3_constraints=batch_d3_constraints, worker_limit=workers_per_model, worker_pool=worker_pool)
+                    _julia_stage_end(i, "MODEL_INIT", tid, model_init_t0)
                     lock(work_states_lock)
                     try
                         work_states[i] = ws
@@ -3401,6 +3417,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                             unlock(admission_lock)
                         end
                     end
+                    orbit_t0 = _julia_stage_begin(i, "ORBIT_INTEGRATION", tid)
                     Threads.atomic_add!(scheduler_counters.orbit_models, 1)
                     try
                         Threads.atomic_xchg!(ws.phase, 1)
@@ -3413,6 +3430,8 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     finally
                         Threads.atomic_add!(scheduler_counters.orbit_models, -1)
                     end
+                    _julia_stage_end(i, "ORBIT_INTEGRATION", tid, orbit_t0)
+                    finisher_wait_t0 = _julia_stage_begin(i, "FINISHER_WAIT", tid)
                     Threads.atomic_add!(scheduler_counters.finishing_waiters, 1)
                     try
                         _acquire_worker!(worker_pool; priority=finishing_priority)
@@ -3420,9 +3439,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     finally
                         Threads.atomic_add!(scheduler_counters.finishing_waiters, -1)
                     end
+                    _julia_stage_end(i, "FINISHER_WAIT", tid, finisher_wait_t0)
                     Threads.atomic_add!(scheduler_counters.finishing_models, 1)
                     finishing_phase_counted = true
 
+                    coverage_t0 = _julia_stage_begin(i, "COVERAGE", tid)
                     coverage = _assess_orbit_coverage(ws; fill_pct=fill_pct, regional_floor=regional_floor, max_regional_gap=max_regional_gap, shell_band_count=shell_band_count)
                     coverage_deadline_hit[i] = time_ns() > theta_deadline
                     successful_base_orbits[i] = coverage.succeeded
@@ -3442,6 +3463,11 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     coverage_issue_axis[i] = coverage_meta.issue_axis
                     coverage_issue_shell_bands[i] = coverage_meta.issue_shell_bands
                     coverage_reasons[i] = coverage_meta.reasons
+                    _julia_stage_end(i, "COVERAGE", tid, coverage_t0)
+                    if orbit_failure_diag && coverage.accepted && (coverage.succeeded < coverage.planned || coverage.attempted < coverage.planned)
+                        println("[ORBIT FAILURE DIAG]", " i=", i, " planned=", coverage.planned, " attempted=", coverage.attempted, " succeeded=", coverage.succeeded, " failed_attempted=", coverage.attempted - coverage.succeeded, " unattempted=", coverage.planned - coverage.attempted, " deadline_hit=", coverage_deadline_hit[i])
+                        _print_orbit_failure_diagnostics(ws, i)
+                    end
                     if !coverage.accepted
                         _print_orbit_failure_diagnostics(ws, i)
 
@@ -3458,6 +3484,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
+                    phase_volume_t0 = _julia_stage_begin(i, "PHASE_VOLUME", tid)
                     A_losvd, A_light, A_kinematic = _compact_orbit_matrices(ws, coverage.successful_columns)
                     wphase_use = Float64[]
                     phase_diag = nothing
@@ -3498,12 +3525,14 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     end
                     wphase_pair_max_relative_mismatch[i] = pair_max_relative_mismatch
                     i == 1 && _print_phase_volume_diagnostics!(i, phase_diag)
+                    _julia_stage_end(i, "PHASE_VOLUME", tid, phase_volume_t0)
                     if size(A_losvd, 1) == 0 || size(A_losvd, 2) == 0 || !all(isfinite, A_losvd) || size(A_light, 1) == 0 || size(A_light, 2) == 0 || !all(isfinite, A_light)
                         status[i] = 1
                         solver_failure_reason[i] = "invalid_observable_matrix"
                         Threads.atomic_xchg!(ws.phase, 3)
                         continue
                     end
+                    targets_t0 = _julia_stage_begin(i, "TARGETS", tid)
                     losvd_target, losvd_sigma, projected_light_target, projected_light_sigma, counts_by_spatial, losvd_counts = _observed_targets_for_mode(R_star_m, valid_vlos, v_star_mps, verr_star_mps, ws,
                     surface_brightness_profile_jl, losvd_target_mode_sym, karl_observables; karl_resolved_kde_grid=karl_resolved_kde_grid, karl_resolved_kde_width_bins=karl_resolved_kde_width_bins,
                     karl_resolved_vmin_kms=karl_resolved_vmin_kms, karl_resolved_vmax_kms=karl_resolved_vmax_kms, karl_resolved_bootstraps=karl_resolved_bootstraps, karl_resolved_envelope_floor=karl_resolved_envelope_floor)
@@ -3529,6 +3558,8 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                             end
                         end
                     end
+                    _julia_stage_end(i, "TARGETS", tid, targets_t0)
+                    weight_solver_t0 = _julia_stage_begin(i, "WEIGHT_SOLVER", tid)
                     Threads.atomic_add!(scheduler_counters.weight_models, 1)
                     w = Float64[]
                     ok = false
@@ -3543,6 +3574,8 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                     finally
                         Threads.atomic_add!(scheduler_counters.weight_models, -1)
                     end
+                    _julia_stage_end(i, "WEIGHT_SOLVER", tid, weight_solver_t0)
+                    post_solver_t0 = _julia_stage_begin(i, "POST_SOLVER", tid)
 
                 _store_solver_diagnostics!(i, wdiag)
                 if length(w) == size(A_light_fit, 2) && all(isfinite, w)
@@ -3603,6 +3636,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         _print_orbit_projection_diagnostics(ws, coverage.successful_columns, w, A_losvd, A_kinematic, losvd_target, losvd_sigma; model_index=i, inner_radius_pc=R_inner_pc, target_lfrac=target_lfrac, target_third_u=target_third_u, target_aperture=target_aperture)
                     end
                 end
+                _julia_stage_end(i, "POST_SOLVER", tid, post_solver_t0)
                 if !ok
                     if length(w) == size(A_light_fit, 2) && all(isfinite, w)
                         light_model_fit = A_light_fit * w
@@ -3669,6 +3703,7 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         _release_worker!(worker_pool)
                         finishing_worker_lease_held = false
                     end
+                    _julia_stage_end(i, "MODEL_TOTAL", tid, model_t0)
                     model_owner_slot_held && Threads.atomic_add!(scheduler_counters.active_model_owners, -1)
                     Threads.atomic_add!(scheduler_counters.completed_models, 1)
                 end

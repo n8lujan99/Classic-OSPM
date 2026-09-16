@@ -1,5 +1,3 @@
-#OSPM_Daemon.py — STAYS IN PYTHON FOREVER.  Parallelism lives in Julia, not here.
-
 # ========================================================================================================================
 # WHAT THIS DOES
 # Drives an RL-guided search over dark-matter halo parameters θ.  The first
@@ -63,6 +61,19 @@ PHASE_VOLUME_DIAG_COLUMNS = ["phase_volume_valid", "phase_volume_convention", "p
     "raw_phase_volume_min", "raw_phase_volume_max", "raw_phase_volume_dynamic_range", "normalized_phase_volume_min", "normalized_phase_volume_max", "wphase_min", "wphase_max",
     "wphase_dynamic_range", "wphase_pair_max_relative_mismatch"]
 LOSVD_SCORE_DIAG_COLUMNS = ["losvd_fit_statistic", "losvd_conditioning"]
+
+PIPELINE_TIMING_DIAG = os.environ.get("OSPM_DIAG_PIPELINE_TIMING", "0") == "1"
+
+def _pipeline_trace(phase, started=None, **fields):
+    if not PIPELINE_TIMING_DIAG:
+        return
+    now = time.time()
+    stamp = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1.0) * 1000):03d}"
+    parts = [f"[PIPELINE TIMING] ts={stamp}", f"phase={phase}"]
+    if started is not None:
+        parts.append(f"elapsed_s={time.perf_counter() - started:.6f}")
+    parts.extend(f"{key}={value}" for key, value in fields.items())
+    print(" ".join(parts), flush=True)
 
 # ========================================================================================================================
 # ========================================================================================================================
@@ -452,8 +463,10 @@ class Deck:
         self._status_arr = self.df["status"].values.astype(str)
         self._buf.clear(); self._pbuf.clear(); self._sbuf.clear()
     def save(self):
+        save_t0 = time.perf_counter()
         self._flush_buf(); self.df.to_csv(self.path, index=False)
         print(f"[Deck] saved {len(self.df)} rows → {self.path}", flush=True)
+        _pipeline_trace("DECK_SAVE", save_t0, rows=len(self.df))
     def _all_params(self):  return np.vstack([self._params_arr, np.array(self._pbuf)]) if self._pbuf else self._params_arr
     def _all_status(self):  return np.concatenate([self._status_arr, np.array(self._sbuf)]) if self._sbuf else self._status_arr
     def is_forbidden(self, theta, ndp=12):
@@ -1237,6 +1250,7 @@ def run_daemon(config, physics_engine):
                 theta_mat = canonicalize_theta_matrix( theta_mat_external, halo_type=halo_type_chunk, halo_parameterization=halo_parameterization, bounds=config["THETA_BOUNDS"] )
                 chunk_t0 = time.perf_counter()
                 try:
+                    prep_t0 = time.perf_counter()
                     Main._theta_mat_jl = _jl_matrix_f64(theta_mat, Main, juliacall, name="theta_mat")
                     Main._R_star_jl = _jl_vector_f64(R_star_m, Main, name="R_star_m")
                     Main._valid_vlos_jl = _jl_vector_bool(valid_vlos, Main, name="valid_vlos")
@@ -1292,6 +1306,9 @@ def run_daemon(config, physics_engine):
                     Main.seval(f"_dynamic_admission_jl = {_julia_literal(shared_pool.dynamic_admission, 'dynamic_admission')}")
                     Main.seval(f"_whole_model_admission_jl = {_julia_literal(shared_pool.whole_model_admission, 'whole_model_admission')}")
                     Main.seval(f"_finishing_priority_jl = {_julia_literal(shared_pool.finishing_priority, 'finishing_priority')}")
+                    _pipeline_trace("PYTHON_PRE_JULIA", prep_t0, models=len(chunk_thetas), halo=halo_type_chunk)
+                    julia_t0 = time.perf_counter()
+                    _pipeline_trace("ENTER_JULIA", models=len(chunk_thetas), halo=halo_type_chunk)
                     batch_result = Main.seval("""
 OSPMPhysicsSpherical.evaluate_batch_theta(
 _theta_mat_jl,
@@ -1352,6 +1369,8 @@ light_bin_edges=_light_bins_jl,
 kinematic_bin_edges=_kin_bins_jl
 )
 """)
+                    _pipeline_trace("EXIT_JULIA", julia_t0, models=len(chunk_thetas), halo=halo_type_chunk)
+                    post_t0 = time.perf_counter()
 
                     (
                         status_code_vec,
@@ -1492,6 +1511,7 @@ kinematic_bin_edges=_kin_bins_jl
                         if stop_now:
                             stop = True
                             break
+                    _pipeline_trace("PYTHON_POST_JULIA", post_t0, models=len(chunk_props), records=len(records))
                 except Exception as e:
                     t_acc["eval"] += time.perf_counter() - chunk_t0
                     t_cnt["eval"] += len(chunk_thetas)
@@ -1516,7 +1536,9 @@ kinematic_bin_edges=_kin_bins_jl
                 break
         return stop, records
     fixer.unlock(deck, runner)
+    initial_train_t0 = time.perf_counter()
     runner.train(deck)
+    _pipeline_trace("PYTHON_INITIAL_TRAIN", initial_train_t0)
     while full_count < int(config["MAX_RUNS"]):
         if os.environ.get("OSPM_DIAG_DAEMON_LOOP", "0") == "1": print(f"[DAEMON LOOP] full={full_count} evals={eval_count} proposals={proposal_count}", flush=True)
         t0 = time.perf_counter()
@@ -1530,6 +1552,7 @@ kinematic_bin_edges=_kin_bins_jl
             proposal_count += 1
             t_acc["propose"] += time.perf_counter() - t0
             t_cnt["propose"] += 1
+            _pipeline_trace("PYTHON_FIXED_SETUP", t0, models=len(props))
             print(f"[Daemon] fixed-theta evaluation: {len(props)} unique variant(s)", flush=True)
             _evaluate_props(props)
             deck.save()
@@ -1541,6 +1564,7 @@ kinematic_bin_edges=_kin_bins_jl
         full_props = _dedupe_props([_bounded_prop(theta, pid, "full") for theta, pid in base_props])
         t_acc["propose"] += time.perf_counter() - t0
         t_cnt["propose"] += 1
+        _pipeline_trace("PYTHON_PROPOSE", t0, models=len(full_props))
         print(f"[Daemon] proposing {len(full_props)} full models, starting eval...", flush=True)
         stop, full_records = _evaluate_props(full_props)
         deck._flush_buf()
@@ -1552,6 +1576,7 @@ kinematic_bin_edges=_kin_bins_jl
         runner.train(deck)
         t_acc["train"] += time.perf_counter() - t0
         t_cnt["train"] += 1
+        _pipeline_trace("PYTHON_TRAIN", t0)
         if not runner.fill_triggered and runner.detect_basin(deck):
             runner.fill_mode = runner.fill_triggered = True
             print(f"[Daemon] Basin detected at full_count={full_count} — switching to fill mode", flush=True)
