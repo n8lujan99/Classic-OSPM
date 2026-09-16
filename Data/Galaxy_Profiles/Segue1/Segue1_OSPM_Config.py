@@ -3,7 +3,7 @@
 # Shared solver, orbit-library, AI, deck, and runtime defaults come from OSPM/load_config.py.
 
 from pathlib import Path
-LOCAL_DEBUG = True
+LOCAL_DEBUG = False
 PROFILE_ROOT = Path(__file__).resolve().parent
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
