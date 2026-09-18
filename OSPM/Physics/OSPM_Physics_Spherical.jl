@@ -2116,6 +2116,202 @@ function _print_orbit_projection_diagnostics(st::OrbitWorkState, successful_colu
     return nothing
 end
 
+
+function _print_orbit_family_multinomial_diagnostics(
+    st::OrbitWorkState,
+    successful_columns::Vector{Int},
+    w::Vector{Float64},
+    A_losvd::Matrix{Float64},
+    A_kinematic::Matrix{Float64},
+    losvd_counts::Vector{Int};
+    conditioning=:vlos_cut,
+    model_index::Int=1,
+    target_lfrac::Float64=0.2,
+    target_third_u::Float64=0.5,
+    target_aperture::Int=1,
+)
+    st.projection_diag_enabled || return nothing
+
+    length(successful_columns) == length(w) ||
+        error("Orbit family multinomial diagnostic column/weight length mismatch")
+    size(A_losvd, 2) == length(w) ||
+        error("Orbit family multinomial diagnostic LOSVD column mismatch")
+    size(A_kinematic, 2) == length(w) ||
+        error("Orbit family multinomial diagnostic kinematic column mismatch")
+    length(losvd_counts) == size(A_losvd, 1) ||
+        error("Orbit family multinomial diagnostic count length mismatch")
+    1 <= target_aperture <= st.Nspatial ||
+        error("Orbit family multinomial diagnostic target aperture is outside spatial grid")
+    iseven(length(w)) ||
+        error("Orbit family multinomial diagnostic requires prograde/retrograde pairs")
+
+    nlfrac = length(st.Lfrac)
+    nthird = length(st.third_launches)
+
+    lfrac_id_target = argmin(abs.(Float64.(collect(st.Lfrac)) .- target_lfrac))
+    third_id_target = argmin(abs.(st.third_launches .- target_third_u))
+    lfrac_value = f64(st.Lfrac[lfrac_id_target])
+    third_u_value = f64(st.third_launches[third_id_target])
+
+    abs(lfrac_value - target_lfrac) <= 1.0e-12 ||
+        error("Requested Lfrac is not present in launch grid")
+    abs(third_u_value - target_third_u) <= 1.0e-12 ||
+        error("Requested third_u is not present in launch grid")
+
+    # Select the ENTIRE requested family across every successful launch shell.
+    # This intentionally differs from _print_orbit_projection_diagnostics,
+    # which also constructs an inner-launch subset for its legacy diagnostic.
+    family_columns = Int[]
+    family_base_orbits = Int[]
+
+    @inbounds for j in 1:2:length(successful_columns)
+        col_pro = successful_columns[j]
+        col_ret = successful_columns[j + 1]
+
+        isodd(col_pro) || error("Expected prograde column first")
+        col_ret == col_pro + 1 || error("Orbit pair is not contiguous")
+
+        c = (col_pro + 1) ÷ 2
+        shell_id, lfrac_id, third_id =
+            _orbit_grid_indices(c, st.Nshells, nlfrac, nthird)
+
+        lfrac_id == lfrac_id_target || continue
+        third_id == third_id_target || continue
+
+        push!(family_columns, j)
+        push!(family_columns, j + 1)
+        push!(family_base_orbits, c)
+    end
+
+    isempty(family_columns) &&
+        error("No successful columns found for requested orbit family")
+
+    # Production statistic using the fitted orbit weights.
+    state_with = karl_multinomial_losvd_state(
+        A_losvd,
+        A_kinematic,
+        w,
+        losvd_counts,
+        st.Nspatial,
+        st.Nvbin;
+        conditioning=conditioning,
+    )
+
+    # Diagnostic counterfactual only: remove this family while freezing all
+    # other fitted weights. This is deliberately NOT a re-fit.
+    w_without = copy(w)
+    w_without[family_columns] .= 0.0
+
+    state_without = try
+        karl_multinomial_losvd_state(
+            A_losvd,
+            A_kinematic,
+            w_without,
+            losvd_counts,
+            st.Nspatial,
+            st.Nvbin;
+            conditioning=conditioning,
+        )
+    catch err
+        println(
+            "[ORBIT FAMILY MULTINOMIAL ERROR]",
+            " i=", model_index,
+            " target_lfrac=", lfrac_value,
+            " target_third_u=", third_u_value,
+            " error=", sprint(showerror, err),
+        )
+        return nothing
+    end
+
+    total_weight = sum(w)
+    family_weight = sum(w[family_columns])
+
+    println(
+        "[ORBIT FAMILY MULTINOMIAL SUMMARY]",
+        " i=", model_index,
+        " target_lfrac=", lfrac_value,
+        " target_third_u=", third_u_value,
+        " N_family_base_orbits=", length(family_base_orbits),
+        " family_weight_fraction=", family_weight / total_weight,
+        " deviance_with=", state_with.deviance_total,
+        " deviance_without_fixed_other_weights=", state_without.deviance_total,
+        " delta_deviance_remove_family=", state_without.deviance_total - state_with.deviance_total,
+    )
+
+    # Positive delta => this family helps the fit.
+    # Negative delta => removing this family improves the fit.
+    @inbounds for ib in 1:st.Nspatial
+        rows = ((ib - 1) * st.Nvbin + 1):(ib * st.Nvbin)
+
+        family_projected = dot(
+            @view(A_kinematic[ib, family_columns]),
+            @view(w[family_columns]),
+        )
+        model_projected = dot(@view(A_kinematic[ib, :]), w)
+        family_selected = sum(A_losvd[rows, family_columns] * w[family_columns])
+        model_selected = state_with.selected_total[ib]
+
+        family_fraction_projected =
+            model_projected > 0.0 ? family_projected / model_projected : NaN
+        family_fraction_selected =
+            model_selected > 0.0 ? family_selected / model_selected : NaN
+
+        d_with = state_with.deviance_by_spatial[ib]
+        d_without = state_without.deviance_by_spatial[ib]
+
+        println(
+            "[ORBIT FAMILY MULTINOMIAL APERTURE]",
+            " i=", model_index,
+            " aperture=", ib,
+            " R_inner_pc=", st.spatial_edges[ib] / pc,
+            " R_outer_pc=", st.spatial_edges[ib + 1] / pc,
+            " Nstars=", state_with.counts_by_spatial[ib],
+            " family_fraction_projected=", family_fraction_projected,
+            " family_fraction_selected=", family_fraction_selected,
+            " deviance_with=", d_with,
+            " deviance_without_fixed_other_weights=", d_without,
+            " delta_deviance_remove_family=", d_without - d_with,
+        )
+    end
+
+    # Detailed production-probability comparison for one selected aperture.
+    rows = ((target_aperture - 1) * st.Nvbin + 1):(target_aperture * st.Nvbin)
+    family_hist = A_losvd[rows, family_columns] * w[family_columns]
+
+    println(
+        "[ORBIT FAMILY MULTINOMIAL TARGET]",
+        " i=", model_index,
+        " aperture=", target_aperture,
+        " R_inner_pc=", st.spatial_edges[target_aperture] / pc,
+        " R_outer_pc=", st.spatial_edges[target_aperture + 1] / pc,
+        " Nstars=", state_with.counts_by_spatial[target_aperture],
+        " deviance_with=", state_with.deviance_by_spatial[target_aperture],
+        " deviance_without_fixed_other_weights=", state_without.deviance_by_spatial[target_aperture],
+        " delta_deviance_remove_family=", state_without.deviance_by_spatial[target_aperture] - state_with.deviance_by_spatial[target_aperture],
+    )
+
+    @inbounds for local_bin in 1:st.Nvbin
+        row = first(rows) + local_bin - 1
+
+        println(
+            "[ORBIT FAMILY MULTINOMIAL BIN]",
+            " i=", model_index,
+            " aperture=", target_aperture,
+            " velocity_bin=", local_bin,
+            " v_inner_kms=", st.velocity_edges[local_bin] / 1.0e3,
+            " v_outer_kms=", st.velocity_edges[local_bin + 1] / 1.0e3,
+            " observed_count=", losvd_counts[row],
+            " probability_with=", state_with.probabilities[row],
+            " probability_without=", state_without.probabilities[row],
+            " model_mass_with=", state_with.model[row],
+            " model_mass_without=", state_without.model[row],
+            " family_model_mass=", family_hist[local_bin],
+        )
+    end
+
+    return nothing
+end
+
 function _print_orbit_phase_volume_diagnostics(st::OrbitWorkState, successful_columns::Vector{Int}, w::Vector{Float64}, wphase_use::Vector{Float64}, phase_result; model_index::Int=1, inner_radius_pc::Float64=30.0, topn::Int=10)
     length(successful_columns) == length(w) || error("Orbit phase-volume diagnostic column/weight length mismatch")
     length(wphase_use) == length(w) || error("Orbit phase-volume diagnostic wphase/weight length mismatch")
@@ -3633,7 +3829,37 @@ function evaluate_batch_theta(thetas::AbstractMatrix{<:Real}, R_star_m::Vector{F
                         target_lfrac = parse(Float64, get(ENV, "OSPM_DIAG_PROJECTION_LFRAC", "0.2"))
                         target_third_u = parse(Float64, get(ENV, "OSPM_DIAG_PROJECTION_THIRD_U", "0.5"))
                         target_aperture = parse(Int, get(ENV, "OSPM_DIAG_PROJECTION_APERTURE", "1"))
-                        _print_orbit_projection_diagnostics(ws, coverage.successful_columns, w, A_losvd, A_kinematic, losvd_target, losvd_sigma; model_index=i, inner_radius_pc=R_inner_pc, target_lfrac=target_lfrac, target_third_u=target_third_u, target_aperture=target_aperture)
+                        if losvd_fit_statistic_sym === :multinomial
+                            losvd_counts === nothing && error("multinomial orbit-family diagnostic requires resolved-star integer counts")
+                            _print_orbit_family_multinomial_diagnostics(
+                                ws,
+                                coverage.successful_columns,
+                                w,
+                                A_losvd,
+                                A_kinematic,
+                                losvd_counts;
+                                conditioning=losvd_conditioning_sym,
+                                model_index=i,
+                                target_lfrac=target_lfrac,
+                                target_third_u=target_third_u,
+                                target_aperture=target_aperture,
+                            )
+                        else
+                            _print_orbit_projection_diagnostics(
+                                ws,
+                                coverage.successful_columns,
+                                w,
+                                A_losvd,
+                                A_kinematic,
+                                losvd_target,
+                                losvd_sigma;
+                                model_index=i,
+                                inner_radius_pc=R_inner_pc,
+                                target_lfrac=target_lfrac,
+                                target_third_u=target_third_u,
+                                target_aperture=target_aperture,
+                            )
+                        end
                     end
                 end
                 _julia_stage_end(i, "POST_SOLVER", tid, post_solver_t0)

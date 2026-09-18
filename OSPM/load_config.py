@@ -112,7 +112,7 @@ def _build_general_defaults(local_debug):
             # maximum useful parallel width of one model, not a permanent CPU reservation.
             "MODEL_OWNER_LIMIT": 3,
             "THREADS_PER_MODEL": 10,
-            "KARL_ALPHAT": 1.0,
+            "KARL_ALPHAT": 1,
             "KARL_LIGHT_REL_TOL": 0.01,
             "KARL_LIGHT_SIGMA_TOL": 2.0,
             "KARL_DELTA_CHI2_ITER_TOL": 0.3,

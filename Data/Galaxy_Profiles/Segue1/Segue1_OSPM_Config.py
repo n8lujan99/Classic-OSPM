@@ -10,12 +10,14 @@ if not PROFILE_ROOT.exists():
 
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Segue1_karl_observables.csv"
 
-INITIAL_THETA = [13.32, 27.65, 370858.67, 1.43] # Default
-
+# ========================================================================================================================
+#INITIAL_THETA = [13.32, 27.65, 370858.67, 1.43] # Default Gives chi2=9.976469371664706
+INITIAL_THETA = [13.32, 27.65, 1e6, 1.43]
 #INITIAL_THETA = [18.68078541842375, 304.0490742108145, 3932645.9209644324, 3.093423297240227] # now fails as it should
 #INITIAL_THETA = [13.320825619743976, 27.64513174995341, 1000000.0, 1.433594982833482]
-
+#INITIAL_THETA = [20, 1, 2.5e5, 0.2]
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
+# ========================================================================================================================
 
 LOSVD_VMIN_KMS = -42.0
 LOSVD_VMAX_KMS = 47.0
@@ -111,8 +113,8 @@ CONFIG = {
 
     # Active resolved-star LOSVD representation.
     "LOSVD_TARGET_MODE": "karl_resolved_stars",
-    "LOSVD_FIT_STATISTIC": "multinomial",
-    "LOSVD_CONDITIONING": "vlos_cut",
+    "LOSVD_FIT_STATISTIC": "legacy_chi2",
+    "LOSVD_CONDITIONING": "none",
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
     "KARL_DELTA_STATISTIC_ITER_TOL": 0.3,
 
@@ -166,5 +168,5 @@ CONFIG = {
     "DATA_CSV": str(PROFILE_ROOT / "Segue1_stars.csv"),
 
     # Keep Patch 2 integration output isolated from all legacy chi-square decks.
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1_patch3_multinomial_integration_test.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "segue1_chi2_production1.csv"),
 }

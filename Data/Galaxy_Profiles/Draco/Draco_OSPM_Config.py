@@ -11,38 +11,8 @@ if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
 
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
-# INITIAL_THETA = [100.0, 1800.0, 9.0e5, 1.0]
-
-# INITIAL_THETA = [145, 2500, 1e6, 0.1] # Gives a new best of chi2_losvd=320.3325018690197
-# INITIAL_THETA = [145, 2500, 8e5, 0.1] # FAILED and gave diag of chi2_losvd=319.00644255611945
-# INITIAL_THETA = [145, 2500, 9e5, 0.1] # diagnostic_only chi2_losvd=320.0165654465213
-# INITIAL_THETA = [145.0, 2500.0, 1e6, 0.1] # chi2=320.3325018690197
-# INITIAL_THETA = [145, 5000, 1e6, 0.1] # chi2=441.7523738270891
-# INITIAL_THETA = [145.0, 3500.0, 1e6, 0.1] # chi2=325.6345649328473
-# INITIAL_THETA = [145.0, 2500.0, 3e6, 0.1] # chi2_losvd=328.96441184135557
-# INITIAL_THETA = [145.0, 2500.0, 2e6, 0.1] # #chi2_losvd=327.659709279198
-# INITIAL_THETA =[145.0, 2500.0, 950000, 0.1] # chi2_losvd=322.59205826226275
-# INITIAL_THETA =[100.0, 2500.0, 9e5, 0.1] # chi2=338.5888472589086
-# INITIAL_THETA =[200.0, 2500.0, 9e5, 0.1] # chi2=372.26787749156904
-# INITIAL_THETA =[125.0, 2000.0, 9e5, 0.1] # chi2=336.80187204877154
-# INITIAL_THETA =[165.0, 2000.0, 9e5, 0.1] # chi2=382.4578289213033
-INITIAL_THETA =[125.0, 2500.0, 9e5, 0.1] # chi2=314.95779187624396
-# INITIAL_THETA =[115.0, 2500.0, 9e5, 0.1] # chi2=317.49363963419006
-# INITIAL_THETA =[135.0, 2500.0, 9e5, 0.1] # chi2=317.6418615594581
-# INITIAL_THETA =[125.0, 2500.0, 9.5e5, 0.1] # chi2=317.14071236877
-# INITIAL_THETA =[125.0, 2500.0, 0, 0.1] # chi2_losvd=286.24940008519917
-# INITIAL_THETA =[125.0, 2500.0, 1e5, 0.1] # chi2=314.2376791747756
-# INITIAL_THETA =[115.0, 3500.0, 1e6, 12] # chi2=372.1602970420546
-
-
-
-# INITIAL_THETA =[125.0, 2500.0, 9e5, 0.1]
-# v0 Testing
-# INITIAL_THETA = [26.855136, 158.805677, 2499.430397, 14.831407] # This one completes
-# INITIAL_THETA = [24, 158.805677, 2499.430397, 14.831407]
-# INITIAL_THETA = [25, 158.805677, 2499.430397, 14.831407]
-# INITIAL_THETA = [26, 158.805677, 2499.430397, 14.831407]
-# INITIAL_THETA = [23, 158.805677, 2499.430397, 14.831407] # This one does not due to v0 being less than 26
+#INITIAL_THETA =[125.0, 2500.0, 0, 0.1]
+INITIAL_THETA =[125.0, 2500.0, 9e5, 0.1]
 
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
@@ -70,9 +40,9 @@ CONFIG = {
     "INITIAL_THETA": INITIAL_THETA,
     "THETA_BOUNDS": [
         (0.0, 200.0),           # v0 [km/s] — dark-halo velocity scale
-        (100.0, 6500.0),        # r_c [pc] — dark-halo core radius
+        (1.0, 10000.0),         # r_c [pc] — dark-halo core radius
         (0.0, 8.0e6),           # MBH [Msun] — central black-hole mass
-        (0.01, 20.0),            # M/L — stellar mass-to-light ratio
+        (0.001, 20.0),          # M/L — stellar mass-to-light ratio
     ],
 
     # Galaxy geometry
@@ -155,8 +125,8 @@ CONFIG = {
     # [-330,-250] km/s, so the model likelihood is conditioned on passing that
     # selection rather than treating probability outside the cut as observed zero counts.
     "LOSVD_TARGET_MODE": "karl_resolved_stars",
-    "LOSVD_FIT_STATISTIC": "multinomial",
-    "LOSVD_CONDITIONING": "vlos_cut",
+    "LOSVD_FIT_STATISTIC": "legacy_chi2",
+    "LOSVD_CONDITIONING": "none",
     "KARL_DELTA_STATISTIC_ITER_TOL": 0.3,
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
 
@@ -217,6 +187,6 @@ CONFIG = {
     "EVAL_VARIANTS": ["full"],
 
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_patch3_multinomial_integration_test.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_chi2_production1.csv"),
 
 }
