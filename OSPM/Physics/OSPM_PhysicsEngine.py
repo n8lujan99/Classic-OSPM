@@ -1,7 +1,7 @@
 # OSPM/Physics/OSPM_PhysicsEngine.py
 # Python safety wrapper + metadata packer.
 # This wrapper does not score an A-matrix in Python.
-# Karl-style OSPM scoring is done in Julia from binned LOSVD rows plus
+# OSPM scoring is done in Julia from binned LOSVD rows plus
 # projected-light / surface-brightness rows.  The Python layer only validates
 # observed arrays, wraps a scalar-returning engine, and attaches obs/config
 # metadata so the daemon can call evaluate_batch_theta directly.
@@ -44,7 +44,7 @@ def _get_surface_brightness_profile(obs, cfg):
     if profile is None:
         profile = getattr(obs, "SurfaceBrightnessProfile", None)
     if profile is None:
-        raise ValueError("surface_brightness_profile is required for Karl-style OSPM;" "no star-count fallback is allowed")
+        raise ValueError("surface_brightness_profile is required for OSPM;" "no star-count fallback is allowed")
     return profile
 
 def _get_kinematic_bin_edges_pc(obs, cfg):
@@ -106,7 +106,7 @@ def _get_valid_vlos(obs, R_star_m, v_star_mps, verr_star_mps):
         & np.isfinite(verr_star_mps)
         & (verr_star_mps > 0.0))
     if np.count_nonzero(valid_vlos) == 0:
-        raise ValueError("Karl-style OSPM needs at least one valid line-of-sight velocity")
+        raise ValueError("OSPM needs at least one valid line-of-sight velocity")
     return valid_vlos
 
 def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
@@ -131,13 +131,13 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     Nvbin = int(_cfg_get(cfg, "NVBIN", "Nvbin", 21))
     Ntheta_launch = int(_cfg_get(cfg, "NTHETA_LAUNCH", "Ntheta_launch", 9))
     losvd_target_mode = str(_cfg_get(cfg, "LOSVD_TARGET_MODE", "losvd_target_mode", "current")).strip().lower()
-    if losvd_target_mode not in ("current", "karl_resolved_stars", "karl_mode0_observables"):
-        raise ValueError("LOSVD_TARGET_MODE must be 'current', 'karl_resolved_stars', or 'karl_mode0_observables'")
-    karl_observables_csv = _cfg_get(cfg, "KARL_OBSERVABLES_CSV", "karl_observables_csv", None)
-    if losvd_target_mode == "karl_mode0_observables":
-        if karl_observables_csv is None or not str(karl_observables_csv).strip():
-            raise ValueError("KARL_OBSERVABLES_CSV is required for LOSVD_TARGET_MODE='karl_mode0_observables'")
-        karl_observables_csv = str(karl_observables_csv)
+    if losvd_target_mode not in ("current", "resolved_stars", "mode0_observables"):
+        raise ValueError("LOSVD_TARGET_MODE must be 'current', 'resolved_stars', or 'mode0_observables'")
+    observables_csv = _cfg_get(cfg, "OBSERVABLES_CSV", "observables_csv", None)
+    if losvd_target_mode == "mode0_observables":
+        if observables_csv is None or not str(observables_csv).strip():
+            raise ValueError("OBSERVABLES_CSV is required for LOSVD_TARGET_MODE='mode0_observables'")
+        observables_csv = str(observables_csv)
     lambda_light = float( cfg.get("LAMBDA_LIGHT", cfg.get("lambda_light", cfg.get("LAMBDA_OCC", cfg.get("lambda_occ", 1.0)))))
     if min_stars_per_bin <= 0:
         raise ValueError("MIN_STARS_PER_BIN/min_stars_per_bin must be positive")
@@ -154,7 +154,7 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
         elif ( isinstance(out, (tuple, list)) and len(out) > 0 and isinstance(out[0], (float, int, np.floating, np.integer)) ):
             chi2 = float(out[0])
         else:
-            raise TypeError( "Karl-style OSPM wrapper expects base_engine(theta) to return a scalar chi2." "Python-side A-matrix scoring has been removed.")
+            raise TypeError( "OSPM wrapper expects base_engine(theta) to return a scalar chi2." "Python-side A-matrix scoring has been removed.")
         if not np.isfinite(chi2):
             return float("inf")
         if print_every > 0 and (_print_counter % print_every == 0):
@@ -173,7 +173,7 @@ def wrap_physics_engine(base_engine, *, obs, halo_type, config=None):
     engine.__light_bin_edges_pc__ = light_bin_edges_pc
     engine.__kinematic_bin_edges_pc__ = kinematic_bin_edges_pc
     engine.__velocity_edges__ = velocity_edges
-    engine.__karl_config__ = { "surface_brightness_profile": surface_brightness_profile, "light_bin_edges_pc": light_bin_edges_pc, "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
+    engine.__physics_config__ = { "surface_brightness_profile": surface_brightness_profile, "light_bin_edges_pc": light_bin_edges_pc, "kinematic_bin_edges_pc": kinematic_bin_edges_pc,
                                 "velocity_edges": velocity_edges, "min_stars_per_bin": min_stars_per_bin, "Nvbin": Nvbin, "Ntheta_launch": Ntheta_launch, "lambda_light": lambda_light,
-                                "losvd_target_mode": losvd_target_mode, "karl_observables_csv": karl_observables_csv}
+                                "losvd_target_mode": losvd_target_mode, "observables_csv": observables_csv}
     return engine

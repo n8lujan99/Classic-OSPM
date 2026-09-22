@@ -17,8 +17,8 @@ The galaxy config supplies the active paths for:
     <Galaxy>_surface_brightness.csv
     <Galaxy>_losvd_bins.csv
 
-The consolidated Karl observational representation is prepared separately as:
-    <Galaxy>_karl_observables.csv
+The consolidated OSPM observational representation is prepared separately as:
+    <Galaxy>_observables.csv
 
 The stellar force/tracer products are also prepared separately as:
     <Galaxy>_stellar_force_grid.csv
@@ -39,7 +39,7 @@ This module does NOT:
     - choose or construct radial bins;
     - rebin or deproject surface brightness;
     - build stellar-force or tracer-density grids;
-    - build Karl LOSVD targets;
+    - build LOSVD targets;
     - apply M/L to construct stellar mass;
     - construct halo density or gravity;
     - integrate orbits;
@@ -87,7 +87,7 @@ def _load_kinematic_bins(path):
 
 def _validate_surface_brightness_profile(surface_brightness_profile):
     if surface_brightness_profile is None:
-        raise KeyError("Karl-style observables require a surface_brightness_profile")
+        raise KeyError("OSPM observables require a surface_brightness_profile")
     if "light_frac" not in surface_brightness_profile:
         raise KeyError("surface_brightness_profile must include light_frac")
     for key in ("R_inner_pc", "R_outer_pc"):
@@ -118,7 +118,7 @@ def _validate_surface_brightness_profile(surface_brightness_profile):
 
 def _validate_kinematic_bins(kinematic_bins):
     if kinematic_bins is None:
-        raise KeyError("Karl-style observables require KINEMATIC_BINS_CSV; no adaptive radial-bin fallback is allowed")
+        raise KeyError("OSPM observables require KINEMATIC_BINS_CSV; no adaptive radial-bin fallback is allowed")
     if "R_mid_pc" not in kinematic_bins:
         raise KeyError("kinematic_bins must include R_mid_pc")
     if "N_vlos" not in kinematic_bins:
@@ -156,7 +156,7 @@ def _stellar_geometry_group(geometry):
         return "spherical"
     if geom == "axisymmetric_density_grid":
         return "axisymmetric"
-    raise ValueError(f"Unknown karl_light_grid geometry: {geom}")
+    raise ValueError(f"Unknown light_grid geometry: {geom}")
 
 def _validate_stellar_model_geometry(stellar_model):
     if stellar_model is None:
@@ -165,17 +165,17 @@ def _validate_stellar_model_geometry(stellar_model):
         raise KeyError("STELLAR_MODEL must include type")
     stype = str(stellar_model["type"]).strip().lower()
     geometry = str(stellar_model.get("geometry", "spherical_shell_grid")).strip().lower()
-    if stype == "karl_light_grid":
+    if stype == "light_grid":
         group = _stellar_geometry_group(geometry)
         if group == "spherical":
             required = {"grid_csv", "Ltot", "radius_col", "theta_col", "nu_col", "lenc_frac_col"}
         elif group == "axisymmetric":
             required = { "grid_csv", "Ltot", "R_cyl_col", "z_col", "nu_col", "volume_col", "luminosity_col", "q_axis_ratio"}
         else:
-            raise ValueError(f"Unknown karl_light_grid geometry group: {group}")
+            raise ValueError(f"Unknown light_grid geometry group: {group}")
         missing = required - set(stellar_model.keys())
         if missing:
-            raise KeyError(f"karl_light_grid STELLAR_MODEL missing keys for geometry={geometry}: {sorted(missing)}")
+            raise KeyError(f"light_grid STELLAR_MODEL missing keys for geometry={geometry}: {sorted(missing)}")
     return None
 
 def _config_first(config, *keys, default=None):
@@ -188,7 +188,7 @@ def _config_first(config, *keys, default=None):
 
 def _apply_motion_model(df, *, v_col, config=None):
     """Return velocities in the model frame.
-    Karl-style orbit velocities are internal velocities centered near zero.
+    OSPM orbit velocities are internal velocities centered near zero.
     Observed catalog vlos values are usually heliocentric.  For pressure-supported
     systems such as Draco, subtracting V_SYS_KMS is a frame centering operation,
     not a rotating/streaming motion model.
@@ -220,9 +220,9 @@ def _apply_motion_model(df, *, v_col, config=None):
     raise ValueError(f"Unknown MOTION_MODEL mode: {motion.get('mode')}")
 
 class OSPMObservablesStellar:
-    def __init__(self, *, R_star_pc, v_star_kms, verr_star_kms, has_vlos, inclination_deg, Norbit, stellar_model=None, 
+    def __init__(self, *, R_star_pc, v_star_kms, verr_star_kms, has_vlos, inclination_deg, Norbit, stellar_model=None,
                  surface_brightness_profile=None, kinematic_bins=None, dynamical_mode=None, motion_model=None, v_star_raw_kms=None, v_motion_model_kms=None):
-        self.mode = "karl"
+        self.mode = "ospm"
         self.dynamical_mode = dynamical_mode
         self.motion_model = motion_model
         self.stellar_model = stellar_model
@@ -265,7 +265,7 @@ class OSPMObservablesStellar:
         self.Nstar_vlos = int(self.valid_vlos.sum())
 
     @classmethod
-    def from_star_table(cls, csv_path, *, r_col="r_pc", v_col="vlos", verr_col="vlos_err", has_vlos_col="has_vlos", inclination_deg, 
+    def from_star_table(cls, csv_path, *, r_col="r_pc", v_col="vlos", verr_col="vlos_err", has_vlos_col="has_vlos", inclination_deg,
                         Norbit, stellar_model=None, surface_brightness_path=None, kinematic_bins_path=None, config=None):
         df = pd.read_csv(csv_path)
         needed = [r_col, v_col, verr_col]
@@ -279,17 +279,17 @@ class OSPMObservablesStellar:
         if surface_brightness_path is None and config is not None:
             surface_brightness_path = config.get("SURFACE_BRIGHTNESS_CSV")
         if surface_brightness_path is None:
-            raise KeyError("Karl-style observables require SURFACE_BRIGHTNESS_CSV")
+            raise KeyError("OSPM observables require SURFACE_BRIGHTNESS_CSV")
         if kinematic_bins_path is None and config is not None:
             kinematic_bins_path = config.get("KINEMATIC_BINS_CSV")
         if kinematic_bins_path is None:
-            raise KeyError("Karl-style observables require KINEMATIC_BINS_CSV")
+            raise KeyError("OSPM observables require KINEMATIC_BINS_CSV")
         surface_brightness_profile = _load_surface_brightness_profile(surface_brightness_path)
         kinematic_bins = _load_kinematic_bins(kinematic_bins_path)
         _validate_surface_brightness_against_kinematic_bins(surface_brightness_profile, kinematic_bins)
         _validate_stellar_model_geometry(stellar_model)
         v_used, v_raw, v_model = _apply_motion_model(df, v_col=v_col, config=config)
-        return cls(R_star_pc=df[r_col].values, v_star_kms=v_used, verr_star_kms=df[verr_col].values, has_vlos=has_vlos, 
-                   inclination_deg=inclination_deg, Norbit=Norbit, stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile, 
+        return cls(R_star_pc=df[r_col].values, v_star_kms=v_used, verr_star_kms=df[verr_col].values, has_vlos=has_vlos,
+                   inclination_deg=inclination_deg, Norbit=Norbit, stellar_model=stellar_model, surface_brightness_profile=surface_brightness_profile,
                    kinematic_bins=kinematic_bins, dynamical_mode=None if config is None else config.get("DYNAMICAL_MODE"),
                    motion_model=None if config is None else config.get("MOTION_MODEL"), v_star_raw_kms=v_raw, v_motion_model_kms=v_model)

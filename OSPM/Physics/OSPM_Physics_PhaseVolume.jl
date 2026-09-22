@@ -1,8 +1,8 @@
 # ========================================================================================================================
-# OSPM_Physics_PhaseVolume.jl — Karl-style orbit phase-volume machinery.
+# OSPM_Physics_PhaseVolume.jl — OSPM-style orbit phase-volume machinery.
 # Included by OSPM_Physics_Support.jl — do NOT load directly.
 # Owns:
-#   - Karl equatorial surface-of-section extraction
+#   - OSPM equatorial surface-of-section extraction
 #   - enclosed SOS-area calculation
 #   - fixed-(E, |Lz|) third-integral cell construction
 #   - energy and angular-momentum phase-cell widths
@@ -16,15 +16,15 @@
 # §1  CONSTANTS
 # ========================================================================================================================
 
-const DEFAULT_KARL_PHASE_MIN_SOS_POINTS = 8
-const DEFAULT_KARL_PHASE_DUPLICATE_RTOL = 1.0e-10
-const DEFAULT_KARL_PHASE_RADIUS_RTOL = 1.0e-10
-const DEFAULT_KARL_PHASE_SECTION_THETA = pi / 2
+const DEFAULT_PHASE_MIN_SOS_POINTS = 8
+const DEFAULT_PHASE_DUPLICATE_RTOL = 1.0e-10
+const DEFAULT_PHASE_RADIUS_RTOL = 1.0e-10
+const DEFAULT_PHASE_SECTION_THETA = pi / 2
 
 # ========================================================================================================================
 # §2  PHASE-VOLUME STATE
 # ========================================================================================================================
-mutable struct KarlPhaseVolumeState
+mutable struct PhaseVolumeState
     Nbase_orbit::Int
     # Launch-grid coordinates.  These are the physical coordinates used by
     # phasvol.f after the orbit library has defined its E and Lz cells.
@@ -35,7 +35,7 @@ mutable struct KarlPhaseVolumeState
     energy_index::Vector{Int}
     lz_index::Vector{Int}
     third_index::Vector{Int}
-    # Karl SOS points.  Only the positive-radial-velocity half is stored,
+    # OSPM SOS points.  Only the positive-radial-velocity half is stored,
     # because the Fortran orbit path writes (r, abs(vr)).
     sos_r::Vector{Vector{Float64}}
     sos_vr_abs::Vector{Vector{Float64}}
@@ -43,21 +43,21 @@ mutable struct KarlPhaseVolumeState
     sos_recorded::Vector{Bool}
 end
 
-function init_karl_phase_volume_state(Nbase_orbit::Int)
+function init_phase_volume_state(Nbase_orbit::Int)
     Nbase_orbit > 0 || error("Nbase_orbit must be positive")
 
-    return KarlPhaseVolumeState( Nbase_orbit, fill(NaN, Nbase_orbit), fill(NaN, Nbase_orbit), zeros(Int, Nbase_orbit), zeros(Int, Nbase_orbit),
+    return PhaseVolumeState( Nbase_orbit, fill(NaN, Nbase_orbit), fill(NaN, Nbase_orbit), zeros(Int, Nbase_orbit), zeros(Int, Nbase_orbit),
         zeros(Int, Nbase_orbit), [Float64[] for _ in 1:Nbase_orbit], [Float64[] for _ in 1:Nbase_orbit], fill(false, Nbase_orbit), fill(false, Nbase_orbit))
 end
 
-@inline function _karl_phase_check_index(st::KarlPhaseVolumeState, base_index::Int)
+@inline function _phase_check_index(st::PhaseVolumeState, base_index::Int)
     1 <= base_index <= st.Nbase_orbit ||
         error("base_index=$base_index is outside 1:$(st.Nbase_orbit)")
     return nothing
 end
 
-function register_karl_phase_launch!( st::KarlPhaseVolumeState, base_index::Int; energy::Real, lz::Real, energy_index::Int, lz_index::Int, third_index::Int)
-    _karl_phase_check_index(st, base_index)
+function register_phase_launch!( st::PhaseVolumeState, base_index::Int; energy::Real, lz::Real, energy_index::Int, lz_index::Int, third_index::Int)
+    _phase_check_index(st, base_index)
     E = Float64(energy)
     L = abs(Float64(lz))
     isfinite(E) || error("nonfinite launch energy for base orbit $base_index")
@@ -75,16 +75,16 @@ function register_karl_phase_launch!( st::KarlPhaseVolumeState, base_index::Int;
 end
 
 # ========================================================================================================================
-# §3  KARL EQUATORIAL SURFACE OF SECTION
+# §3  OSPM EQUATORIAL SURFACE OF SECTION
 # ========================================================================================================================
-function collect_karl_equatorial_sos( r::AbstractVector{<:Real}, vr::AbstractVector{<:Real}, theta::AbstractVector{<:Real}; section_theta::Float64=DEFAULT_KARL_PHASE_SECTION_THETA, crossing_mode::Symbol=:karl_step,
+function collect_equatorial_sos( r::AbstractVector{<:Real}, vr::AbstractVector{<:Real}, theta::AbstractVector{<:Real}; section_theta::Float64=DEFAULT_PHASE_SECTION_THETA, crossing_mode::Symbol=:step,
     direction::Symbol=:up, skip_first::Bool=true)
     n = length(r)
     length(vr) == n || error("r and vr lengths do not match")
     length(theta) == n || error("r and theta lengths do not match")
     n >= 2 || return Float64[], Float64[]
-    crossing_mode in (:karl_step, :linear) ||
-        error("crossing_mode must be :karl_step or :linear")
+    crossing_mode in (:step, :linear) ||
+        error("crossing_mode must be :step or :linear")
     direction in (:up, :down, :both) ||
         error("direction must be :up, :down, or :both")
     rsos = Float64[]
@@ -130,8 +130,8 @@ function collect_karl_equatorial_sos( r::AbstractVector{<:Real}, vr::AbstractVec
     return rsos, vsos
 end
 
-function record_karl_phase_sos!(st::KarlPhaseVolumeState, base_index::Int, sos_r::AbstractVector{<:Real}, sos_vr_abs::AbstractVector{<:Real})
-    _karl_phase_check_index(st, base_index)
+function record_phase_sos!(st::PhaseVolumeState, base_index::Int, sos_r::AbstractVector{<:Real}, sos_vr_abs::AbstractVector{<:Real})
+    _phase_check_index(st, base_index)
     length(sos_r) == length(sos_vr_abs) ||
         error("SOS radius and radial-velocity lengths do not match")
     rr = Float64[]
@@ -152,20 +152,20 @@ function record_karl_phase_sos!(st::KarlPhaseVolumeState, base_index::Int, sos_r
     return nothing
 end
 
-function record_karl_phase_orbit!(st::KarlPhaseVolumeState, base_index::Int, r::AbstractVector{<:Real}, vr::AbstractVector{<:Real}, theta::AbstractVector{<:Real};
-    section_theta::Float64=DEFAULT_KARL_PHASE_SECTION_THETA, crossing_mode::Symbol=:karl_step, direction::Symbol=:up, skip_first::Bool=true)
-    _karl_phase_check_index(st, base_index)
+function record_phase_orbit!(st::PhaseVolumeState, base_index::Int, r::AbstractVector{<:Real}, vr::AbstractVector{<:Real}, theta::AbstractVector{<:Real};
+    section_theta::Float64=DEFAULT_PHASE_SECTION_THETA, crossing_mode::Symbol=:step, direction::Symbol=:up, skip_first::Bool=true)
+    _phase_check_index(st, base_index)
     st.launch_recorded[base_index] ||
         error("register the launch before recording the SOS for base orbit $base_index")
-    rsos, vsos = collect_karl_equatorial_sos( r, vr, theta; section_theta=section_theta, crossing_mode=crossing_mode, direction=direction, skip_first=skip_first)
-    record_karl_phase_sos!(st, base_index, rsos, vsos)
+    rsos, vsos = collect_equatorial_sos( r, vr, theta; section_theta=section_theta, crossing_mode=crossing_mode, direction=direction, skip_first=skip_first)
+    record_phase_sos!(st, base_index, rsos, vsos)
     return length(rsos)
 end
 
 # ========================================================================================================================
 # §4  ENCLOSED SOS AREA
 # ========================================================================================================================
-function _karl_phase_upper_envelope(sos_r::AbstractVector{<:Real}, sos_vr_abs::AbstractVector{<:Real}; radius_rtol::Float64=DEFAULT_KARL_PHASE_RADIUS_RTOL)
+function _phase_upper_envelope(sos_r::AbstractVector{<:Real}, sos_vr_abs::AbstractVector{<:Real}; radius_rtol::Float64=DEFAULT_PHASE_RADIUS_RTOL)
     length(sos_r) == length(sos_vr_abs) ||
         error("SOS radius and radial-velocity lengths do not match")
     points = Tuple{Float64,Float64}[]
@@ -202,8 +202,8 @@ function _karl_phase_upper_envelope(sos_r::AbstractVector{<:Real}, sos_vr_abs::A
     return rr, vv
 end
 
-@inline function _karl_phase_is_circular_boundary(st::KarlPhaseVolumeState, base_index::Int)
-    _karl_phase_check_index(st, base_index)
+@inline function _phase_is_circular_boundary(st::PhaseVolumeState, base_index::Int)
+    _phase_check_index(st, base_index)
     st.launch_recorded[base_index] || return false
     st.sos_recorded[base_index] || return false
     length(st.sos_r[base_index]) == 1 || return false
@@ -213,9 +213,9 @@ end
     return isfinite(r) && r > 0.0 && isfinite(v) && v == 0.0
 end
 
-function karl_sos_enclosed_area(sos_r::AbstractVector{<:Real}, sos_vr_abs::AbstractVector{<:Real}; min_points::Int=DEFAULT_KARL_PHASE_MIN_SOS_POINTS, radius_rtol::Float64=DEFAULT_KARL_PHASE_RADIUS_RTOL)
+function sos_enclosed_area(sos_r::AbstractVector{<:Real}, sos_vr_abs::AbstractVector{<:Real}; min_points::Int=DEFAULT_PHASE_MIN_SOS_POINTS, radius_rtol::Float64=DEFAULT_PHASE_RADIUS_RTOL)
     min_points >= 2 || error("min_points must be at least 2")
-    rr, vv = _karl_phase_upper_envelope(sos_r, sos_vr_abs; radius_rtol=radius_rtol)
+    rr, vv = _phase_upper_envelope(sos_r, sos_vr_abs; radius_rtol=radius_rtol)
     if length(rr) == 1 && length(vv) == 1 && vv[1] == 0.0
         return 0.0
     end
@@ -234,7 +234,7 @@ end
 # ========================================================================================================================
 # §5  PHASE-GRID CELL WIDTHS
 # ========================================================================================================================
-@inline function _karl_phase_median(values::Vector{Float64})
+@inline function _phase_median(values::Vector{Float64})
     isempty(values) && return NaN
     work = sort(copy(values))
     n = length(work)
@@ -242,7 +242,7 @@ end
     return 0.5 * (work[n >>> 1] + work[(n >>> 1) + 1])
 end
 
-function _karl_phase_centers_by_label( labels::Vector{Int}, values::Vector{Float64}, use_mask::AbstractVector{Bool})
+function _phase_centers_by_label( labels::Vector{Int}, values::Vector{Float64}, use_mask::AbstractVector{Bool})
     length(labels) == length(values) == length(use_mask) ||
         error("label, value, and mask lengths do not match")
     gathered = Dict{Int,Vector{Float64}}()
@@ -256,13 +256,13 @@ function _karl_phase_centers_by_label( labels::Vector{Int}, values::Vector{Float
     end
     centers = Dict{Int,Float64}()
     for (label, samples) in gathered
-        center = _karl_phase_median(samples)
+        center = _phase_median(samples)
         isfinite(center) && (centers[label] = center)
     end
     return centers
 end
 
-function _karl_phase_widths_from_centers( centers::Dict{Int,Float64}; singleton_width::Float64=1.0)
+function _phase_widths_from_centers( centers::Dict{Int,Float64}; singleton_width::Float64=1.0)
     isfinite(singleton_width) && singleton_width > 0.0 ||
         error("singleton_width must be finite and positive")
     isempty(centers) && return Dict{Int,Float64}()
@@ -290,9 +290,9 @@ function _karl_phase_widths_from_centers( centers::Dict{Int,Float64}; singleton_
     return widths
 end
 
-function _karl_phase_energy_widths( st::KarlPhaseVolumeState; singleton_width::Float64=1.0)
-    centers = _karl_phase_centers_by_label(st.energy_index, st.energy, st.launch_recorded)
-    widths_by_label = _karl_phase_widths_from_centers( centers; singleton_width=singleton_width)
+function _phase_energy_widths( st::PhaseVolumeState; singleton_width::Float64=1.0)
+    centers = _phase_centers_by_label(st.energy_index, st.energy, st.launch_recorded)
+    widths_by_label = _phase_widths_from_centers( centers; singleton_width=singleton_width)
     dE = fill(NaN, st.Nbase_orbit)
     @inbounds for i in 1:st.Nbase_orbit
         label = st.energy_index[i]
@@ -301,15 +301,15 @@ function _karl_phase_energy_widths( st::KarlPhaseVolumeState; singleton_width::F
     return dE, centers, widths_by_label
 end
 
-function _karl_phase_lz_widths( st::KarlPhaseVolumeState; singleton_width::Float64=1.0)
+function _phase_lz_widths( st::PhaseVolumeState; singleton_width::Float64=1.0)
     dLz = fill(NaN, st.Nbase_orbit)
     centers_by_energy = Dict{Int,Dict{Int,Float64}}()
     widths_by_energy = Dict{Int,Dict{Int,Float64}}()
     energy_labels = sort(unique(filter(>(0), st.energy_index[st.launch_recorded])))
     for energy_label in energy_labels
         mask = st.launch_recorded .& (st.energy_index .== energy_label)
-        centers = _karl_phase_centers_by_label(st.lz_index, st.lz_abs, mask)
-        widths = _karl_phase_widths_from_centers( centers; singleton_width=singleton_width,)
+        centers = _phase_centers_by_label(st.lz_index, st.lz_abs, mask)
+        widths = _phase_widths_from_centers( centers; singleton_width=singleton_width,)
         centers_by_energy[energy_label] = centers
         widths_by_energy[energy_label] = widths
         @inbounds for i in 1:st.Nbase_orbit
@@ -321,7 +321,7 @@ function _karl_phase_lz_widths( st::KarlPhaseVolumeState; singleton_width::Float
     return dLz, centers_by_energy, widths_by_energy
 end
 
-function _karl_phase_nested_area_differences!(delta_area::Vector{Float64}, sos_area::Vector{Float64}, valid_mask::AbstractVector{Bool}, energy_index::Vector{Int}, lz_index::Vector{Int}; duplicate_rtol::Float64=DEFAULT_KARL_PHASE_DUPLICATE_RTOL)
+function _phase_nested_area_differences!(delta_area::Vector{Float64}, sos_area::Vector{Float64}, valid_mask::AbstractVector{Bool}, energy_index::Vector{Int}, lz_index::Vector{Int}; duplicate_rtol::Float64=DEFAULT_PHASE_DUPLICATE_RTOL)
     n = length(sos_area)
     length(delta_area) == n || error("delta_area and sos_area lengths do not match")
     length(valid_mask) == n || error("valid_mask length does not match sos_area")
@@ -373,9 +373,9 @@ function _karl_phase_nested_area_differences!(delta_area::Vector{Float64}, sos_a
 end
 
 # ========================================================================================================================
-# §6  COMPLETE KARL PHASE-VOLUME CALCULATION
+# §6  COMPLETE OSPM PHASE-VOLUME CALCULATION
 # ========================================================================================================================
-function _karl_phase_repeat_pairs(values::Vector{Float64})
+function _phase_repeat_pairs(values::Vector{Float64})
     paired = Vector{Float64}(undef, 2 * length(values))
     @inbounds for i in eachindex(values)
         paired[2 * i - 1] = values[i]
@@ -384,7 +384,7 @@ function _karl_phase_repeat_pairs(values::Vector{Float64})
     return paired
 end
 
-function _karl_phase_normalize(raw_phase_volume::Vector{Float64}, valid_mask::AbstractVector{Bool}, mode::Symbol)
+function _phase_normalize(raw_phase_volume::Vector{Float64}, valid_mask::AbstractVector{Bool}, mode::Symbol)
     mode in (:none, :geometric_mean) ||
         error("normalization must be :none or :geometric_mean")
     normalized = fill(NaN, length(raw_phase_volume))
@@ -412,7 +412,7 @@ function _karl_phase_normalize(raw_phase_volume::Vector{Float64}, valid_mask::Ab
     return normalized, mean_log_volume
 end
 
-function _karl_phase_assign_circular_boundary_widths!(delta_area::Vector{Float64}, sos_area::Vector{Float64}, boundary_mask::AbstractVector{Bool}, valid_mask::AbstractVector{Bool}, energy_index::Vector{Int}, lz_index::Vector{Int})
+function _phase_assign_circular_boundary_widths!(delta_area::Vector{Float64}, sos_area::Vector{Float64}, boundary_mask::AbstractVector{Bool}, valid_mask::AbstractVector{Bool}, energy_index::Vector{Int}, lz_index::Vector{Int})
     n = length(sos_area)
     length(delta_area) == n || error("delta_area and sos_area lengths do not match")
     length(boundary_mask) == n || error("boundary_mask length does not match sos_area")
@@ -451,17 +451,17 @@ function _karl_phase_assign_circular_boundary_widths!(delta_area::Vector{Float64
     return assigned
 end
 
-function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Symbol=:geometric_mean, min_sos_points::Int=DEFAULT_KARL_PHASE_MIN_SOS_POINTS, duplicate_rtol::Float64=DEFAULT_KARL_PHASE_DUPLICATE_RTOL, radius_rtol::Float64=DEFAULT_KARL_PHASE_RADIUS_RTOL, singleton_energy_width::Float64=1.0, singleton_lz_width::Float64=1.0, strict::Bool=true)
+function compute_phase_volumes(st::PhaseVolumeState; normalization::Symbol=:geometric_mean, min_sos_points::Int=DEFAULT_PHASE_MIN_SOS_POINTS, duplicate_rtol::Float64=DEFAULT_PHASE_DUPLICATE_RTOL, radius_rtol::Float64=DEFAULT_PHASE_RADIUS_RTOL, singleton_energy_width::Float64=1.0, singleton_lz_width::Float64=1.0, strict::Bool=true)
     n = st.Nbase_orbit
     sos_area = fill(NaN, n)
     circular_boundary_mask = fill(false, n)
     @inbounds for i in 1:n
         st.sos_recorded[i] || continue
-        circular_boundary_mask[i] = _karl_phase_is_circular_boundary(st, i)
-        sos_area[i] = karl_sos_enclosed_area(st.sos_r[i], st.sos_vr_abs[i]; min_points=min_sos_points, radius_rtol=radius_rtol)
+        circular_boundary_mask[i] = _phase_is_circular_boundary(st, i)
+        sos_area[i] = sos_enclosed_area(st.sos_r[i], st.sos_vr_abs[i]; min_points=min_sos_points, radius_rtol=radius_rtol)
     end
-    dE, energy_centers, energy_widths = _karl_phase_energy_widths(st; singleton_width=singleton_energy_width)
-    dLz, lz_centers, lz_widths = _karl_phase_lz_widths(st; singleton_width=singleton_lz_width)
+    dE, energy_centers, energy_widths = _phase_energy_widths(st; singleton_width=singleton_energy_width)
+    dLz, lz_centers, lz_widths = _phase_lz_widths(st; singleton_width=singleton_lz_width)
     required_mask = copy(st.sos_recorded)
     valid_mask = fill(false, n)
     @inbounds for i in 1:n
@@ -480,13 +480,13 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
     if strict && !isempty(invalid_required)
         preview = join(first(invalid_required, min(length(invalid_required), 20)), ",")
         suffix = length(invalid_required) > 20 ? ",..." : ""
-        error("Karl phase-volume calculation failed for $(length(invalid_required)) recorded base orbit(s): [$preview$suffix]")
+        error("OSPM phase-volume calculation failed for $(length(invalid_required)) recorded base orbit(s): [$preview$suffix]")
     end
 
     delta_sos_area = fill(NaN, n)
     interior_mask = valid_mask .& .!circular_boundary_mask
-    duplicate_clusters, duplicate_orbits, nested_groups = _karl_phase_nested_area_differences!(delta_sos_area, sos_area, interior_mask, st.energy_index, st.lz_index; duplicate_rtol=duplicate_rtol)
-    circular_boundary_widths_assigned = _karl_phase_assign_circular_boundary_widths!(delta_sos_area, sos_area, circular_boundary_mask, valid_mask, st.energy_index, st.lz_index)
+    duplicate_clusters, duplicate_orbits, nested_groups = _phase_nested_area_differences!(delta_sos_area, sos_area, interior_mask, st.energy_index, st.lz_index; duplicate_rtol=duplicate_rtol)
+    circular_boundary_widths_assigned = _phase_assign_circular_boundary_widths!(delta_sos_area, sos_area, circular_boundary_mask, valid_mask, st.energy_index, st.lz_index)
     raw_phase_volume = fill(NaN, n)
 
     @inbounds for i in 1:n
@@ -502,9 +502,9 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
     if strict && !isempty(invalid_after_product)
         preview = join(first(invalid_after_product, min(length(invalid_after_product), 20)), ",")
         suffix = length(invalid_after_product) > 20 ? ",..." : ""
-        error("Karl phase-volume product is invalid for $(length(invalid_after_product)) recorded base orbit(s): [$preview$suffix]")
+        error("OSPM phase-volume product is invalid for $(length(invalid_after_product)) recorded base orbit(s): [$preview$suffix]")
     end
-    phase_volume, mean_log_normalization = _karl_phase_normalize(raw_phase_volume, valid_mask, normalization)
+    phase_volume, mean_log_normalization = _phase_normalize(raw_phase_volume, valid_mask, normalization)
     wphase = fill(NaN, n)
     @inbounds for i in 1:n
         if valid_mask[i]
@@ -512,10 +512,10 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
         end
     end
 
-    raw_phase_volume_paired = _karl_phase_repeat_pairs(raw_phase_volume)
-    phase_volume_paired = _karl_phase_repeat_pairs(phase_volume)
-    wphase_paired = _karl_phase_repeat_pairs(wphase)
-    valid_paired = _karl_phase_repeat_pairs(Float64.(valid_mask)) .== 1.0
+    raw_phase_volume_paired = _phase_repeat_pairs(raw_phase_volume)
+    phase_volume_paired = _phase_repeat_pairs(phase_volume)
+    wphase_paired = _phase_repeat_pairs(wphase)
+    valid_paired = _phase_repeat_pairs(Float64.(valid_mask)) .== 1.0
     valid_indices = findall(valid_mask)
     raw_min = isempty(valid_indices) ? NaN : minimum(raw_phase_volume[valid_indices])
     raw_max = isempty(valid_indices) ? NaN : maximum(raw_phase_volume[valid_indices])
@@ -536,25 +536,25 @@ function compute_karl_phase_volumes(st::KarlPhaseVolumeState; normalization::Sym
         delta_sos_area=delta_sos_area, dE=dE, dLz=dLz, diagnostics=diagnostics)
 end
 
-function build_karl_wphase(st::KarlPhaseVolumeState; kwargs...)
-    result = compute_karl_phase_volumes(st; kwargs...)
+function build_wphase(st::PhaseVolumeState; kwargs...)
+    result = compute_phase_volumes(st; kwargs...)
     return result.wphase_paired, result.diagnostics
 end
 
 
-function compact_karl_wphase( wphase_paired::AbstractVector{<:Real}, successful_columns::AbstractVector{<:Integer}, planned_norbit::Int)
+function compact_wphase( wphase_paired::AbstractVector{<:Real}, successful_columns::AbstractVector{<:Integer}, planned_norbit::Int)
     length(wphase_paired) == planned_norbit ||
         error("wphase length $(length(wphase_paired)) does not match planned Norbit=$planned_norbit")
     compacted = Float64.(wphase_paired[successful_columns])
-    all(isfinite, compacted) || error("compacted Karl wphase contains nonfinite values")
-    all(>(0.0), compacted) || error("compacted Karl wphase contains non-positive values")
+    all(isfinite, compacted) || error("compacted OSPM wphase contains nonfinite values")
+    all(>(0.0), compacted) || error("compacted OSPM wphase contains non-positive values")
     return compacted
 end
 
 # ========================================================================================================================
 # §7  DETERMINISTIC SELF-CHECK
 # ========================================================================================================================
-function karl_phase_volume_selftest(; rtol::Float64=2.0e-2)
+function phase_volume_selftest(; rtol::Float64=2.0e-2)
     npoint = 2048
     angle = range(0.0, 2.0 * pi; length=npoint + 1)[1:end-1]
     r0 = 10.0
@@ -566,20 +566,20 @@ function karl_phase_volume_selftest(; rtol::Float64=2.0e-2)
     v1 = abs.(b1 .* sin.(angle))
     r2 = r0 .+ a2 .* cos.(angle)
     v2 = abs.(b2 .* sin.(angle))
-    area1 = karl_sos_enclosed_area(r1, v1; min_points=8)
-    area2 = karl_sos_enclosed_area(r2, v2; min_points=8)
+    area1 = sos_enclosed_area(r1, v1; min_points=8)
+    area2 = sos_enclosed_area(r2, v2; min_points=8)
     expected1 = pi * a1 * b1
     expected2 = pi * a2 * b2
     isapprox(area1, expected1; rtol=rtol) ||
-        error("Karl SOS area selftest failed for orbit 1: got $area1 expected $expected1")
+        error("OSPM SOS area selftest failed for orbit 1: got $area1 expected $expected1")
     isapprox(area2, expected2; rtol=rtol) ||
-        error("Karl SOS area selftest failed for orbit 2: got $area2 expected $expected2")
-    st = init_karl_phase_volume_state(2)
-    register_karl_phase_launch!(st, 1; energy=-10.0, lz=2.0, energy_index=1, lz_index=1, third_index=1)
-    register_karl_phase_launch!(st, 2; energy=-10.0, lz=2.0, energy_index=1, lz_index=1, third_index=2)
-    record_karl_phase_sos!(st, 1, r1, v1)
-    record_karl_phase_sos!(st, 2, r2, v2)
-    result = compute_karl_phase_volumes( st; normalization=:none, singleton_energy_width=1.0, singleton_lz_width=1.0, strict=true)
+        error("OSPM SOS area selftest failed for orbit 2: got $area2 expected $expected2")
+    st = init_phase_volume_state(2)
+    register_phase_launch!(st, 1; energy=-10.0, lz=2.0, energy_index=1, lz_index=1, third_index=1)
+    register_phase_launch!(st, 2; energy=-10.0, lz=2.0, energy_index=1, lz_index=1, third_index=2)
+    record_phase_sos!(st, 1, r1, v1)
+    record_phase_sos!(st, 2, r2, v2)
+    result = compute_phase_volumes( st; normalization=:none, singleton_energy_width=1.0, singleton_lz_width=1.0, strict=true)
     isapprox(result.delta_sos_area[1], expected1; rtol=rtol) ||
         error("nested-area selftest failed for inner orbit")
     isapprox(result.delta_sos_area[2], expected2 - expected1; rtol=rtol) ||

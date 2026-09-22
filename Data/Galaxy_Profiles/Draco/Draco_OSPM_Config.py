@@ -41,8 +41,8 @@ CONFIG = {
     "THETA_BOUNDS": [
         (0.0, 200.0),           # v0 [km/s] — dark-halo velocity scale
         (1.0, 10000.0),         # r_c [pc] — dark-halo core radius
-        (0.0, 8.0e6),           # MBH [Msun] — central black-hole mass
-        (0.001, 20.0),          # M/L — stellar mass-to-light ratio
+        (0.0, 1e7),           # MBH [Msun] — central black-hole mass
+        (0.1, 20.0),          # M/L — stellar mass-to-light ratio
     ],
 
     # Galaxy geometry
@@ -119,25 +119,25 @@ CONFIG = {
 
     # Active resolved-star LOSVD representation.
     #
-    # Patch 2 retains Karl-style radial x velocity LOSVD bins, but interprets
+    # Patch 2 retains the radial x velocity LOSVD bins, but interprets
     # the observed hard counts with a multinomial likelihood. The Draco stellar
     # sample was constructed with an explicit heliocentric velocity cut of
     # [-330,-250] km/s, so the model likelihood is conditioned on passing that
     # selection rather than treating probability outside the cut as observed zero counts.
-    "LOSVD_TARGET_MODE": "karl_resolved_stars",
+    "LOSVD_TARGET_MODE": "resolved_stars",
     "LOSVD_FIT_STATISTIC": "legacy_chi2",
     "LOSVD_CONDITIONING": "none",
     "KARL_DELTA_STATISTIC_ITER_TOL": 0.3,
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
 
-    # The 21 Karl velocity bins span the actual sample-selection interval after
+    # The 21 velocity bins span the actual sample-selection interval after
     # transforming the original heliocentric [-330,-250] km/s cut into the
     # systemic-centered velocity frame used internally by OSPM.
     "NVBIN": LOSVD_NVBIN,
     "VELOCITY_EDGES": VELOCITY_EDGES_MPS,
 
     # Retained for compatibility/legacy diagnostics. KDE/bootstrap smoothing
-    # is not used by the active hard-count multinomial resolved-star likelihood.
+    # is not used by the active hard-count resolved-star likelihood.
     "KARL_RESOLVED_KDE_GRID": 17,
     "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
     "KARL_RESOLVED_VMIN_KMS": LOSVD_VMIN_KMS,

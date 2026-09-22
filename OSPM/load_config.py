@@ -95,6 +95,7 @@ def _build_general_defaults(local_debug):
         "VLOS_COL": "vlos_kms",
 
         # Observable and solver policy
+        "LOSVD_TARGET_MODE": "current",
         "OBSERVABLES": {
             "NVBIN": 21,
             "NTHETA_LAUNCH": 9,
@@ -253,6 +254,17 @@ def _validate_parameter_contract(cfg):
                 raise ValueError( f"FIXED_THETA[{index}]={value} is outside " f"THETA_BOUNDS[{index}]={bounds[index]}")
     cfg["REQUIRE_COLUMNS"] = _build_required_columns(names)
 
+def _validate_losvd_contract(cfg):
+    mode = str(cfg.get("LOSVD_TARGET_MODE", "current")).strip().lower()
+    allowed = ("current", "resolved_stars", "mode0_observables")
+    if mode not in allowed:
+        raise ValueError(
+            "LOSVD_TARGET_MODE must be 'current', 'resolved_stars', "
+            f"or 'mode0_observables'; got {mode!r}"
+        )
+    cfg["LOSVD_TARGET_MODE"] = mode
+
+
 def _validate_runtime_contract(cfg):
     observables = cfg["OBSERVABLES"]
     threads_per_model = int(observables["THREADS_PER_MODEL"])
@@ -293,6 +305,7 @@ def load_config():
         raise KeyError(f"CONFIG missing required keys: {missing}")
     _validate_halo_contract(cfg)
     _validate_parameter_contract(cfg)
+    _validate_losvd_contract(cfg)
     _validate_runtime_contract(cfg)
     if cfg["NORBIT"] % 2 != 0:
         raise ValueError("Karl paired-orbit path requires even NORBIT; " f"got {cfg['NORBIT']}")

@@ -112,7 +112,7 @@ CONFIG = {
     "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Segue1_losvd_bins.csv"),
 
     # Active resolved-star LOSVD representation.
-    "LOSVD_TARGET_MODE": "karl_resolved_stars",
+    "LOSVD_TARGET_MODE": "resolved_stars",
     "LOSVD_FIT_STATISTIC": "legacy_chi2",
     "LOSVD_CONDITIONING": "none",
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
@@ -126,7 +126,7 @@ CONFIG = {
     "VELOCITY_EDGES": VELOCITY_EDGES_MPS,
 
     # Retained for compatibility; KDE/bootstrap settings are not used by the
-    # active hard-count multinomial karl_resolved_stars likelihood.
+    # active hard-count resolved-star likelihood.
     "KARL_RESOLVED_KDE_GRID": 17,
     "KARL_RESOLVED_KDE_WIDTH_BINS": 3.0,
     "KARL_RESOLVED_VMIN_KMS": LOSVD_VMIN_KMS,
@@ -136,7 +136,7 @@ CONFIG = {
 
     # Galaxy-specific inputs for the generic Karl-observables generator.
     # This consolidated Gaussian CSV remains available as a legacy/diagnostic
-    # product; the active OSPM target is karl_resolved_stars above.
+    # product; the active OSPM target is resolved_stars above.
     "KARL_OBSERVABLES": {
         "output_csv": str(KARL_OBSERVABLES_CSV),
         "surface_brightness_radius_col": "R_pc",

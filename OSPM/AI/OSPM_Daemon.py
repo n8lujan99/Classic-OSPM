@@ -50,7 +50,7 @@ import os, time, traceback, json
 import numpy as np, pandas as pd
 import torch, torch.nn as nn
 from collections import deque
-from OSPM.Physics.OSPM_Physics import (canonicalize_theta_matrix, nfw_vcirc_rs_to_rho_s, normalize_halo_parameterization, _validate_karl_resolved_selection_edges, _normalize_losvd_conditioning, _normalize_losvd_fit_statistic,)
+from OSPM.Physics.OSPM_Physics import (canonicalize_theta_matrix, nfw_vcirc_rs_to_rho_s, normalize_halo_parameterization, _validate_resolved_selection_edges, _normalize_losvd_conditioning, _normalize_losvd_fit_statistic,)
 from OSPM.AI.OSPM_Smart_Run import detect_available_cpus, plan_shared_pool, plan_smart_run
 torch.backends.cudnn.benchmark = False
 try: from sklearn.preprocessing import StandardScaler
@@ -318,18 +318,20 @@ def _clean_stellar_model(model):
         else:
             out[k] = value
     out["type"] = str(out["type"]).strip().lower()
+    if out["type"] == "karl_light_grid":
+        out["type"] = "light_grid"
     if out["type"] == "plummer":
         for req in ("Ltot", "a_pc"):
             if req not in out:
                 raise KeyError(f"Plummer STELLAR_MODEL requires '{req}'")
         out["Ltot"] = float(out["Ltot"])
         out["a_pc"] = float(out["a_pc"])
-    elif out["type"] == "karl_light_grid":
+    elif out["type"] == "light_grid":
         geom = str(out.get("geometry", "spherical_shell_grid")).strip().lower()
         out["geometry"] = geom
         for req in ("grid_csv", "Ltot"):
             if req not in out:
-                raise KeyError(f"karl_light_grid STELLAR_MODEL requires '{req}'")
+                raise KeyError(f"light_grid STELLAR_MODEL requires '{req}'")
         if geom == "axisymmetric_density_grid":
             # Axisymmetric grids are force-cell products.  They do not require
             # the spherical enclosed-light columns.
@@ -342,7 +344,7 @@ def _clean_stellar_model(model):
             out.setdefault("geometry", "spherical_force_flattened_grid_metadata")
             for req in ("radius_col", "theta_col", "nu_col", "lenc_frac_col"):
                 if req not in out:
-                    raise KeyError(f"karl_light_grid STELLAR_MODEL requires '{req}' for spherical geometry")
+                    raise KeyError(f"light_grid STELLAR_MODEL requires '{req}' for spherical geometry")
         out["Ltot"] = float(out["Ltot"])
         for key in ("q_axis_ratio", "force_softening_pc"):
             if key in out and out[key] is not None:
@@ -354,11 +356,11 @@ def _clean_stellar_model(model):
         raise ValueError(f"Unknown STELLAR_MODEL type: {out['type']}")
     return out
 
-def _clean_karl_halo_params(params):
+def _clean_halo_params(params):
     if params is None:
         return None
     if not isinstance(params, dict):
-        raise TypeError("KARL_HALO_PARAMS must be a dict when provided")
+        raise TypeError("HALO_PARAMS must be a dict when provided")
     out = {}
     for key, value in params.items():
         k = str(key)
@@ -397,7 +399,7 @@ def _get_surface_brightness_profile(config, physics_engine, obs):
         if profile is not None:
             return profile
     raise RuntimeError(
-        "surface_brightness_profile is required for Karl-style OSPM; "
+        "surface_brightness_profile is required for OSPM; "
         "no star-count fallback is allowed")
 
 def _observable_config(config):
@@ -875,15 +877,15 @@ def run_daemon(config, physics_engine):
     t_acc, t_cnt = defaultdict(float), defaultdict(int); PROF_EVERY = int(config.get("PROF_EVERY", 25))
     obs = getattr(physics_engine, "__wrapped_obs__", None)
     if obs is None:
-        raise RuntimeError("The Karl daemon requires a wrapped spherical observable engine")
+        raise RuntimeError("The OSPM daemon requires a wrapped spherical observable engine")
 
     base_halo_type = str(getattr(physics_engine, "__halo_type__", config.get("HALO_TYPE", "nfw"))).strip().lower()
     from juliacall import Main; import juliacall
     surface_brightness_profile = _get_surface_brightness_profile(config, physics_engine, obs)
     obs_cfg = _observable_config(config)
-    engine_cfg = getattr(physics_engine, "__karl_config__", {}) or {}
+    engine_cfg = getattr(physics_engine, "__physics_config__", {}) or {}
     if not isinstance(engine_cfg, dict):
-        raise TypeError("physics_engine.__karl_config__ must be a dict when provided")
+        raise TypeError("physics_engine.__physics_config__ must be a dict when provided")
 
     def opt(*names, default=None):
         for name in names:
@@ -900,7 +902,7 @@ def run_daemon(config, physics_engine):
 
     stellar_model = _clean_stellar_model(opt("STELLAR_MODEL", "stellar_model", default=getattr(obs, "stellar_model", None)))
     if stellar_model is None:
-        raise RuntimeError("stellar_model is required for the Karl daemon path; M/L cannot enter the force without it")
+        raise RuntimeError("stellar_model is required for the OSPM daemon path; M/L cannot enter the force without it")
     nvbin = int(opt("NVBIN", "Nvbin", "nvbin", default=21))
     ntheta_launch = int(opt("NTHETA_LAUNCH", "Ntheta_launch", "ntheta_launch", default=9))
     velocity_edges = opt("VELOCITY_EDGES", "velocity_edges", default=None)
@@ -908,48 +910,48 @@ def run_daemon(config, physics_engine):
     if tracer_constraint_mode not in ("projected_light", "density_3d"):
         raise ValueError("TRACER_CONSTRAINT_MODE must be 'projected_light' or 'density_3d'")
     losvd_target_mode = str(opt("LOSVD_TARGET_MODE", "losvd_target_mode", default="current")).strip().lower()
-    if losvd_target_mode not in ("current", "karl_resolved_stars", "karl_mode0_observables"):
-        raise ValueError("LOSVD_TARGET_MODE must be 'current', 'karl_resolved_stars', or 'karl_mode0_observables'")
+    if losvd_target_mode not in ("current", "resolved_stars", "mode0_observables"):
+        raise ValueError("LOSVD_TARGET_MODE must be 'current', 'resolved_stars', or 'mode0_observables'")
     losvd_conditioning = _normalize_losvd_conditioning(opt("LOSVD_CONDITIONING", "losvd_conditioning", default=None))
     losvd_fit_statistic = _normalize_losvd_fit_statistic(opt("LOSVD_FIT_STATISTIC", "losvd_fit_statistic", default=None), losvd_target_mode)
     _validate_deck_score_contract(deck.df, losvd_fit_statistic, losvd_conditioning)
-    karl_resolved_kde_grid = int(opt("KARL_RESOLVED_KDE_GRID", "karl_resolved_kde_grid", default=17))
-    karl_resolved_kde_width_bins = float(opt("KARL_RESOLVED_KDE_WIDTH_BINS", "karl_resolved_kde_width_bins", default=3.0))
-    karl_resolved_vmin_kms = float(opt("KARL_RESOLVED_VMIN_KMS", "karl_resolved_vmin_kms", default=-25.0))
-    karl_resolved_vmax_kms = float(opt("KARL_RESOLVED_VMAX_KMS", "karl_resolved_vmax_kms", default=25.0))
-    karl_resolved_bootstraps = int(opt("KARL_RESOLVED_BOOTSTRAPS", "karl_resolved_bootstraps", default=300))
-    karl_resolved_envelope_floor = float(opt("KARL_RESOLVED_ENVELOPE_FLOOR", "karl_resolved_envelope_floor", default=0.003))
-    karl_observables_csv = opt("KARL_OBSERVABLES_CSV", "karl_observables_csv", default=None)
-    if losvd_target_mode == "karl_mode0_observables":
-        if karl_observables_csv is None or not str(karl_observables_csv).strip():
-            raise ValueError("Karl mode-0 observables LOSVD requires KARL_OBSERVABLES_CSV")
-        karl_observables_csv = str(karl_observables_csv)
-        if not os.path.isfile(karl_observables_csv):
-            raise FileNotFoundError(f"KARL_OBSERVABLES_CSV not found: {karl_observables_csv}")
-        karl_observables_cfg = config.get("KARL_OBSERVABLES", {})
-        if isinstance(karl_observables_cfg, dict):
-            nvbin = int(karl_observables_cfg.get("nvel", nvbin))
-    if losvd_target_mode == "karl_resolved_stars":
-        if karl_resolved_kde_grid <= 1:
-            raise ValueError("KARL_RESOLVED_KDE_GRID must exceed one")
-        if not np.isfinite(karl_resolved_kde_width_bins) or karl_resolved_kde_width_bins <= 0.0:
-            raise ValueError("KARL_RESOLVED_KDE_WIDTH_BINS must be finite and positive")
-        if not np.isfinite(karl_resolved_vmin_kms) or not np.isfinite(karl_resolved_vmax_kms) or karl_resolved_vmax_kms <= karl_resolved_vmin_kms:
-            raise ValueError("KARL_RESOLVED_VMIN_KMS/KARL_RESOLVED_VMAX_KMS define an invalid velocity range")
-        if karl_resolved_bootstraps <= 1:
-            raise ValueError("KARL_RESOLVED_BOOTSTRAPS must exceed one")
-        if not np.isfinite(karl_resolved_envelope_floor) or karl_resolved_envelope_floor < 0.0:
-            raise ValueError("KARL_RESOLVED_ENVELOPE_FLOOR must be finite and nonnegative")
-    alphat = float(opt("KARL_ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
-    apfac = float(opt("KARL_APFAC", "apfac", default=0.01))
-    light_rel_tol = float(opt("KARL_LIGHT_REL_TOL", "light_rel_tol", default=0.01))
-    light_sigma_tol = float(opt("KARL_LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
-    delta_chi2_iter_tol = float(opt("KARL_DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
-    delta_statistic_iter_tol = float(opt("KARL_DELTA_STATISTIC_ITER_TOL", "delta_statistic_iter_tol", default=delta_chi2_iter_tol))
-    maxiter = int(opt("KARL_MAXITER", "maxiter", default=config.get("MAXITER", 60)))
+    resolved_kde_grid = int(opt("RESOLVED_KDE_GRID", "resolved_kde_grid", default=17))
+    resolved_kde_width_bins = float(opt("RESOLVED_KDE_WIDTH_BINS", "resolved_kde_width_bins", default=3.0))
+    resolved_vmin_kms = float(opt("RESOLVED_VMIN_KMS", "resolved_vmin_kms", default=-25.0))
+    resolved_vmax_kms = float(opt("RESOLVED_VMAX_KMS", "resolved_vmax_kms", default=25.0))
+    resolved_bootstraps = int(opt("RESOLVED_BOOTSTRAPS", "resolved_bootstraps", default=300))
+    resolved_envelope_floor = float(opt("RESOLVED_ENVELOPE_FLOOR", "resolved_envelope_floor", default=0.003))
+    observables_csv = opt("OBSERVABLES_CSV", "observables_csv", default=None)
+    if losvd_target_mode == "mode0_observables":
+        if observables_csv is None or not str(observables_csv).strip():
+            raise ValueError("Mode-0 observables LOSVD requires OBSERVABLES_CSV")
+        observables_csv = str(observables_csv)
+        if not os.path.isfile(observables_csv):
+            raise FileNotFoundError(f"OBSERVABLES_CSV not found: {observables_csv}")
+        observables_cfg = config.get("OBSERVABLES", {})
+        if isinstance(observables_cfg, dict):
+            nvbin = int(observables_cfg.get("nvel", nvbin))
+    if losvd_target_mode == "resolved_stars":
+        if resolved_kde_grid <= 1:
+            raise ValueError("RESOLVED_KDE_GRID must exceed one")
+        if not np.isfinite(resolved_kde_width_bins) or resolved_kde_width_bins <= 0.0:
+            raise ValueError("RESOLVED_KDE_WIDTH_BINS must be finite and positive")
+        if not np.isfinite(resolved_vmin_kms) or not np.isfinite(resolved_vmax_kms) or resolved_vmax_kms <= resolved_vmin_kms:
+            raise ValueError("RESOLVED_VMIN_KMS/RESOLVED_VMAX_KMS define an invalid velocity range")
+        if resolved_bootstraps <= 1:
+            raise ValueError("RESOLVED_BOOTSTRAPS must exceed one")
+        if not np.isfinite(resolved_envelope_floor) or resolved_envelope_floor < 0.0:
+            raise ValueError("RESOLVED_ENVELOPE_FLOOR must be finite and nonnegative")
+    alphat = float(opt("ALPHAT", "alphat", default=config.get("ALPHAT", 1.0)))
+    apfac = float(opt("APFAC", "apfac", default=0.01))
+    light_rel_tol = float(opt("LIGHT_REL_TOL", "light_rel_tol", default=0.01))
+    light_sigma_tol = float(opt("LIGHT_SIGMA_TOL", "light_sigma_tol", default=2.0))
+    delta_chi2_iter_tol = float(opt("DELTA_CHI2_ITER_TOL", "delta_chi2_iter_tol", default=0.3))
+    delta_statistic_iter_tol = float(opt("DELTA_STATISTIC_ITER_TOL", "delta_statistic_iter_tol", default=delta_chi2_iter_tol))
+    maxiter = int(opt("MAXITER", "maxiter", default=config.get("MAXITER", 60)))
     entropy_floor = float(opt("ENTROPY_FLOOR", "entropy_floor", default=config.get("ENTROPY_FLOOR", 1e-30)))
     halo_q_axis_ratio = float(opt("HALO_Q_AXIS_RATIO", "halo_q_axis_ratio", default=config.get("HALO_Q_AXIS_RATIO", 1.0)))
-    karl_halo_params = _clean_karl_halo_params(opt("KARL_HALO_PARAMS", "karl_halo_params", default=config.get("KARL_HALO_PARAMS", None)))
+    halo_params = _clean_halo_params(opt("HALO_PARAMS", "halo_params", default=config.get("HALO_PARAMS", None)))
     orbit_fill_pct = float(opt("ORBIT_FILL_PCT", default=0.85))
     orbit_regional_floor = float(opt("ORBIT_REGIONAL_FLOOR", default=0.80))
     orbit_max_regional_gap = float(opt("ORBIT_MAX_REGIONAL_GAP", default=0.10))
@@ -965,9 +967,9 @@ def run_daemon(config, physics_engine):
     smart_run_max_cpus = int(opt("SMART_RUN_MAX_CPUS_PER_MODEL", default=20))
 
 
-    if base_halo_type == "karl_halo":
+    if base_halo_type == "legacy_halo":
         raise RuntimeError(
-            "HALO_TYPE='karl_halo' is disabled: its density functions use parsec-valued "
+            "HALO_TYPE='legacy_halo' is disabled: its density functions use parsec-valued "
             "radii, while the current halo-table path supplies radii in meters"
         )
     if abs(halo_q_axis_ratio - 1.0) > 1e-8:
@@ -990,8 +992,8 @@ def run_daemon(config, physics_engine):
         raise RuntimeError("wrapped physics arrays must match lengths: " f"R={R_star_m.size}, valid={valid_vlos.size}, v={v_star_mps.size}, verr={verr_star_mps.size}")
     selection_vmin_kms = float("nan")
     selection_vmax_kms = float("nan")
-    if losvd_target_mode == "karl_resolved_stars":
-        velocity_edges = _validate_karl_resolved_selection_edges(velocity_edges, nvbin, v_star_mps, valid_vlos)
+    if losvd_target_mode == "resolved_stars":
+        velocity_edges = _validate_resolved_selection_edges(velocity_edges, nvbin, v_star_mps, valid_vlos)
         selection_vmin_kms = float(velocity_edges[0] / 1.0e3)
         selection_vmax_kms = float(velocity_edges[-1] / 1.0e3)
     kinematic_bin_edges = getattr(physics_engine, "__kinematic_bin_edges_pc__", None)
@@ -1007,13 +1009,13 @@ def run_daemon(config, physics_engine):
     if light_bin_edges is None:
         light_bin_edges = getattr(obs, "light_bin_edges_pc", None)
     if light_bin_edges is None:
-        raise RuntimeError("light_bin_edges_pc is required for Karl-style light constraints")
+        raise RuntimeError("light_bin_edges_pc is required for OSPM-style light constraints")
     kinematic_bin_edges = np.asarray(kinematic_bin_edges, float).ravel() * 3.0856775814913673e16
     light_bin_edges = np.asarray(light_bin_edges, float).ravel() * 3.0856775814913673e16
     n_light = max(0, len(light_bin_edges) - 1)
     r_light_max_pc = float(light_bin_edges[-1] / 3.0856775814913673e16) if len(light_bin_edges) else float("nan")
-    if losvd_target_mode == "karl_mode0_observables":
-        observables_rows = pd.read_csv(karl_observables_csv, usecols=["row_type", "ir", "r_outer_pc", "ir_end"])
+    if losvd_target_mode == "mode0_observables":
+        observables_rows = pd.read_csv(observables_csv, usecols=["row_type", "ir", "r_outer_pc", "ir_end"])
         aperture_rows = observables_rows[observables_rows["row_type"].astype(str) == "aperture"].copy()
         spatial_rows = observables_rows[observables_rows["row_type"].astype(str) == "spatial_cell"].copy()
         n_kin = int(len(aperture_rows))
@@ -1025,7 +1027,7 @@ def run_daemon(config, physics_engine):
         n_kin = max(0, len(kinematic_bin_edges) - 1)
         r_kin_max_pc = float(kinematic_bin_edges[-1] / 3.0856775814913673e16) if len(kinematic_bin_edges) else float("nan")
     Main._stellar_model_jl = _jl_primitive_dict(stellar_model, Main, "stellar_model")
-    Main._karl_halo_params_jl = _jl_primitive_dict(karl_halo_params, Main, "karl_halo_params")
+    Main._halo_params_jl = _jl_primitive_dict(halo_params, Main, "halo_params")
     _jl_surface_brightness_profile(surface_brightness_profile, Main)
     if velocity_edges is None:
         Main._velocity_edges_jl = Main.seval("nothing")
@@ -1034,19 +1036,19 @@ def run_daemon(config, physics_engine):
     Main.seval("""
         _stellar_model_jl isa AbstractDict ||
             error("stellar_model handoff must be a Julia dictionary")
-        (_karl_halo_params_jl === nothing || _karl_halo_params_jl isa AbstractDict) ||
-            error("karl_halo_params handoff must be nothing or a Julia dictionary")
+        (_halo_params_jl === nothing || _halo_params_jl isa AbstractDict) ||
+            error("halo_params handoff must be nothing or a Julia dictionary")
         (_velocity_edges_jl === nothing || _velocity_edges_jl isa AbstractVector{<:Real}) ||
             error("velocity_edges handoff must be nothing or a real Julia vector")
         if get(ENV, "OSPM_DIAG_JULIA_HANDOFF", "0") == "1"
-            println("[JULIA HANDOFF] stellar_model=", typeof(_stellar_model_jl), " karl_halo_params=", typeof(_karl_halo_params_jl), " velocity_edges=", typeof(_velocity_edges_jl))
+            println("[JULIA HANDOFF] stellar_model=", typeof(_stellar_model_jl), " halo_params=", typeof(_halo_params_jl), " velocity_edges=", typeof(_velocity_edges_jl))
         end
     """)
 
     sini = float(obs.sini)
     Norbit = int(obs.Norbit)
     if Norbit % 2 != 0:
-        raise RuntimeError(f"Karl paired-orbit Spherical path requires even Norbit because Norbit is the final column count; got Norbit={Norbit}")
+        raise RuntimeError(f"Paired-orbit spherical path requires even Norbit because Norbit is the final column count; got Norbit={Norbit}")
     nstar_vlos = int(np.count_nonzero(valid_vlos))
     print(
         f"[RUN] Norbit={Norbit} base_orbits={Norbit // 2} Nstar_vlos={nstar_vlos} Ntheta_launch={ntheta_launch} "
@@ -1054,7 +1056,7 @@ def run_daemon(config, physics_engine):
         f"fit_statistic={losvd_fit_statistic} conditioning={losvd_conditioning} delta_statistic_tol={delta_statistic_iter_tol}",
         flush=True,
     )
-    if losvd_target_mode == "karl_resolved_stars":
+    if losvd_target_mode == "resolved_stars":
         print(
             f"[OBSERVABLES] mode={losvd_target_mode} apertures={n_kin} Nvbin={nvbin} tracer_bins={n_light} "
             f"R_tracer_max_pc={r_light_max_pc:.6g} R_aperture_max_pc={r_kin_max_pc:.6g} "
@@ -1062,11 +1064,11 @@ def run_daemon(config, physics_engine):
             f"outside_selection_gate=diagnostic_only",
             flush=True,
         )
-    elif losvd_target_mode == "karl_mode0_observables":
+    elif losvd_target_mode == "mode0_observables":
         print(
             f"[OBSERVABLES] mode={losvd_target_mode} apertures={n_kin} Nvbin={nvbin} tracer_bins={n_light} "
             f"R_tracer_max_pc={r_light_max_pc:.6g} R_aperture_max_pc={r_kin_max_pc:.6g} "
-            f"constraints={n_light + n_kin * nvbin} csv={karl_observables_csv}",
+            f"constraints={n_light + n_kin * nvbin} csv={observables_csv}",
             flush=True,
         )
     else:
@@ -1268,13 +1270,13 @@ def run_daemon(config, physics_engine):
                     Main.seval("_losvd_target_mode_jl = " + json.dumps(losvd_target_mode))
                     Main.seval("_losvd_conditioning_jl = " + json.dumps(losvd_conditioning))
                     Main.seval("_losvd_fit_statistic_jl = " + json.dumps(losvd_fit_statistic))
-                    Main.seval(f"_karl_resolved_kde_grid_jl = {int(karl_resolved_kde_grid)}")
-                    Main.seval(f"_karl_resolved_kde_width_bins_jl = {float(karl_resolved_kde_width_bins)!r}")
-                    Main.seval(f"_karl_resolved_vmin_kms_jl = {float(karl_resolved_vmin_kms)!r}")
-                    Main.seval(f"_karl_resolved_vmax_kms_jl = {float(karl_resolved_vmax_kms)!r}")
-                    Main.seval(f"_karl_resolved_bootstraps_jl = {int(karl_resolved_bootstraps)}")
-                    Main.seval(f"_karl_resolved_envelope_floor_jl = {float(karl_resolved_envelope_floor)!r}")
-                    Main.seval("_karl_observables_csv_jl = " + ("nothing" if karl_observables_csv is None else json.dumps(karl_observables_csv)))
+                    Main.seval(f"_resolved_kde_grid_jl = {int(resolved_kde_grid)}")
+                    Main.seval(f"_resolved_kde_width_bins_jl = {float(resolved_kde_width_bins)!r}")
+                    Main.seval(f"_resolved_vmin_kms_jl = {float(resolved_vmin_kms)!r}")
+                    Main.seval(f"_resolved_vmax_kms_jl = {float(resolved_vmax_kms)!r}")
+                    Main.seval(f"_resolved_bootstraps_jl = {int(resolved_bootstraps)}")
+                    Main.seval(f"_resolved_envelope_floor_jl = {float(resolved_envelope_floor)!r}")
+                    Main.seval("_observables_csv_jl = " + ("nothing" if observables_csv is None else json.dumps(observables_csv)))
                     Main.seval(f"_alphat_jl = {float(alphat)!r}")
                     Main.seval(f"_apfac_jl = {float(apfac)!r}")
                     Main.seval(f"_light_rel_tol_jl = {float(light_rel_tol)!r}")
@@ -1325,13 +1327,13 @@ tracer_constraint_mode=_tracer_constraint_mode_jl,
 losvd_target_mode=_losvd_target_mode_jl,
 losvd_conditioning=_losvd_conditioning_jl,
 losvd_fit_statistic=_losvd_fit_statistic_jl,
-karl_resolved_kde_grid=_karl_resolved_kde_grid_jl,
-karl_resolved_kde_width_bins=_karl_resolved_kde_width_bins_jl,
-karl_resolved_vmin_kms=_karl_resolved_vmin_kms_jl,
-karl_resolved_vmax_kms=_karl_resolved_vmax_kms_jl,
-karl_resolved_bootstraps=_karl_resolved_bootstraps_jl,
-karl_resolved_envelope_floor=_karl_resolved_envelope_floor_jl,
-karl_observables_csv=_karl_observables_csv_jl,
+resolved_kde_grid=_resolved_kde_grid_jl,
+resolved_kde_width_bins=_resolved_kde_width_bins_jl,
+resolved_vmin_kms=_resolved_vmin_kms_jl,
+resolved_vmax_kms=_resolved_vmax_kms_jl,
+resolved_bootstraps=_resolved_bootstraps_jl,
+resolved_envelope_floor=_resolved_envelope_floor_jl,
+observables_csv=_observables_csv_jl,
 alphat=_alphat_jl,
 apfac=_apfac_jl,
 light_rel_tol=_light_rel_tol_jl,
@@ -1363,7 +1365,7 @@ dynamic_admission=_dynamic_admission_jl,
 whole_model_admission=_whole_model_admission_jl,
 finishing_priority=_finishing_priority_jl,
 halo_q_axis_ratio=_halo_q_axis_ratio_jl,
-karl_halo_params=_karl_halo_params_jl,
+halo_params=_halo_params_jl,
 velocity_edges=_velocity_edges_jl,
 light_bin_edges=_light_bins_jl,
 kinematic_bin_edges=_kin_bins_jl
@@ -1466,7 +1468,7 @@ kinematic_bin_edges=_kin_bins_jl
                             light_sigma_tol=light_sigma_tol,
                             delta_chi2_iter_tol=delta_chi2_iter_tol,
                             halo_q_axis_ratio=halo_q_axis_ratio,
-                            karl_halo_params_active=bool(karl_halo_params),
+                            halo_params_active=bool(halo_params),
                             coverage_status=coverage_status,
                             coverage_strict=(coverage_status == "strict_pass"),
                             coverage_issue_region=coverage_issue_region,
