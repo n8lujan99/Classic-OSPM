@@ -96,6 +96,7 @@ def _build_general_defaults(local_debug):
 
         # Observable and solver policy
         "LOSVD_TARGET_MODE": "current",
+        "MAXITER": 1500,                 # Weight-solver iteration cap
         "OBSERVABLES": {
             "NVBIN": 21,
             "NTHETA_LAUNCH": 9,
@@ -118,7 +119,6 @@ def _build_general_defaults(local_debug):
             "KARL_LIGHT_SIGMA_TOL": 2.0,
             "KARL_DELTA_CHI2_ITER_TOL": 0.3,
 
-            "KARL_MAXITER": 1500,           #iters are cheap, so we can afford to be generous
 
             "ENTROPY_FLOOR": 1e-30,
             "HALO_Q_AXIS_RATIO": 1.0,
