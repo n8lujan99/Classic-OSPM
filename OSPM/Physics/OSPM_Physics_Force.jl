@@ -195,7 +195,7 @@ end
     geom  = Symbol(lowercase(String(get(sm, :geometry, :spherical_shell_grid))))
     if stype === :plummer
         return hash((stype, geom, get(sm, :Ltot, nothing), get(sm, :a_pc, nothing)))
-    elseif stype === :light_grid
+    elseif stype === :karl_light_grid
         return hash((stype, geom, get(sm, :grid_csv, nothing), get(sm, :Ltot, nothing), get(sm, :radius_col, nothing),
         get(sm, :theta_col, nothing), get(sm, :nu_col, nothing), get(sm, :lenc_frac_col, nothing), get(sm, :R_cyl_col, nothing),
         get(sm, :z_col, nothing), get(sm, :volume_col, nothing), get(sm, :luminosity_col, nothing), get(sm, :q_axis_ratio, nothing),
@@ -736,7 +736,7 @@ function _build_unit_stellar_component(stellar_model)
     stype = stellar_model_type(sm)
     geom = stellar_model_geometry(sm)
 
-    stype === :light_grid ||
+    stype === :karl_light_grid ||
         error("Unit stellar-component caching is only used for light_grid models")
 
     if geom === :axisymmetric_density_grid
@@ -785,7 +785,7 @@ end
 function prewarm_stellar_force_cache(stellar_model)
     stellar_model === nothing && return nothing
     sm = normalize_stellar_model(stellar_model)
-    stellar_model_type(sm) === :light_grid || return nothing
+    stellar_model_type(sm) === :karl_light_grid || return nothing
     _get_unit_stellar_component(sm)
     return nothing
 end
@@ -805,7 +805,7 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
     use_axisym_halo = halo[:type] !== :none && abs(halo_q - 1.0) > 1e-8
     halo_axis_table = nothing
     if has_stars
-        if stellar_type === :light_grid
+        if stellar_type === :karl_light_grid
             component = _get_unit_stellar_component(stellar_model)
             stellar_grid = component.grid
             stellar_axis_table = component.axis_table
@@ -846,7 +846,7 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
             Ltot = f64(stellar_model[:Ltot])
             a    = f64(stellar_model[:a_pc]) * pc
             return stellar_Menc_plummer(rr, ML, Ltot, a)
-        elseif stellar_type === :light_grid
+        elseif stellar_type === :karl_light_grid
             if stellar_geom === :axisymmetric_density_grid
                 error("Mstar_enc is not physically defined for axisymmetric_density_grid. Use force diagnostics instead.")
             end
@@ -863,7 +863,7 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
             Ltot = f64(stellar_model[:Ltot])
             a = f64(stellar_model[:a_pc]) * pc
             return stellar_Phi_plummer(rr, ML, Ltot, a)
-        elseif stellar_type === :light_grid
+        elseif stellar_type === :karl_light_grid
             if stellar_geom === :axisymmetric_density_grid
                 st, ct = _sincos_safe(theta)
                 Rf = rr * st
@@ -903,7 +903,7 @@ function make_potential_force_funcs(halo, R, nlegup, tabv, tabfr, Menc)
                 a    = f64(stellar_model[:a_pc]) * pc
                 Mst  = stellar_Menc_plummer(rr, ML, Ltot, a)
                 frst = -G * Mst / (rr * rr)
-            elseif stellar_type === :light_grid
+            elseif stellar_type === :karl_light_grid
                 if stellar_geom === :axisymmetric_density_grid
                     fr_unit, fth_unit =
                         stellar_force_axisymmetric_spherical(rr, f64(theta), stellar_axis_table)

@@ -6,7 +6,9 @@
 
 from pathlib import Path
 LOCAL_DEBUG = False
+RUN_MODE = "deterministic" # other mode is "ai"
 PROFILE_ROOT = Path(__file__).resolve().parent
+
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
 
@@ -38,6 +40,7 @@ VELOCITY_EDGES_MPS = [1.0e3 * (LOSVD_VMIN_KMS + i * (LOSVD_VMAX_KMS - LOSVD_VMIN
 CONFIG = {
     "LOCAL_DEBUG": LOCAL_DEBUG,
     "FIXED_THETA": FIXED_THETA,
+    "RUN_MODE" : RUN_MODE,
 
     # Halo and search space
     "HALO_TYPE": "nonsingular_isothermal",
@@ -46,8 +49,8 @@ CONFIG = {
     "INITIAL_THETA": INITIAL_THETA,
     "THETA_BOUNDS": [
         (0.0, 200.0),           # v0 [km/s] — dark-halo velocity scale
-        (1.0, 10000.0),         # r_c [pc] — dark-halo core radius
-        (0.0, 1e7),           # MBH [Msun] — central black-hole mass
+        (1.0, 100000.0),         # r_c [pc] — dark-halo core radius
+        (0.0, 1e6),           # MBH [Msun] — central black-hole mass
         (0.1, 20.0),          # M/L — stellar mass-to-light ratio
     ],
 
@@ -192,6 +195,6 @@ CONFIG = {
     "EVAL_VARIANTS": ["full"],
 
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_chi2_production1.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_chi2_TESTING1.csv"),
 
 }
