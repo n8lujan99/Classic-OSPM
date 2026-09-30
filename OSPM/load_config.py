@@ -112,7 +112,7 @@ def _build_general_defaults(local_debug):
             # Shared worker-pool policy. MODEL_OWNER_LIMIT=0 leaves the active
             # model count under Smart Run control. THREADS_PER_MODEL is the
             # maximum useful parallel width of one model, not a permanent CPU reservation.
-            "MODEL_OWNER_LIMIT": 3,
+            "MODEL_OWNER_LIMIT": 0,
             "THREADS_PER_MODEL": 10,
             "KARL_ALPHAT": 1,
             "KARL_LIGHT_REL_TOL": 0.01,
