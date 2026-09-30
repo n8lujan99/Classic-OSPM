@@ -778,7 +778,7 @@ def evaluate_batch_theta_julia(*, thetas, obs, halo_type, stellar_model=None, su
             R_inner_pc=_ospm_R_inner_pc, velocity_edges=_ospm_velocity_edges, light_bin_edges=_ospm_light_edges, kinematic_bin_edges=_ospm_kinematic_edges,
             Nvbin=_ospm_Nvbin, Ntheta_launch=_ospm_Ntheta_launch, halo_q_axis_ratio=_ospm_halo_q_axis_ratio, halo_params=_ospm_halo_params)""")
     
-    return tuple(np.asarray(value) for value in out)
+    return tuple(np.array(value, copy=True) for value in out)
 
 def force_at_rtheta_julia(*, r_m, theta_rad, theta, halo_type, stellar_model=None, halo_parameterization=None):
     if not USE_JULIA:

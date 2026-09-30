@@ -40,13 +40,6 @@ ML_MIN = 0.1
 ML_MAX = 5.0
 ML_STEPS = 50
 
-# Number of predetermined models handed to Julia at a time.
-#
-# This is NOT the number of models simultaneously occupying CPUs.
-# Julia Smart Run still determines actual concurrent model ownership
-# from the available local or SLURM CPU allocation.
-DETERMINISTIC_BATCH_SIZE = 90
-
 OUTPUT_CSV_NAME = "draco_karl_deterministic_v0_23_rc_100kpc_bh_ml_50x50.csv"
 
 
@@ -346,6 +339,10 @@ def run_deterministic(config, physics_engine):
 
     models = generate_theta_set()
 
+    batch_size = int(config["CHUNK_SIZE"])
+    if batch_size <= 0:
+        raise ValueError("CHUNK_SIZE must be positive")
+
     output_path = _output_path(config)
     completed_ids = _completed_model_ids(output_path)
 
@@ -360,7 +357,7 @@ def run_deterministic(config, physics_engine):
         f" total_models={len(models)}"
         f" already_completed={len(completed_ids)}"
         f" pending={len(pending_models)}"
-        f" batch_size={DETERMINISTIC_BATCH_SIZE}",
+        f" batch_size={batch_size}",
         flush=True,
     )
 
@@ -390,10 +387,10 @@ def run_deterministic(config, physics_engine):
     for batch_start in range(
         0,
         len(pending_models),
-        DETERMINISTIC_BATCH_SIZE,
+        batch_size,
     ):
         batch_models = pending_models[
-            batch_start:batch_start + DETERMINISTIC_BATCH_SIZE
+            batch_start:batch_start + batch_size
         ]
 
         theta_rows = np.asarray(

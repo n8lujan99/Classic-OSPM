@@ -188,7 +188,7 @@ CONFIG = {
     "MBH_ZERO_FRACTION": 0.10,
 
     # Draco-specific runtime overrides
-    "CHUNK_SIZE": 40,
+    "CHUNK_SIZE": 10,
     "CSV_FLUSH_INTERVAL": 10,
     "EVAL_TIMEOUT_S": 1200.0,
     "PEN_SPHERE_STRENGTH": 200,
