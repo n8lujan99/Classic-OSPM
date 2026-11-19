@@ -318,15 +318,15 @@ def _clean_stellar_model(model):
         else:
             out[k] = value
     out["type"] = str(out["type"]).strip().lower()
-    if out["type"] == "karl_light_grid":
-        out["type"] = "light_grid"
+    if out["type"] == "light_grid":
+        out["type"] = "karl_light_grid"
     if out["type"] == "plummer":
         for req in ("Ltot", "a_pc"):
             if req not in out:
                 raise KeyError(f"Plummer STELLAR_MODEL requires '{req}'")
         out["Ltot"] = float(out["Ltot"])
         out["a_pc"] = float(out["a_pc"])
-    elif out["type"] == "light_grid":
+    elif out["type"] == "karl_light_grid":
         geom = str(out.get("geometry", "spherical_shell_grid")).strip().lower()
         out["geometry"] = geom
         for req in ("grid_csv", "Ltot"):

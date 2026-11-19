@@ -6,30 +6,22 @@
 
 from pathlib import Path
 LOCAL_DEBUG = False
-RUN_MODE = "deterministic" # other mode is "ai"
+RUN_MODE = "ai"
 PROFILE_ROOT = Path(__file__).resolve().parent
-
 if not PROFILE_ROOT.exists():
     raise FileNotFoundError(f"PROFILE_ROOT does not exist: {PROFILE_ROOT}")
-
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
-#INITIAL_THETA =[125.0, 2500.0, 9e5, 0.1]   #chi2=50.96878484624525
-#INITIAL_THETA =[105.0, 2500.0, 9e5, 0.1]   #chi2=54.038629448232115
-#INITIAL_THETA =[125.0, 2000.0, 9e5, 0.1]   #chi2=52.832868341832125
-#INITIAL_THETA =[145.0, 2500.0, 9e5, 0.1]   #chi2=51.852738488872944
-#INITIAL_THETA =[125.0, 3000.0, 9e5, 0.1]   #chi2=54.02335605649053
-#INITIAL_THETA =[125.0, 2500.0, 5e5, 0.1]   #chi2=52.68490821212117
-#INITIAL_THETA =[125.0, 2500.0, 1.2e6, 0.1] #chi2=51.2566516576116
-INITIAL_THETA =[125.0, 2500.0, 1e6, 0.1]    #
-#INITIAL_THETA =[125.0, 2500.0, 8e5, 0.1]   #
-FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 
+# NEXT MANUAL RUNS
+INITIAL_THETA = [129.033756, 2311.794107, 1.011206e6, 0.1]
+
+
+FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 V_SYS_KMS = -291.68214888089926
 
 # Hard heliocentric velocity selection applied when constructing the Draco sample.
 LOSVD_SELECTION_VMIN_HELIO_KMS = -330.0
 LOSVD_SELECTION_VMAX_HELIO_KMS = -250.0
-
 # OSPM LOSVD velocities are systemic-centered, so transform the actual
 # observational selection boundaries into the model velocity frame.
 LOSVD_VMIN_KMS = LOSVD_SELECTION_VMIN_HELIO_KMS - V_SYS_KMS
@@ -48,10 +40,10 @@ CONFIG = {
     "PARAMETER_NAMES": ["v0", "r_c", "MBH", "ML"],
     "INITIAL_THETA": INITIAL_THETA,
     "THETA_BOUNDS": [
-        (0.0, 200.0),           # v0 [km/s] — dark-halo velocity scale
-        (1.0, 100000.0),         # r_c [pc] — dark-halo core radius
-        (0.0, 1e6),           # MBH [Msun] — central black-hole mass
-        (0.1, 20.0),          # M/L — stellar mass-to-light ratio
+        (0.0, 160.0),       # v0 [km/s]
+        (50.0, 3500.0),     # r_c [pc]
+        (0.0, 2e6),         # MBH [Msun]
+        (0.1, 6.0),         # M/L
     ],
 
     # Galaxy geometry
@@ -195,6 +187,6 @@ CONFIG = {
     "EVAL_VARIANTS": ["full"],
 
     # Run identity
-    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_chi2_TESTING1.csv"),
+    "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_chi2_RoV_production.csv"),
 
 }
