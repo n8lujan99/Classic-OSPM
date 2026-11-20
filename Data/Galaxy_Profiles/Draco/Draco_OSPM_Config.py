@@ -3,7 +3,6 @@
 # Galaxy-specific configuration only.
 # Shared solver, orbit-library, AI, deck, and runtime defaults come from OSPM/load_config.py.
 # ========================================================================================================================
-
 from pathlib import Path
 LOCAL_DEBUG = False
 RUN_MODE = "ai"
@@ -13,8 +12,8 @@ if not PROFILE_ROOT.exists():
 KARL_OBSERVABLES_CSV = PROFILE_ROOT / "Draco_karl_observables.csv"
 
 # NEXT MANUAL RUNS
-INITIAL_THETA = [129.033756, 2311.794107, 1.011206e6, 0.1]
-
+#INITIAL_THETA = [129.033756, 2311.794107, 1.011206e6, 0.1]
+INITIAL_THETA = [18.262955, 132.433577, 0.0, 1.379240]
 
 FIXED_THETA = INITIAL_THETA.copy() if LOCAL_DEBUG else None
 V_SYS_KMS = -291.68214888089926
@@ -28,12 +27,10 @@ LOSVD_VMIN_KMS = LOSVD_SELECTION_VMIN_HELIO_KMS - V_SYS_KMS
 LOSVD_VMAX_KMS = LOSVD_SELECTION_VMAX_HELIO_KMS - V_SYS_KMS
 LOSVD_NVBIN = 21
 VELOCITY_EDGES_MPS = [1.0e3 * (LOSVD_VMIN_KMS + i * (LOSVD_VMAX_KMS - LOSVD_VMIN_KMS) / LOSVD_NVBIN) for i in range(LOSVD_NVBIN + 1)]
-
 CONFIG = {
     "LOCAL_DEBUG": LOCAL_DEBUG,
     "FIXED_THETA": FIXED_THETA,
     "RUN_MODE" : RUN_MODE,
-
     # Halo and search space
     "HALO_TYPE": "nonsingular_isothermal",
     "HALO_PARAMETERIZATION": "v0_rc",
@@ -42,10 +39,9 @@ CONFIG = {
     "THETA_BOUNDS": [
         (0.0, 160.0),       # v0 [km/s]
         (50.0, 3500.0),     # r_c [pc]
-        (0.0, 2e6),         # MBH [Msun]
+        (0.0, 3e6),         # MBH [Msun]
         (0.1, 6.0),         # M/L
     ],
-
     # Galaxy geometry
     "RA0_DEG": 260.0517,
     "DEC0_DEG": 57.9153,
@@ -56,7 +52,6 @@ CONFIG = {
     "R_MAX_STARS_PC": 1500.0,
     "INCLINATION_DEG": 78.0,
     "V_SYS_KMS": V_SYS_KMS,
-
     # Intrinsic tracer constraint.
     # Keep the current force/tracer grids fixed while changing only the LOSVD representation.
     "TRACER_CONSTRAINT_MODE": "density_3d",
@@ -78,7 +73,6 @@ CONFIG = {
         "force_nphi": 32,
         "source": "Odenkirchen2001",
     },
-
     "DATA_PREP": {
         "surface_brightness": {
             "input_csv": str(PROFILE_ROOT / "Draco_surface_brightness_source.csv"),
@@ -104,7 +98,6 @@ CONFIG = {
         "abel_outer_transition_sigma": 5.0,
         "abel_outer_tail_points": 6,
     },
-
     # Draco data contract
     "STAR_R_COL": "r_pc",
     "STAR_V_COL": "vlos",
@@ -112,14 +105,11 @@ CONFIG = {
     "RA_COL": "ra",
     "DEC_COL": "dec",
     "VLOS_COL": "vlos",
-
     # Observed products
     "SURFACE_BRIGHTNESS_CSV": str(PROFILE_ROOT / "Draco_surface_brightness.csv"),
     "KINEMATIC_BINS_CSV": str(PROFILE_ROOT / "Draco_losvd_bins.csv"),
     "DATA_CSV": str(PROFILE_ROOT / "Draco_stars.csv"),
-
     # Active resolved-star LOSVD representation.
-    #
     # Patch 2 retains the radial x velocity LOSVD bins, but interprets
     # the observed hard counts with a multinomial likelihood. The Draco stellar
     # sample was constructed with an explicit heliocentric velocity cut of
@@ -130,13 +120,11 @@ CONFIG = {
     "LOSVD_CONDITIONING": "none",
     "KARL_DELTA_STATISTIC_ITER_TOL": 0.3,
     "KARL_OBSERVABLES_CSV": str(KARL_OBSERVABLES_CSV),
-
     # The 21 velocity bins span the actual sample-selection interval after
     # transforming the original heliocentric [-330,-250] km/s cut into the
     # systemic-centered velocity frame used internally by OSPM.
     "NVBIN": LOSVD_NVBIN,
     "VELOCITY_EDGES": VELOCITY_EDGES_MPS,
-
     # Retained for compatibility/legacy diagnostics. KDE/bootstrap smoothing
     # is not used by the active hard-count resolved-star likelihood.
     "KARL_RESOLVED_KDE_GRID": 17,
@@ -145,7 +133,6 @@ CONFIG = {
     "KARL_RESOLVED_VMAX_KMS": LOSVD_VMAX_KMS,
     "KARL_RESOLVED_BOOTSTRAPS": 300,
     "KARL_RESOLVED_ENVELOPE_FLOOR": 0.003,
-
     # Galaxy-specific inputs for OSPM/Data_Prep/build_karl_observables.py.
     # Existing Draco kinematic bins are the radial grid and aperture authority.
     # Resolved-star LOS velocities use no seeing convolution.
@@ -167,26 +154,17 @@ CONFIG = {
         "losvd_center_mode": "systemic",
         "losvd_shape": "gaussian",
     },
-
     # Draco needs the longer weight solve.
-    "MAXITER": 4000,
-    # Draco numerical domain
+    "MAXITER": 4000,           # Draco numerical domain
     "MIN_DISTANCE": 1e-6,
     "MAX_DISTANCE": 5e3,
-    "POTENTIAL_EXTENT": 10.0,
-
-    # Draco search behavior
+    "POTENTIAL_EXTENT": 10.0,  # Draco search behavior
     "MBH_LOG_FLOOR": 1.0e3,
-    "MBH_ZERO_FRACTION": 0.10,
-
-    # Draco-specific runtime overrides
+    "MBH_ZERO_FRACTION": 0.10, # Draco-specific runtime overrides
     "CHUNK_SIZE": 10,
     "CSV_FLUSH_INTERVAL": 10,
     "EVAL_TIMEOUT_S": 1200.0,
     "PEN_SPHERE_STRENGTH": 200,
-    "EVAL_VARIANTS": ["full"],
-
-    # Run identity
+    "EVAL_VARIANTS": ["full"], # Run identity
     "CSV_PATH": str(PROFILE_ROOT / "default" / "draco_chi2_RoV_production.csv"),
-
 }
