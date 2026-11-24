@@ -38,7 +38,7 @@ CONFIG = {
     "INITIAL_THETA": INITIAL_THETA,
     "THETA_BOUNDS": [
         (0.0, 160.0),       # v0 [km/s]
-        (50.0, 3500.0),     # r_c [pc]
+        (25.0, 3500.0),     # r_c [pc]
         (0.0, 3e6),         # MBH [Msun]
         (0.1, 6.0),         # M/L
     ],
